@@ -1,0 +1,271 @@
+name: Deploy (approval → int / qa / stage)
+
+# Approval-driven, deploy-then-merge for every PR-driven stage.
+#
+#   ctx      → decide the deploy may run + resolve PR context   (approval action)
+#   plan     → read config, resolve target env, delta baseline  (plan action)
+#   bypass   → is an admin `bypass` label active?               (bypass action)
+#   changes  → detect the deployable delta vs the target branch (changes action)
+#   guards   → no conflicts; chain order kept; validation green  (guard action)
+#   deploy   → REAL deploy to the org, then mark the merge gate  (deploy + gate)
+#   merge    → squash-merge the PR into the env branch           (merge-pr action)
+#   comment  → post the deploy report on the PR                  (report action)
+#
+# Only AFTER a successful deploy is the PR merged, so a branch never advances
+# ahead of a real deployment. The feature is deployed directly (no promotion
+# branch) — overlapping files deploy the feature's version; GitHub's squash
+# merge combines them in git and the merge-conflict guard blocks real conflicts.
+
+on:
+  workflow_call:
+    inputs:
+      manual_pr:
+        description: "Admin override: PR number to deploy+merge without a peer approval."
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: approval-deploy-${{ github.event.pull_request.number || inputs.manual_pr }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- Gate: approval review, admin `approved` label, or admin override -------
+  ctx:
+    if: ${{ github.event.review.state == 'approved' || github.event.label.name == 'approved' || inputs.manual_pr != '' }}
+    runs-on: ubuntu-latest
+    outputs:
+      proceed:   ${{ steps.a.outputs.proceed }}
+      pr_number: ${{ steps.a.outputs.pr_number }}
+      base_ref:  ${{ steps.a.outputs.base_ref }}
+      head_sha:  ${{ steps.a.outputs.head_sha }}
+      head_ref:  ${{ steps.a.outputs.head_ref }}
+      pr_title:  ${{ steps.a.outputs.pr_title }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: a
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/approval@main
+        with:
+          manual_pr: ${{ inputs.manual_pr }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- Read config + resolve the target environment + delta baseline ----------
+  plan:
+    needs: ctx
+    if: ${{ needs.ctx.outputs.proceed == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      source_path:        ${{ steps.cfg.outputs.source_path }}
+      api_version:        ${{ steps.cfg.outputs.api_version }}
+      node_version:       ${{ steps.cfg.outputs.node_version }}
+      delta_baseline:     ${{ steps.cfg.outputs.delta_baseline }}
+      eff_baseline:       ${{ steps.base.outputs.eff_baseline }}
+      q_apex_coverage:    ${{ steps.cfg.outputs.q_apex_coverage }}
+      coverage_threshold: ${{ steps.cfg.outputs.coverage_threshold }}
+      profiles_mode:      ${{ steps.cfg.outputs.profiles_mode }}
+      bypass_label:       ${{ steps.cfg.outputs.bypass_label }}
+      env_name:           ${{ steps.resolve.outputs.r_name }}
+      gh_environment:     ${{ steps.resolve.outputs.r_gh_environment }}
+      test_level:         ${{ steps.resolve.outputs.r_test_level }}
+      jira_status:        ${{ steps.resolve.outputs.r_jira_status }}
+      require_env:        ${{ steps.pd.outputs.r_require_env }}
+      is_entry:           ${{ steps.pd.outputs.r_is_entry }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with: { mode: outputs }
+      - id: resolve
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with: { mode: resolve, arg: "${{ needs.ctx.outputs.base_ref }}" }
+      - id: pd
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with: { mode: prdeploy, arg: "${{ steps.resolve.outputs.r_name }}" }
+      # delta_baseline=target → diff against the PR's target env branch.
+      - id: base
+        env:
+          DELTA_BASELINE: ${{ steps.cfg.outputs.delta_baseline }}
+          TARGET_BRANCH: ${{ needs.ctx.outputs.base_ref }}
+          PROD_BASELINE: ${{ steps.cfg.outputs.baseline_branch }}
+        run: |
+          [ "${DELTA_BASELINE:-prod}" = "target" ] && EFF="$TARGET_BRANCH" || EFF="$PROD_BASELINE"
+          echo "eff_baseline=$EFF" >> "$GITHUB_OUTPUT"
+          echo "delta_baseline='${DELTA_BASELINE:-prod}' -> diff against origin/$EFF"
+
+  # ---- Admin bypass label (skips validation/coverage gates) -------------------
+  bypass:
+    needs: [ctx, plan]
+    runs-on: ubuntu-latest
+    outputs:
+      active: ${{ steps.b.outputs.active }}
+    steps:
+      - id: b
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/bypass@main
+        with:
+          pr_number: ${{ needs.ctx.outputs.pr_number }}
+          bypass_label: ${{ needs.plan.outputs.bypass_label }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- Detect the deployable delta (feature's own changes vs the target) ------
+  changes:
+    needs: [ctx, plan]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.delta.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.ctx.outputs.head_sha }}
+          fetch-depth: 0
+      - id: delta
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/changes@main
+        with:
+          node_version: ${{ needs.plan.outputs.node_version }}
+          baseline_branch: ${{ needs.plan.outputs.eff_baseline }}
+          api_version: ${{ needs.plan.outputs.api_version }}
+          compare_branch: ${{ needs.ctx.outputs.base_ref }}
+          delta_merge_base: "true"
+
+  # ---- Pre-deploy guards: conflicts, chain order, validation ------------------
+  guards:
+    needs: [ctx, plan, bypass]
+    if: ${{ needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      deployments: read
+      statuses: read
+    steps:
+      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/guard@main
+        with:
+          pr_number: ${{ needs.ctx.outputs.pr_number }}
+          base_ref: ${{ needs.ctx.outputs.base_ref }}
+          head_sha: ${{ needs.ctx.outputs.head_sha }}
+          env_name: ${{ needs.plan.outputs.env_name }}
+          require_env: ${{ needs.plan.outputs.require_env }}
+          is_entry: ${{ needs.plan.outputs.is_entry }}
+          bypass_active: ${{ needs.bypass.outputs.active }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- REAL deploy to the org, then open the merge gate -----------------------
+  deploy:
+    needs: [ctx, plan, changes, bypass, guards]
+    if: ${{ always() && needs.plan.result == 'success' && needs.changes.result == 'success' && needs.guards.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: ${{ needs.plan.outputs.gh_environment }}
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+      deployments: write
+    outputs:
+      has_changes: ${{ steps.deploy.outputs.has_changes }}
+      outcome: ${{ steps.deploy.outputs.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.ctx.outputs.head_sha }}
+          fetch-depth: 0
+      - id: deploy
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/deploy@main
+        with:
+          environment: ${{ needs.plan.outputs.env_name }}
+          ref: ${{ needs.ctx.outputs.head_sha }}
+          check_only: "false"
+          test_level: ${{ needs.plan.outputs.test_level }}
+          manifest_title: "Deploy"
+          baseline_branch: ${{ needs.plan.outputs.eff_baseline }}
+          delta_merge_base: "true"
+          source_path: ${{ needs.plan.outputs.source_path }}
+          api_version: ${{ needs.plan.outputs.api_version }}
+          node_version: ${{ needs.plan.outputs.node_version }}
+          coverage_gate: ${{ needs.plan.outputs.test_level == 'NoTestRun' && 'false' || needs.plan.outputs.q_apex_coverage }}
+          coverage_threshold: ${{ needs.plan.outputs.coverage_threshold }}
+          profiles_mode: ${{ needs.plan.outputs.profiles_mode }}
+          bypass: ${{ needs.bypass.outputs.active }}
+          sf_consumer_key: ${{ secrets.SF_CONSUMER_KEY }}
+          sf_username: ${{ secrets.SF_USERNAME }}
+          sf_instance_url: ${{ secrets.SF_INSTANCE_URL }}
+          sf_jwt_key: ${{ secrets.SF_JWT_KEY }}
+      - name: Update Jira story
+        if: ${{ success() }}
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/jira@main
+        with:
+          environment: ${{ needs.plan.outputs.env_name }}
+          status: ${{ needs.plan.outputs.jira_status }}
+          ref: ${{ needs.ctx.outputs.pr_title }} ${{ needs.ctx.outputs.head_ref }}
+          run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+      - name: Mark deploy gate green (unlocks merge)
+        if: ${{ success() && steps.deploy.outcome == 'success' }}
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/status@main
+        with:
+          sha: ${{ needs.ctx.outputs.head_sha }}
+          context: deploy-${{ needs.plan.outputs.env_name }}
+          state: success
+          description: Deployed ${{ needs.ctx.outputs.head_sha }} to ${{ needs.plan.outputs.env_name }} — merge unlocked
+          environment: ${{ needs.plan.outputs.env_name }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- Squash-merge the PR into the env branch after a successful deploy -------
+  merge:
+    needs: [ctx, plan, deploy]
+    if: ${{ needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/merge-pr@main
+        with:
+          pr_number: ${{ needs.ctx.outputs.pr_number }}
+          base_ref: ${{ needs.ctx.outputs.base_ref }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Stamp the durable status label `deployed:<env>` and clear the working
+      # trigger labels (`approved`, `deploy:<env>`) so the PR reflects where the
+      # change actually reached. `deployed:stage` is what the release train reads.
+      - name: Stamp deployed:<env> + clear working labels
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.ctx.outputs.pr_number }}
+          ENVN: ${{ needs.plan.outputs.env_name }}
+        run: |
+          set -uo pipefail
+          gh label create "deployed:$ENVN" --repo "$REPO" --color 0e8a16 \
+            --description "Deployed to $ENVN" >/dev/null 2>&1 || true
+          gh pr edit "$PR" --repo "$REPO" --add-label "deployed:$ENVN" >/dev/null 2>&1 \
+            && echo "Labeled PR #$PR deployed:$ENVN." \
+            || echo "::notice::Could not add deployed:$ENVN to #$PR."
+          for l in approved "deploy:$ENVN"; do
+            gh api -X DELETE "repos/$REPO/issues/$PR/labels/$l" >/dev/null 2>&1 || true
+          done
+
+  # ---- Post the unified deploy report on the PR -------------------------------
+  comment:
+    needs: [plan, changes, bypass, deploy]
+    if: ${{ always() && needs.plan.result == 'success' && (github.event_name == 'pull_request_review' || github.event_name == 'pull_request') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/report@main
+        with:
+          environment: ${{ needs.plan.outputs.env_name }}
+          phase: deploy
+          bypass: ${{ needs.bypass.outputs.active }}
+          validate_result: ${{ needs.deploy.result }}
+          has_changes: ${{ needs.changes.outputs.has_changes }}
+          deploy_outcome: ${{ needs.deploy.outputs.outcome }}

@@ -1,0 +1,111 @@
+name: "SF Pipeline Release Gather"
+description: >-
+  Resolve the set of story branches for a weekly release from the pipeline's own
+  deployment state — NO Jira required. Gathers every OPEN pull request that has
+  been promoted all the way to stage (label `deployed:stage`) and is targeting the
+  production baseline branch, then emits the space-separated list of their head
+  branches. A PR can opt OUT of the release by adding the `hold` label. Merged or
+  closed PRs drop out naturally. Fails fast with a readable message when nothing
+  qualifies.
+
+inputs:
+  label:
+    description: "PR label that marks a branch as ready for release (fully promoted to stage)."
+    required: false
+    default: "deployed:stage"
+  exclude_label:
+    description: "PRs carrying this label are held back from the release."
+    required: false
+    default: "hold"
+  base:
+    description: "Only gather PRs whose base branch is this (the production baseline). Empty = any base."
+    required: false
+    default: ""
+  repo:
+    description: "owner/repo to query. Defaults to the current repository."
+    required: false
+    default: ""
+  github_token:
+    description: "Token used to query PRs."
+    required: false
+    default: ""
+
+outputs:
+  stories:
+    description: "Space-separated feature branch names to include in the release."
+    value: ${{ steps.gather.outputs.stories }}
+  keys:
+    description: "Space-separated PR numbers gathered for the release."
+    value: ${{ steps.gather.outputs.keys }}
+
+runs:
+  using: composite
+  steps:
+    - id: gather
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        LABEL: ${{ inputs.label }}
+        EXCLUDE_LABEL: ${{ inputs.exclude_label }}
+        BASE: ${{ inputs.base }}
+        REPO: ${{ inputs.repo }}
+      run: |
+        set -euo pipefail
+        [ -n "$REPO" ] || REPO="$GITHUB_REPOSITORY"
+        [ -n "${GH_TOKEN:-}" ] || GH_TOKEN="${GITHUB_TOKEN:-}"
+        export GH_TOKEN
+
+        echo "::group::Gathering release stories (merged PRs labeled '$LABEL', base='${BASE:-any}', excluding '$EXCLUDE_LABEL')"
+
+        BASE_ARGS=()
+        [ -n "$BASE" ] && BASE_ARGS=(--base "$BASE")
+
+        # One query for every MERGED PR carrying the release label; then locally
+        # drop any that also carry the exclude/hold label. Stage promotion PRs are
+        # squash-merged into the stage branch once their deploy succeeds, so the
+        # release set is the collection of MERGED PRs labeled `deployed:stage`.
+        # jq keeps branch + number aligned and stable (sorted by PR number).
+        RAW="$(gh pr list --repo "$REPO" --state merged --label "$LABEL" "${BASE_ARGS[@]}" \
+                 --json number,headRefName,labels --limit 200 \
+                 --jq "[.[] | select([.labels[].name] | index(\"$EXCLUDE_LABEL\") | not)] | sort_by(.number)")"
+
+        STORIES="$(echo "$RAW" | python3 -c 'import sys,json;print(" ".join(p["headRefName"] for p in json.load(sys.stdin)))')"
+        KEYS="$(echo "$RAW"    | python3 -c 'import sys,json;print(" ".join(str(p["number"]) for p in json.load(sys.stdin)))')"
+
+        echo "PRs: ${KEYS:-<none>}"
+        echo "$RAW" | python3 -c 'import sys,json; [print("  ok #%s -> %s" % (p["number"], p["headRefName"])) for p in json.load(sys.stdin)]'
+        echo "::endgroup::"
+
+        if [ -z "$STORIES" ]; then
+          echo "::error::No merged PRs are labeled '$LABEL'${BASE:+ (base $BASE)}. Promote at least one branch to stage (its stage PR gets '$LABEL' and merges automatically), or remove a '$EXCLUDE_LABEL' hold, then re-run."
+          exit 1
+        fi
+
+        # A gathered PR whose head branch no longer exists on origin was already
+        # shipped in a PRIOR release and its feature branch cleaned up — it should
+        # drop out of the set, NOT fail the whole release. (Merged PRs keep their
+        # `deployed:stage` label forever, so without this every past release keeps
+        # re-appearing here and aborts once its branch is deleted.) Skip the missing
+        # ones with a notice and rebuild the aligned STORIES/KEYS from the
+        # survivors; only fail if nothing live remains.
+        git fetch origin --prune --quiet || true
+        LIVE=""
+        for s in $STORIES; do
+          if git ls-remote --exit-code --heads origin "$s" >/dev/null 2>&1; then
+            LIVE="$LIVE $s"
+          else
+            echo "::notice::Skipping '$s' — its branch no longer exists on origin (already released / cleaned up)."
+          fi
+        done
+        LIVE="$(echo "$LIVE" | xargs || true)"
+        RAW="$(echo "$RAW" | LIVE="$LIVE" python3 -c 'import os,sys,json; live=set(os.environ["LIVE"].split()); print(json.dumps([p for p in json.load(sys.stdin) if p["headRefName"] in live]))')"
+        STORIES="$(echo "$RAW" | python3 -c 'import sys,json;print(" ".join(p["headRefName"] for p in json.load(sys.stdin)))')"
+        KEYS="$(echo "$RAW"    | python3 -c 'import sys,json;print(" ".join(str(p["number"]) for p in json.load(sys.stdin)))')"
+        if [ -z "$STORIES" ]; then
+          echo "::error::No live release branches remain after skipping already-shipped ones. Promote at least one branch to stage (its stage PR gets '$LABEL' and merges automatically), then re-run."
+          exit 1
+        fi
+
+        echo "stories=$STORIES" >> "$GITHUB_OUTPUT"
+        echo "keys=$KEYS" >> "$GITHUB_OUTPUT"
+        echo "Resolved release stories: $STORIES"

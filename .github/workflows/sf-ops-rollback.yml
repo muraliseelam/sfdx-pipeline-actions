@@ -1,0 +1,134 @@
+name: Ops — Rollback (revert + redeploy)
+
+# REQ-005.2 / REQ-016 — Revert previously deployed changes and restore the last
+# known-good state.
+#
+# This creates a REVERT of the target change on a fresh branch and opens a pull
+# request into the chosen base branch. The revert then flows through the SAME
+# gated pipeline (validation → approval → real deploy → merge), so the rollback
+# is validated, reviewed and audited exactly like any other change — nothing is
+# force-deployed behind the pipeline's back.
+#
+# Target the change either by commit SHA (`ref`) or by merged PR number
+# (`pr_number`). For a merge commit the first parent (-m 1) is used.
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: "Merged PR number to revert (leave blank to use ref)"
+        required: false
+        type: string
+        default: ""
+      ref:
+        description: "Commit SHA to revert (used when pr_number is blank)"
+        required: false
+        type: string
+        default: ""
+      base:
+        description: "Branch to revert on (default: pipeline entry branch)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: rollback-${{ inputs.pr_number || inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  revert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve config
+        id: cfg
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with:
+          mode: outputs
+
+      - name: Create the revert branch + PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REF_IN: ${{ inputs.ref }}
+          BASE_IN: ${{ inputs.base }}
+          ENTRY: ${{ steps.cfg.outputs.entry_branch }}
+        run: |
+          set -euo pipefail
+
+          BASE="${BASE_IN:-$ENTRY}"
+          git config user.name  "sf-release-bot"
+          git config user.email "sf-release-bot@users.noreply.github.com"
+          git fetch origin --prune --no-tags
+
+          if ! git ls-remote --exit-code --heads origin "$BASE" >/dev/null 2>&1; then
+            echo "::error::Base branch '$BASE' does not exist."; exit 1
+          fi
+
+          # Resolve the commit to revert.
+          if [ -n "$PR_NUMBER" ]; then
+            SHA="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.merge_commit_sha')"
+            if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
+              echo "::error::PR #$PR_NUMBER has no merge commit (not merged?)."; exit 1
+            fi
+            SRC_DESC="PR #$PR_NUMBER"
+          elif [ -n "$REF_IN" ]; then
+            SHA="$REF_IN"
+            SRC_DESC="commit ${SHA:0:8}"
+          else
+            echo "::error::Provide either pr_number or ref."; exit 1
+          fi
+
+          git fetch origin "$SHA" >/dev/null 2>&1 || true
+          if ! git cat-file -e "${SHA}^{commit}" 2>/dev/null; then
+            echo "::error::Commit $SHA not found."; exit 1
+          fi
+
+          # Is it a merge commit? If so revert the first parent.
+          PARENTS="$(git rev-list --parents -n 1 "$SHA" | wc -w)"
+          MFLAG=""
+          if [ "$PARENTS" -ge 3 ]; then MFLAG="-m 1"; fi
+
+          SHORT="${SHA:0:8}"
+          BRANCH="rollback/${SHORT}"
+          git checkout -B "$BRANCH" "origin/$BASE"
+
+          if ! git revert --no-edit $MFLAG "$SHA"; then
+            echo "::error::Revert of $SHA hit conflicts against '$BASE'. Resolve manually:"
+            echo "  git checkout -B $BRANCH origin/$BASE && git revert $MFLAG $SHA"
+            git revert --abort || true
+            exit 1
+          fi
+
+          git push origin "$BRANCH" --force-with-lease
+
+          TITLE="Rollback: revert $SRC_DESC"
+          BODY="$(printf 'Automated rollback (REQ-016). Reverts `%s` (%s) on top of `%s`.\n\nThis revert flows through the standard pipeline: validation -> approval -> real deploy -> merge. Approve to restore the last known-good state.' "$SHA" "$SRC_DESC" "$BASE")"
+
+          # The org may block Actions from opening PRs; fall back to a one-click link.
+          if PR_URL="$(gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" --title "$TITLE" --body "$BODY" 2>/tmp/prerr)"; then
+            PR_LINE="- PR: $PR_URL"
+          else
+            echo "::warning::Could not auto-open PR ($(tr -d '\n' </tmp/prerr)). The revert branch is pushed — open the PR with the link below."
+            PR_URL="$GITHUB_SERVER_URL/$REPO/compare/$BASE...$BRANCH?expand=1"
+            PR_LINE="- Open PR (one click): $PR_URL"
+          fi
+
+          {
+            echo "### ⏪ Rollback PR opened"
+            echo ""
+            echo "- Reverting: \`$SHA\` ($SRC_DESC)"
+            echo "- Base: \`$BASE\`"
+            echo "- Revert branch: \`$BRANCH\`"
+            echo "$PR_LINE"
+            echo ""
+            echo "Approve the PR to validate + deploy the rollback through the pipeline."
+          } >> "$GITHUB_STEP_SUMMARY"

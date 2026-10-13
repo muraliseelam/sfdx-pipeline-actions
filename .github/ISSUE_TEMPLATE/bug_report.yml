@@ -1,0 +1,60 @@
+name: Bug report
+description: Something in the pipeline behaves incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not paste secrets, private org identifiers, or full workflow
+        logs without redacting them first.
+
+  - type: input
+    id: version
+    attributes:
+      label: Pipeline ref
+      description: Which ref does your caller workflow pin?
+      placeholder: "v1.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - PR validation
+        - Deploy / promotion
+        - Production release
+        - Ops runbooks (recreate / redeploy / rollback)
+        - Org bootstrap
+        - Notifications
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the failing step and the error message.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant pipeline.config.yml
+      description: The section that drives the behaviour. Redact org names.
+      render: yaml
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else

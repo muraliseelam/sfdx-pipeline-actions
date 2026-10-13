@@ -1,0 +1,413 @@
+name: "SF Deploy (one org)"
+description: >-
+  Authenticate to one Salesforce org via JWT, compute the delta vs the baseline
+  branch, publish the component manifest, and validate / deploy / quick-deploy it.
+  Config-driven and org-agnostic — the caller passes the environment + secrets.
+
+inputs:
+  environment:
+    description: "Org alias / logical environment name (e.g. int, qa, prod)"
+    required: true
+  ref:
+    description: "Git ref (branch/sha) already checked out by the caller"
+    required: true
+  check_only:
+    description: "true = validate only (no real deploy)"
+    required: false
+    default: "false"
+  quick_deploy_id:
+    description: "A previously validated deploy id to quick-deploy"
+    required: false
+    default: ""
+  test_level:
+    description: "NoTestRun|RunSpecifiedTests|RunLocalTests|RunAllTestsInOrg"
+    required: false
+    default: "RunSpecifiedTests"
+  manifest_title:
+    description: "Heading used for the component manifest summary"
+    required: false
+    default: "Deployment"
+  baseline_branch:
+    description: "Branch the delta is computed against (production baseline)"
+    required: true
+  delta_merge_base:
+    description: >-
+      When 'true', compute the delta against the MERGE-BASE of baseline_branch and
+      HEAD (three-dot) instead of the baseline tip. Required for diff-vs-target
+      baselines so a drifted target env doesn't produce spurious deletions.
+    required: false
+    default: "false"
+  source_path:
+    description: "Root of the Salesforce metadata (sfdx format)"
+    required: false
+    default: "force-app"
+  api_version:
+    description: "Metadata API version for the delta package"
+    required: false
+    default: "66.0"
+  node_version:
+    description: "Node version for the Salesforce CLI"
+    required: false
+    default: "22"
+  coverage_gate:
+    description: "true = enforce the Apex coverage threshold when Apex changed"
+    required: false
+    default: "false"
+  coverage_threshold:
+    description: "Minimum aggregate Apex code coverage percent"
+    required: false
+    default: "75"
+  profiles_mode:
+    description: "full | incremental — how Profiles/Permission Sets are deployed (REQ-006)"
+    required: false
+    default: "full"
+  bypass:
+    description: "true = admin bypass; skip tests + coverage enforcement"
+    required: false
+    default: "false"
+  destructive_test_names:
+    description: >-
+      Comma-separated canary test class(es) to run for a PRODUCTION destructive /
+      no-Apex deploy. Production forbids NoTestRun for Apex deletions; specifying a
+      stable passing test satisfies the platform without running the whole (possibly
+      red) org suite. Blank = fall back to RunLocalTests.
+    required: false
+    default: ""
+  sf_consumer_key:
+    description: "Connected app consumer key"
+    required: true
+  sf_username:
+    description: "Integration username"
+    required: true
+  sf_instance_url:
+    description: "Login / My Domain URL"
+    required: false
+    default: ""
+  sf_jwt_key:
+    description: "base64-encoded server.key"
+    required: true
+
+outputs:
+  deploy_id:
+    description: "The Salesforce deploy job id (for later quick-deploy)"
+    value: ${{ steps.run.outputs.deploy_id }}
+  has_changes:
+    description: "Whether the delta contained deployable changes"
+    value: ${{ steps.delta.outputs.has_changes }}
+  outcome:
+    description: "success | failure | no_changes"
+    value: ${{ steps.report.outputs.status }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node_version }}
+
+    - name: Install Salesforce CLI + sfdx-git-delta
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/../scripts/install-sf.sh"
+
+    - name: Authenticate to ${{ inputs.environment }}
+      shell: bash
+      env:
+        SF_CONSUMER_KEY: ${{ inputs.sf_consumer_key }}
+        SF_USERNAME: ${{ inputs.sf_username }}
+        SF_INSTANCE_URL: ${{ inputs.sf_instance_url }}
+        SF_JWT_KEY: ${{ inputs.sf_jwt_key }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/auth-jwt.sh" "${{ inputs.environment }}"
+
+    - name: Compute delta vs ${{ inputs.baseline_branch }}
+      id: delta
+      shell: bash
+      env:
+        DELTA_FROM: origin/${{ inputs.baseline_branch }}
+        DELTA_TO: HEAD
+        DELTA_OUTPUT: .sgd
+        DELTA_MERGE_BASE: ${{ inputs.delta_merge_base }}
+        SF_API_VERSION: ${{ inputs.api_version }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/delta.sh"
+
+    - name: Detect Apex in the delta
+      id: scope
+      if: steps.delta.outputs.has_changes == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        PKG=".sgd/package/package.xml"
+        DSTR=".sgd/destructiveChanges/destructiveChanges.xml"
+        HAS_APEX="false"
+        APEX_DESTRUCTIVE="false"
+        if [ -f "$PKG" ] && grep -Eq "<name>(ApexClass|ApexTrigger)</name>" "$PKG"; then
+          HAS_APEX="true"
+        fi
+        # Apex can also be DELETED (destructive-only). The additive package is then
+        # empty, but Apex is still involved — production forbids NoTestRun for that.
+        if [ -f "$DSTR" ] && grep -Eq "<name>(ApexClass|ApexTrigger)</name>" "$DSTR"; then
+          APEX_DESTRUCTIVE="true"
+        fi
+        echo "Delta contains Apex (additive): $HAS_APEX; Apex deletions: $APEX_DESTRUCTIVE"
+        echo "has_apex=$HAS_APEX" >> "$GITHUB_OUTPUT"
+        echo "apex_destructive=$APEX_DESTRUCTIVE" >> "$GITHUB_OUTPUT"
+
+    - name: Dependency lint (destructive safety)
+      if: steps.delta.outputs.has_changes == 'true'
+      shell: bash
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../scripts/dependency_lint.py" \
+          --dir .sgd \
+          --source-root "${{ inputs.source_path }}" \
+          --baseline "origin/${{ inputs.baseline_branch }}"
+
+    - name: Render component manifest
+      if: steps.delta.outputs.has_changes == 'true'
+      shell: bash
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../scripts/manifest_to_md.py" \
+          --dir .sgd \
+          --title "${{ inputs.manifest_title }} — ${{ inputs.environment }}" \
+          --out manifest-${{ inputs.environment }}.md
+
+    - name: Upload manifest artifact
+      if: steps.delta.outputs.has_changes == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: manifest-${{ inputs.environment }}
+        path: |
+          manifest-${{ inputs.environment }}.md
+          .sgd/package/package.xml
+          .sgd/destructiveChanges/destructiveChanges.xml
+        if-no-files-found: ignore
+
+    - name: Resolve specified tests
+      id: tests
+      if: steps.delta.outputs.has_changes == 'true'
+      shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/../scripts/specified_tests.py" --dir .sgd --source-root "${{ inputs.source_path }}"
+
+    - name: Apply Profile / Permission Set mode (REQ-006)
+      if: steps.delta.outputs.has_changes == 'true'
+      shell: bash
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../scripts/profiles.py" \
+          --package .sgd/package/package.xml \
+          --source-root "${{ inputs.source_path }}" \
+          --mode "${{ inputs.profiles_mode }}" \
+          --baseline "origin/${{ inputs.baseline_branch }}"
+
+    - name: Deploy / validate / quick-deploy
+      id: run
+      if: steps.delta.outputs.has_changes == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        ALIAS="${{ inputs.environment }}"
+        CHECK="${{ inputs.check_only }}"
+        QUICK_ID="${{ inputs.quick_deploy_id }}"
+        REQUESTED_LEVEL="${{ inputs.test_level }}"
+        RESOLVED_LEVEL="${{ steps.tests.outputs.test_level }}"
+        TESTS="${{ steps.tests.outputs.tests }}"
+        HAS_APEX="${{ steps.scope.outputs.has_apex }}"
+        APEX_DESTRUCTIVE="${{ steps.scope.outputs.apex_destructive }}"
+        BYPASS="${{ inputs.bypass }}"
+        CANARY_TESTS="${{ inputs.destructive_test_names }}"
+
+        # Quick-deploy path: promote a previously validated deployment.
+        if [ -n "$QUICK_ID" ]; then
+          echo "Quick-deploying validated job $QUICK_ID to $ALIAS"
+          sf project deploy quick --job-id "$QUICK_ID" --target-org "$ALIAS" --wait 120
+          echo "deploy_id=$QUICK_ID" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Admin bypass: skip Apex tests entirely (also skips the coverage gate).
+        if [ "$BYPASS" = "true" ]; then
+          echo "::warning::Admin bypass — deploying to $ALIAS with NoTestRun (coverage gate skipped)."
+          LEVEL="NoTestRun"
+          TESTS=""
+        else
+          # Choose the effective test level.
+          LEVEL="$REQUESTED_LEVEL"
+          if [ "$LEVEL" = "RunSpecifiedTests" ]; then
+            if [ -n "$TESTS" ]; then
+              LEVEL="RunSpecifiedTests"
+            elif [ "$HAS_APEX" != "true" ]; then
+              # No ADDITIVE Apex. Two sub-cases decide whether tests are required:
+              #   * config-only (no Apex added AND none deleted) — a pure metadata
+              #     change needs no Apex tests ANYWHERE, production included.
+              #   * Apex DELETION (destructive) — production forbids NoTestRun when
+              #     Apex is involved, so prod must run test(s); sandboxes may skip.
+              case "$ALIAS" in
+                prod|prod-validate|prod-*)
+                  if [ "$APEX_DESTRUCTIVE" = "true" ]; then
+                    if [ -n "$CANARY_TESTS" ]; then
+                      echo "Apex deletion targeting production ($ALIAS) — RunSpecifiedTests with canary: $CANARY_TESTS"
+                      LEVEL="RunSpecifiedTests"
+                      TESTS="$CANARY_TESTS"
+                    else
+                      echo "Apex deletion targeting production ($ALIAS) — using RunLocalTests."
+                      LEVEL="RunLocalTests"
+                    fi
+                  else
+                    echo "Config-only change (no Apex added or deleted), production ($ALIAS) — using NoTestRun."
+                    LEVEL="NoTestRun"
+                  fi ;;
+                *)
+                  echo "No Apex in the delta — using NoTestRun."
+                  LEVEL="NoTestRun" ;;
+              esac
+            else
+              # RunSpecifiedTests was requested and the delta DOES contain Apex,
+              # but no test class could be resolved for the changed Apex. Do NOT
+              # silently fall back to RunLocalTests — the whole-org suite is slow
+              # and fails on unrelated pre-existing red tests, masking the real
+              # problem. Fail fast with actionable guidance so the developer adds
+              # or renames a matching test class.
+              UNTESTED="${{ steps.tests.outputs.untested }}"
+              [ -n "$UNTESTED" ] || UNTESTED="the changed Apex class(es)"
+              MSG="No Apex test could be resolved for: ${UNTESTED}. RunSpecifiedTests requires each changed Apex class to have a matching test class named <Class>Test (also accepted: Test<Class>, <Class>_Test, <Class>Tests). Add or rename the test class so its name ends in 'Test', then push again. The pipeline will not fall back to running the whole org test suite."
+              echo "::error::${MSG}"
+              # Write a synthetic failure result so the PR report renders this
+              # message in its 'Validation failed' section (deploy_report.py reads
+              # the top-level 'message' when there are no structured SF failures).
+              DEPLOY_MSG="$MSG" python3 -c 'import json,os; json.dump({"status":1,"result":{},"message":os.environ["DEPLOY_MSG"]}, open("deploy-result.json","w"))'
+              exit 1
+            fi
+          fi
+        fi
+
+        # Skip the check-only ORG validation for a no-Apex delta (destructive-only or
+        # metadata-only, LEVEL=NoTestRun). `sf project deploy validate` does NOT accept
+        # NoTestRun and, when a test level is omitted, DEFAULTS to RunLocalTests — i.e.
+        # the entire org test suite — which is irrelevant to a no-Apex change and not
+        # viable in an org with pre-existing failing tests. The delta manifest still
+        # documents the PR, and the real deploy on merge runs `deploy start --test-level
+        # NoTestRun`, which sandboxes accept for destructive/metadata-only changes.
+        if [ "$CHECK" = "true" ] && [ "$LEVEL" = "NoTestRun" ]; then
+          echo "No Apex in the delta — skipping check-only org validation (nothing to test)."
+          echo '{"status":0,"result":{"id":"","success":true,"skipped":"no-apex-validate"}}' > deploy-result.json
+          echo "deploy_id=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        ARGS=(project deploy
+              --manifest .sgd/package/package.xml
+              --target-org "$ALIAS"
+              --wait 180
+              --verbose
+              --json)
+
+        # `validate` produces a quick-deployable validation id; `start` really deploys.
+        # By here, a check-only run always has a real Run*Tests level (the NoTestRun
+        # case is handled by the skip guard above), so --test-level is always valid.
+        if [ "$CHECK" = "true" ]; then
+          ARGS=(project deploy validate "${ARGS[@]:2}" --test-level "$LEVEL")
+          echo "Validation-only deploy to $ALIAS (test level $LEVEL)"
+        else
+          ARGS=(project deploy start "${ARGS[@]:2}" --ignore-conflicts --test-level "$LEVEL")
+          echo "Deploying to $ALIAS (test level $LEVEL)"
+        fi
+
+        if [ -f .sgd/destructiveChanges/destructiveChanges.xml ] && grep -q "<types>" .sgd/destructiveChanges/destructiveChanges.xml; then
+          ARGS+=(--post-destructive-changes .sgd/destructiveChanges/destructiveChanges.xml)
+        fi
+
+        if [ "$LEVEL" = "RunSpecifiedTests" ] && [ -n "$TESTS" ]; then
+          IFS=',' read -ra T <<< "$TESTS"
+          for t in "${T[@]}"; do ARGS+=(--tests "$t"); done
+        fi
+
+        set +e
+        sf "${ARGS[@]}" > deploy-result.json
+        STATUS=$?
+        set -e
+        cat deploy-result.json | python3 -c "import sys,json; d=json.load(sys.stdin); r=(d.get('result') or d.get('data') or {}); print('deploy_id=%s'%r.get('id',''))" >> "$GITHUB_OUTPUT" || true
+        if [ $STATUS -ne 0 ]; then
+          echo "::error::Deployment/validation to $ALIAS failed — see the PR comment / job summary for the specific errors."
+          exit $STATUS
+        fi
+
+    - name: Apex coverage gate
+      id: coverage
+      if: ${{ inputs.coverage_gate == 'true' && inputs.bypass != 'true' && steps.scope.outputs.has_apex == 'true' && steps.run.outcome == 'success' }}
+      shell: bash
+      env:
+        COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: python3 "$GITHUB_ACTION_PATH/../coverage/coverage-gate.py"
+
+    # ---- Turn the SF result into a readable report + upload it ---------------
+    - name: Build deployment report
+      id: report
+      if: ${{ always() && steps.delta.conclusion == 'success' }}
+      shell: bash
+      run: |
+        set -uo pipefail
+        if [ "${{ steps.delta.outputs.has_changes }}" != "true" ]; then
+          STATUS_STR="no_changes"
+        elif [ "${{ steps.run.outcome }}" = "success" ] && [ "${{ steps.coverage.outcome }}" != "failure" ]; then
+          STATUS_STR="success"
+        else
+          STATUS_STR="failure"
+        fi
+        echo "status=$STATUS_STR" >> "$GITHUB_OUTPUT"
+        python3 "$GITHUB_ACTION_PATH/../scripts/deploy_report.py" \
+          --result deploy-result.json \
+          --status "$STATUS_STR" \
+          --environment "${{ inputs.environment }}" \
+          --check-only "${{ inputs.check_only }}" \
+          --out-md .deploy/errors.md \
+          --out-json .deploy/report.json
+
+    - name: Record audit trail (REQ-018)
+      id: audit
+      if: ${{ always() && steps.report.conclusion == 'success' }}
+      shell: bash
+      env:
+        AUDIT_TYPE: ${{ inputs.check_only == 'true' && 'Validate' || 'Deploy' }}
+        AUDIT_ENVIRONMENT: ${{ inputs.environment }}
+        AUDIT_STATUS: ${{ steps.report.outputs.status }}
+        AUDIT_CHECK_ONLY: ${{ inputs.check_only }}
+        AUDIT_ACTOR: ${{ github.actor }}
+        AUDIT_REF: ${{ inputs.ref }}
+        AUDIT_SHA: ${{ github.sha }}
+        AUDIT_PR: ${{ github.event.pull_request.number }}
+        AUDIT_DEPLOY_ID: ${{ steps.run.outputs.deploy_id }}
+        AUDIT_RUN_ID: ${{ github.run_id }}
+        AUDIT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        AUDIT_REPO: ${{ github.repository }}
+        AUDIT_PROFILES_MODE: ${{ inputs.profiles_mode }}
+      run: python3 "$GITHUB_ACTION_PATH/../scripts/audit.py"
+
+    - name: Upload deployment report
+      if: ${{ always() && steps.report.conclusion == 'success' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: deploy-report-${{ inputs.environment }}
+        path: |
+          .deploy/errors.md
+          .deploy/report.json
+          .deploy/coverage.json
+          .deploy/audit-record.json
+        if-no-files-found: ignore
+
+    # Durable, queryable audit trail: append the record to the audit-log branch.
+    # Only for REAL deploys/promotions (not the many check-only validations) to
+    # keep the branch clean. Best-effort — never fails the deploy.
+    - name: Append to audit-log branch (REQ-018)
+      if: ${{ always() && steps.audit.conclusion == 'success' && inputs.check_only != 'true' && steps.delta.outputs.has_changes == 'true' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        AUDIT_TYPE: Deploy
+        AUDIT_ENVIRONMENT: ${{ inputs.environment }}
+        AUDIT_STATUS: ${{ steps.report.outputs.status }}
+        AUDIT_SHA: ${{ github.sha }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/audit-append.sh"
+
+    - name: No changes to deploy
+      if: steps.delta.outputs.has_changes != 'true'
+      shell: bash
+      run: echo "No deployable delta between origin/${{ inputs.baseline_branch }} and ${{ inputs.ref }} — nothing to do."

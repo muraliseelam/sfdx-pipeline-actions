@@ -1,0 +1,296 @@
+name: Promote on label (deploy:qa / deploy:stage)
+
+# Label-driven promotion, orchestrated FROM the int PR (the control surface).
+#
+# When `deploy:qa` (or `deploy:stage`) is added to a PR, this:
+#   prepare  → ensure a feature→<env> PR exists; if it CONFLICTS with the env
+#              branch, comment the error + link back on the CONTROL (int) PR and
+#              stop (nothing deploys, no branch moves).
+#   deploy   → ordering guard (predecessor deployed for THIS commit) → real
+#              deploy of the delta to the <env> org.
+#   merge    → squash-merge the <env> PR ONLY after the deploy succeeds, then
+#              stamp `deployed:<env>` on both the <env> PR and the control PR and
+#              clear the `deploy:<env>` trigger label.
+#   report   → on any failure, surface a ❌ note + run link on the control PR.
+#
+# Everything up to and including int is unchanged (handled by deploy.yml). This
+# only drives qa/stage promotion off a label on the int PR.
+
+on:
+  workflow_call:
+    inputs:
+      control_pr:
+        description: "PR the deploy:<env> label was added to (the int PR / control surface)."
+        type: string
+        required: true
+      target_env:
+        description: "Environment to promote to (qa | stage)."
+        type: string
+        required: true
+      head_ref:
+        description: "Feature branch (PR head) to promote."
+        type: string
+        required: true
+      head_sha:
+        description: "Head commit SHA of the feature branch."
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  deployments: write
+  statuses: write
+  issues: write
+
+# One promotion per env+branch at a time.
+concurrency:
+  group: promote-label-${{ inputs.target_env }}-${{ inputs.head_ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- Read config + resolve the target env -----------------------------------
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      source_path:        ${{ steps.cfg.outputs.source_path }}
+      api_version:        ${{ steps.cfg.outputs.api_version }}
+      node_version:       ${{ steps.cfg.outputs.node_version }}
+      q_apex_coverage:    ${{ steps.cfg.outputs.q_apex_coverage }}
+      coverage_threshold: ${{ steps.cfg.outputs.coverage_threshold }}
+      profiles_mode:      ${{ steps.cfg.outputs.profiles_mode }}
+      env_name:           ${{ steps.resolve.outputs.r_name }}
+      gh_environment:     ${{ steps.resolve.outputs.r_gh_environment }}
+      test_level:         ${{ steps.resolve.outputs.r_test_level }}
+      jira_status:        ${{ steps.resolve.outputs.r_jira_status }}
+      require_env:        ${{ steps.pd.outputs.r_require_env }}
+      is_entry:           ${{ steps.pd.outputs.r_is_entry }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with: { mode: outputs }
+      - id: resolve
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with: { mode: resolve, arg: "${{ inputs.target_env }}" }
+      - id: pd
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with: { mode: prdeploy, arg: "${{ steps.resolve.outputs.r_name }}" }
+
+  # ---- Ensure the <env> PR exists + is conflict-free (surface to control PR) ---
+  prepare:
+    needs: plan
+    runs-on: ubuntu-latest
+    outputs:
+      env_pr:     ${{ steps.ensure.outputs.env_pr }}
+      env_pr_url: ${{ steps.ensure.outputs.env_pr_url }}
+      skip:       ${{ steps.ensure.outputs.skip }}
+    steps:
+      - name: Ensure feature→${{ inputs.target_env }} PR + check mergeability
+        id: ensure
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT: ${{ secrets.PIPELINE_PAT || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          CONTROL_PR: ${{ inputs.control_pr }}
+          ENVN: ${{ inputs.target_env }}
+          HEAD: ${{ inputs.head_ref }}
+        run: |
+          set -uo pipefail
+
+          # Already promoted? (control PR carries deployed:<env>) → no-op.
+          if gh pr view "$CONTROL_PR" --repo "$REPO" --json labels \
+               -q '.labels[].name' 2>/dev/null | grep -qx "deployed:$ENVN"; then
+            echo "Control PR #$CONTROL_PR already deployed:$ENVN — nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # Find an existing open feature→env PR, else create one.
+          pr=$(gh pr list --repo "$REPO" --head "$HEAD" --base "$ENVN" --state open \
+                 --json number -q '.[0].number' 2>/dev/null || echo "")
+          if [ -z "$pr" ]; then
+            title=$(gh pr view "$CONTROL_PR" --repo "$REPO" --json title -q .title 2>/dev/null || echo "$HEAD")
+            if ! url=$(GH_TOKEN="$PAT" gh pr create --repo "$REPO" --base "$ENVN" --head "$HEAD" \
+                         --title "$title → $ENVN" \
+                         --body "Auto-created by \`deploy:$ENVN\` on #$CONTROL_PR. Deploy-then-merge; no branch moves until the $ENVN org deploy succeeds." 2>/tmp/prerr); then
+              err="$(tr -d '\n' </tmp/prerr)"
+
+              # "No commits between" is the one benign failure: the branch is
+              # already in $ENVN, so there is genuinely nothing to promote.
+              # Everything else - an expired PAT, a permissions change, a
+              # protected branch - means the promotion did NOT happen, and
+              # reporting that as success leaves the developer watching a green
+              # check while nothing moves. Fail loudly instead.
+              if printf '%s' "$err" | grep -qi "No commits between"; then
+                echo "::notice::$HEAD is already in $ENVN — nothing to promote."
+                echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+
+              printf '%s\n' \
+                "❌ **Promotion to \`$ENVN\` could not start.**" \
+                "" \
+                "The \`$HEAD\` → \`$ENVN\` pull request could not be created:" \
+                "" \
+                '```' \
+                "$err" \
+                '```' \
+                "" \
+                "A \`Bad credentials\` error here means the **\`PIPELINE_PAT\`** repository secret has expired or been revoked; it must be rotated before any \`deploy:qa\` or \`deploy:stage\` label will work." \
+                "" \
+                "**Nothing was deployed and no branch moved.** Re-add the \`deploy:$ENVN\` label once it is fixed." > /tmp/prfail.md
+              gh pr comment "$CONTROL_PR" --repo "$REPO" --body-file /tmp/prfail.md || true
+              gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true
+              echo "::error::Could not open feature→$ENVN PR: $err"
+              exit 1
+            fi
+            pr=$(basename "$url")
+          fi
+          url=$(gh pr view "$pr" --repo "$REPO" --json url -q .url)
+          echo "env_pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "env_pr_url=$url" >> "$GITHUB_OUTPUT"
+
+          # Mergeability — GitHub computes this async.
+          state=""
+          for i in 1 2 3 4 5 6 7 8; do
+            state=$(gh pr view "$pr" --repo "$REPO" --json mergeable -q .mergeable 2>/dev/null || echo "")
+            case "$state" in MERGEABLE|CONFLICTING) break ;; esac
+            echo "mergeable='$state' (computing) — retrying..."; sleep 5
+          done
+
+          if [ "$state" = "CONFLICTING" ]; then
+            printf '%s\n' \
+              "❌ **Promotion to \`$ENVN\` is blocked — merge conflicts.**" \
+              "" \
+              "The auto-created PR **[#$pr]($url)** (\`$HEAD\` → \`$ENVN\`) conflicts with the \`$ENVN\` branch." \
+              "" \
+              "**To proceed:** resolve the conflicts on **[#$pr]($url)**, then re-add the \`deploy:$ENVN\` label here. Nothing was deployed and no branch moved." > /tmp/conflict-body.md
+            gh pr comment "$CONTROL_PR" --repo "$REPO" --body-file /tmp/conflict-body.md
+            gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true
+            echo "::error::feature→$ENVN PR #$pr conflicts with $ENVN — surfaced on control PR #$CONTROL_PR."
+            exit 1
+          fi
+          echo "feature→$ENVN PR #$pr is mergeable (state='$state')."
+
+  # ---- Real deploy of the delta to the <env> org ------------------------------
+  deploy:
+    needs: [plan, prepare]
+    if: ${{ needs.prepare.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    environment: ${{ needs.plan.outputs.gh_environment }}
+    outputs:
+      outcome: ${{ steps.deploy.outputs.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Ordering guard — predecessor deployed for this commit
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/guard@main
+        with:
+          pr_number: ${{ needs.prepare.outputs.env_pr }}
+          base_ref: ${{ inputs.target_env }}
+          head_sha: ${{ inputs.head_sha }}
+          env_name: ${{ needs.plan.outputs.env_name }}
+          require_env: ${{ needs.plan.outputs.require_env }}
+          is_entry: ${{ needs.plan.outputs.is_entry }}
+          bypass_active: "false"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: deploy
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/deploy@main
+        with:
+          environment: ${{ needs.plan.outputs.env_name }}
+          ref: ${{ inputs.head_sha }}
+          check_only: "false"
+          test_level: ${{ needs.plan.outputs.test_level }}
+          manifest_title: "Deploy"
+          baseline_branch: ${{ inputs.target_env }}
+          delta_merge_base: "true"
+          source_path: ${{ needs.plan.outputs.source_path }}
+          api_version: ${{ needs.plan.outputs.api_version }}
+          node_version: ${{ needs.plan.outputs.node_version }}
+          coverage_gate: ${{ needs.plan.outputs.test_level == 'NoTestRun' && 'false' || needs.plan.outputs.q_apex_coverage }}
+          coverage_threshold: ${{ needs.plan.outputs.coverage_threshold }}
+          profiles_mode: ${{ needs.plan.outputs.profiles_mode }}
+          bypass: "false"
+          sf_consumer_key: ${{ secrets.SF_CONSUMER_KEY }}
+          sf_username: ${{ secrets.SF_USERNAME }}
+          sf_instance_url: ${{ secrets.SF_INSTANCE_URL }}
+          sf_jwt_key: ${{ secrets.SF_JWT_KEY }}
+
+      - name: Update Jira story
+        if: ${{ success() }}
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/jira@main
+        with:
+          environment: ${{ needs.plan.outputs.env_name }}
+          status: ${{ needs.plan.outputs.jira_status }}
+          ref: ${{ inputs.head_ref }}
+          run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+
+      - name: Mark deploy gate green (unlocks merge)
+        if: ${{ success() && steps.deploy.outcome == 'success' }}
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/status@main
+        with:
+          sha: ${{ inputs.head_sha }}
+          context: deploy-${{ needs.plan.outputs.env_name }}
+          state: success
+          description: Deployed ${{ inputs.head_sha }} to ${{ needs.plan.outputs.env_name }} — merge unlocked
+          environment: ${{ needs.plan.outputs.env_name }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- Merge the <env> PR + stamp deployed:<env> on both PRs -------------------
+  merge:
+    needs: [plan, prepare, deploy]
+    if: ${{ needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/merge-pr@main
+        with:
+          pr_number: ${{ needs.prepare.outputs.env_pr }}
+          base_ref: ${{ inputs.target_env }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Stamp deployed:<env> + notify control PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ENVN: ${{ needs.plan.outputs.env_name }}
+          ENV_PR: ${{ needs.prepare.outputs.env_pr }}
+          ENV_PR_URL: ${{ needs.prepare.outputs.env_pr_url }}
+          CONTROL_PR: ${{ inputs.control_pr }}
+        run: |
+          set -uo pipefail
+          gh label create "deployed:$ENVN" --repo "$REPO" --color 0e8a16 \
+            --description "Deployed to $ENVN" >/dev/null 2>&1 || true
+          for pr in "$ENV_PR" "$CONTROL_PR"; do
+            gh pr edit "$pr" --repo "$REPO" --add-label "deployed:$ENVN" >/dev/null 2>&1 || true
+          done
+          gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true
+          gh pr comment "$CONTROL_PR" --repo "$REPO" --body "✅ **Deployed to \`$ENVN\` and merged** — [#$ENV_PR]($ENV_PR_URL). Status: \`deployed:$ENVN\`."
+
+  # ---- On any failure past prepare, surface a ❌ on the control PR --------------
+  report_failure:
+    needs: [plan, prepare, deploy, merge]
+    if: ${{ always() && needs.prepare.outputs.skip != 'true' && (needs.deploy.result == 'failure' || needs.merge.result == 'failure') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment failure on control PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ENVN: ${{ inputs.target_env }}
+          ENV_PR: ${{ needs.prepare.outputs.env_pr }}
+          ENV_PR_URL: ${{ needs.prepare.outputs.env_pr_url }}
+          CONTROL_PR: ${{ inputs.control_pr }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          gh pr comment "$CONTROL_PR" --repo "$REPO" --body "❌ **Promotion to \`$ENVN\` failed** on [#$ENV_PR]($ENV_PR_URL). Nothing was merged. See the run log: $RUN_URL — fix, then re-add \`deploy:$ENVN\`."
+          gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true

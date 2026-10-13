@@ -1,0 +1,100 @@
+name: Approval guard
+
+# Reusable guard that keeps the `approved` label from sticking on an approval-
+# gated PR until PR Validation + coverage have passed for the PR's head commit.
+#
+# GitHub forbids a PR author from submitting a native "Approve" review on their
+# own PR, so on qa/stage a developer self-approves by adding the `approved`
+# label. GitHub labels have no native precondition, so this workflow enforces
+# one: when `approved` is added, it reads the `pr-validation` commit status (set
+# by sf-pr-validation) for the head SHA and — if it isn't `success` — removes the
+# label and explains why. Once the green validation report lands, re-add
+# `approved` and it sticks.
+#
+# It guards every approval-gated stage (int, qa and stage). Stages that don't use
+# gate: approval resolve to gate != approval and are left untouched.
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: "PR number the label was applied to"
+        type: string
+        required: true
+      head_sha:
+        description: "PR head commit sha"
+        type: string
+        required: true
+      base_ref:
+        description: "PR base branch name"
+        type: string
+        required: true
+      label_name:
+        description: "The label that was added"
+        type: string
+        required: true
+
+concurrency:
+  group: approve-guard-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: ${{ inputs.label_name == 'approved' }}
+    runs-on: ubuntu-latest
+    outputs:
+      gate: ${{ steps.resolve.outputs.r_gate }}
+      bypass_label: ${{ steps.cfg.outputs.bypass_label }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with:
+          mode: outputs
+      - id: resolve
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with:
+          mode: resolve
+          arg: ${{ inputs.base_ref }}
+
+  guard:
+    needs: plan
+    # Enforce on every approval-gated PR (int, qa, stage). Non-approval stages
+    # resolve to gate != approval and must not have their label stripped.
+    if: ${{ needs.plan.outputs.gate == 'approval' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: read
+    steps:
+      - name: Hold approval until validation is green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          SHA: ${{ inputs.head_sha }}
+          BYPASS_LABEL: ${{ needs.plan.outputs.bypass_label }}
+        run: |
+          set -uo pipefail
+          # An admin quality-gate bypass overrides the validation requirement.
+          labels=$(gh pr view "$PR" --repo "$REPO" --json labels -q '.labels[].name' 2>/dev/null || echo "")
+          if printf '%s\n' "$labels" | grep -qx "$BYPASS_LABEL"; then
+            echo "Bypass label present — allowing approval without validation."; exit 0
+          fi
+          state=$(gh api "repos/$REPO/commits/$SHA/status" \
+            --jq '.statuses[] | select(.context=="pr-validation") | .state' 2>/dev/null | tail -n1 || echo "")
+          echo "pr-validation status for $SHA = '${state:-missing}'"
+          if [ "$state" = "success" ]; then
+            echo "Validation green — approval stands."; exit 0
+          fi
+          # Not green yet: remove the premature approval and explain.
+          gh api -X DELETE "repos/$REPO/issues/$PR/labels/approved" >/dev/null 2>&1 || true
+          case "${state:-missing}" in
+            pending) why="is still running";;
+            failure|error) why="did **not** pass";;
+            *) why="hasn't reported yet";;
+          esac
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "⏳ **Approval held** — PR Validation + coverage ${why} for the latest commit (\`pr-validation\` = \`${state:-missing}\`). The **\`approved\`** label was removed; re-add it once the green validation report is posted."
+          echo "::notice::Removed premature 'approved' label — pr-validation='${state:-missing}'."

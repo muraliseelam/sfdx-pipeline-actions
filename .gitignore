@@ -1,0 +1,17 @@
+# OS / editor cruft
+.DS_Store
+*.swp
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Never commit credentials. The pipeline reads everything from
+# GitHub Environment secrets at run time.
+.secrets/
+*.key
+*.pem
+*.p12
+*.jks
+*.crt

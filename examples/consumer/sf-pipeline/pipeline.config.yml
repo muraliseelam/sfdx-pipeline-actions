@@ -1,0 +1,181 @@
+# ============================================================================
+#  Salesforce DevOps Pipeline — single source of truth
+# ============================================================================
+#  This is the ONLY file you edit to stand the pipeline up on a new project.
+#  Everything else in sf-pipeline/ is generic and reused as-is.
+#
+#  See sf-pipeline/README.md for the full setup checklist (branches, GitHub
+#  Environments, secrets). Change the values below to match your project.
+# ============================================================================
+
+# ---- Project basics --------------------------------------------------------
+source_path: force-app        # Root of your Salesforce metadata (sfdx format)
+api_version: "66.0"           # Metadata API version used for the delta package
+node_version: "22"            # Node version for the CLI + LWC Jest
+
+# Production baseline branch (the trunk that represents Prod). Used as the delta
+# baseline ONLY when delta_baseline: prod (see below), and as the merge target of
+# the weekly release train.
+baseline_branch: main
+
+# ---- Delta baseline (which git ref the deploy delta is computed against) ----
+#   target  — Copado-style: each deploy/validation diffs against the PR's TARGET
+#             env branch (int PR -> origin/int, qa PR -> origin/qa, ...). The
+#             package is exactly what that environment is missing, so a QA package
+#             can differ from the INT package for the same story. Recommended when
+#             environments can drift (hotfixes land straight into a higher env).
+#   prod    — diff EVERY environment against `baseline_branch` (main/Prod). Every
+#             stage validates/deploys the identical prod-relative artifact.
+delta_baseline: target
+
+# ---- Org connection --------------------------------------------------------
+# The pipeline STAGE names (dev/int/qa/stage/prod) and branch names are the SAME
+# in every project — the backend always runs on those logical stages. Only two
+# kinds of value change per project:
+#   1. prod_org       — your production org's My Domain base (shared by every
+#                       sandbox, since a sandbox lives at {prod_org}--{sandbox}).
+#   2. each stage's `sandbox:` — the ACTUAL sandbox name mapped to that stage
+#                       (arbitrary; e.g. dev->salemon, int->saleerf).
+# From those, each login URL + integration username are derived automatically.
+org:
+  prod_org: acme                          # production My Domain base (before --sandbox)
+  username_base: "copadosyncuser@acme.net"      # integration user (sandboxes append ".{sandbox}")
+  # Advanced overrides (rarely needed):
+  # sandbox_url_template: "https://{prod_org}--{sandbox}.sandbox.my.salesforce.com"
+  # prod_url: "https://{prod_org}.my.salesforce.com"
+
+# ---- Promotion chain --------------------------------------------------------
+# List as many or as few environments as you have. Order = promotion order.
+#
+# Each environment maps 1:1 to a GitHub Environment (`gh_environment`) that holds
+# that org's secrets (SF_CONSUMER_KEY / SF_USERNAME / SF_INSTANCE_URL / SF_JWT_KEY).
+# Set `sandbox:` to the REAL sandbox name for each stage. (If your sandbox happens
+# to be named exactly like the stage, you can omit it — it defaults to `name`.)
+#
+# `gate:` controls how each stage is driven:
+#   * auto      — feature PR -> real deploy to the org + auto-merge (no approval)
+#   * approval  — PR -> check-only validation + component/coverage report; a
+#                 reviewer APPROVING the PR (or adding the `approved` label)
+#                 triggers the real deploy + auto-merge into that env branch
+#   * on_demand — not PR-driven; deploy via the manual "Promote" workflow
+#
+# APPROVAL-DRIVEN, DIFF-VS-TARGET, DEPLOY-THEN-MERGE MODEL:
+# A developer raises ONE PR per environment (feature -> int, feature -> qa,
+# feature -> stage). When that PR is approved, the change is deployed to that
+# env's org and — only after the deploy succeeds — the PR is merged into the env
+# branch. qa requires a successful int deploy of the same commit; stage requires
+# qa (sequential promotion chain). All three stages therefore use gate: approval.
+environments:
+  - name: int
+    branch: int
+    gh_environment: int
+    sandbox: acmeint                # <-- REAL sandbox name for int (entry stage)
+    gate: approval                    # PR into int: validate on open, deploy+merge on approval
+    test_level: RunSpecifiedTests
+  - name: qa
+    branch: qa
+    gh_environment: qa
+    sandbox: acmeqa                 # <-- REAL sandbox name for qa
+    gate: approval                    # deploy+merge on approval; requires int deploy of same commit
+    test_level: NoTestRun             # qa: NO Apex tests / coverage (int already validated)
+  - name: stage
+    branch: stage
+    gh_environment: stage
+    sandbox: acmestg              # <-- REAL sandbox name for stage
+    gate: approval                    # deploy+merge on approval; requires qa deploy of same commit
+    test_level: NoTestRun             # stage: NO Apex tests / coverage (int already validated)
+
+# ---- Production (isolated, manual, reviewer-gated) -------------------------
+# Remove this whole block if a project has no separate prod flow.
+production:
+  branch: main               # branch that represents production
+  deploy_environment: prod              # GitHub Environment WITH required reviewers
+  validate_environment: prod-validate   # GitHub Environment WITHOUT reviewers (check-only)
+
+  # -- Point "prod" at WHATEVER you want. Choose ONE of the three modes: --------
+  #
+  #  MODE A) Use a SANDBOX as prod (common for training / lower environments):
+  #     is_sandbox: true
+  #     sandbox: <sandbox-name>            # -> https://{prod_org}--{sandbox}.sandbox.my.salesforce.com
+  #                                         #    user: {username_base}.{sandbox}
+  #
+  #  MODE B) Use your REAL production org:
+  #     is_sandbox: false                  # -> https://{prod_org}.my.salesforce.com
+  #                                         #    user: {username_base}
+  #
+  #  MODE C) Point at ANYTHING explicitly (overrides everything above):
+  #     instance_url: https://my-custom.my.salesforce.com
+  #     integration_username: someuser@example.com
+  #
+  # Default below = MODE A (a sandbox named "acmeprod"). Change to fit your project.
+  is_sandbox: true
+  sandbox: acmeprod
+  # instance_url: ""                      # (MODE C) set to override the URL entirely
+  # integration_username: ""              # (MODE C) set to override the username entirely
+
+  release_branch_prefix: "release/"     # weekly release branches
+  test_level: RunSpecifiedTests
+  # Canary test(s) for a PRODUCTION destructive / no-Apex deploy. Production
+  # forbids NoTestRun whenever Apex is involved (including deletions), so a
+  # destructive-only change must still run a test. A deletion has no coverage
+  # requirement, so a single stable passing test satisfies the platform without
+  # running the whole (possibly red) org suite. Comma-separated; blank =
+  # RunLocalTests.
+  destructive_tests: ""
+
+# ---- Quality gates (flip any to false to skip it) --------------------------
+# Only three gates run, and each ONLY fires when the PR delta actually contains
+# the relevant components (see below), so unrelated PRs aren't slowed down:
+#   * pmd           — Apex static analysis;   runs when *.cls / *.trigger change
+#   * sonar         — SonarQube scan;         runs when Apex OR LWC/Aura JS change
+#   * apex_coverage — Apex test coverage gate; enforced during the org deploy,
+#                     only when *.cls / *.trigger change
+quality_gates:
+  pmd: true
+  sonar: true          # also needs SONAR_TOKEN / SONAR_HOST_URL secrets
+  apex_coverage: true  # fail the deploy if changed Apex is below the threshold
+
+# Minimum aggregate Apex code coverage (%) required by the apex_coverage gate.
+coverage_threshold: 85
+
+# ---- Deployment options ----------------------------------------------------
+# How Profiles / Permission Sets are deployed (REQ-006):
+#   full         (default) — deploy the COMPLETE profile/permission-set from
+#                source. Safest when every referenced component already exists in
+#                the target org (baseline / full deploys).
+#   incremental  — for each profile/PS in the delta, strip it down to only the
+#                permission entries that reference components ALSO in this delta
+#                (field/object/class/tab/app/recordType/… permissions), keeping
+#                profile-level settings like userPermissions. Avoids "component
+#                does not exist" failures on orgs that lag behind.
+profiles_mode: incremental
+
+# An admin can add this label to a PR to bypass the quality gates above when
+# needed. The bypass is honored ONLY if the person who added the label has
+# admin/maintain permission on the repo (verified at run time).
+bypass_label: bypass-quality-gates
+
+# ---- PR approval gate ------------------------------------------------------
+# Controls whether a human review approval is required before the change is
+# deployed to the entry org and merged.
+#   true  (default) — a reviewer must APPROVE the PR before the real deploy +
+#                     auto-merge happen, and a Copilot review is auto-requested
+#                     on every new PR into the entry branch.
+#   false           — no reviewer gate: as soon as PR Validation passes (quality
+#                     gates + check-only validate), the change is deployed to the
+#                     entry org and merged automatically, and NO Copilot review
+#                     is auto-requested. (Branch protection may still require a
+#                     merge; set the entry branch's protection accordingly.)
+#
+# NOTE: The entry environment (dev) is intentionally low-friction — feature PRs
+# into `dev` auto-deploy to acmedev and auto-merge with no manual approval.
+# The gated review happens on the downstream promotion PRs (dev -> int -> ...).
+require_pr_approval: true
+
+# ---- Notifications ---------------------------------------------------------
+notifications:
+  chat: true          # needs CHAT_API_TOKEN + CHAT_CHANNEL_ID (or CHAT_WEBHOOK_URL)
+  jira: true           # needs JIRA_BASE_URL + JIRA_EMAIL + JIRA_API_TOKEN secrets.
+                       # Story is linked by an issue key in the feature branch
+                       # name (e.g. feature/PROJ-123-foo). Each deploy comments +
+                       # transitions the story to that env's jira_status.

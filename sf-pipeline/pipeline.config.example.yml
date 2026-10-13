@@ -1,0 +1,125 @@
+# ============================================================================
+#  Salesforce DevOps Pipeline — single source of truth
+# ============================================================================
+#  This is the ONLY file you edit to stand the pipeline up on a new project.
+#  Everything else in sf-pipeline/ is generic and reused as-is.
+#
+#  See sf-pipeline/README.md for the full setup checklist (branches, GitHub
+#  Environments, secrets). Change the values below to match your project.
+# ============================================================================
+
+# ---- Project basics --------------------------------------------------------
+source_path: force-app        # Root of your Salesforce metadata (sfdx format)
+api_version: "66.0"           # Metadata API version used for the delta package
+node_version: "22"            # Node version for the CLI + LWC Jest
+
+# Production baseline: the delta to deploy is ALWAYS computed against this branch,
+# so every environment receives the complete change set relative to Prod.
+baseline_branch: gh-actions-main
+
+# ---- Promotion chain (the automatic Int -> ... -> last part) ---------------
+# List as many or as few environments as you have — 3, 4, or 5 all work with no
+# other changes. Order = promotion order.
+#
+# Each environment maps 1:1 to a GitHub Environment (`gh_environment`) that holds
+# that org's secrets (SF_CONSUMER_KEY / SF_USERNAME / SF_INSTANCE_URL / SF_JWT_KEY).
+#
+# `gate:` controls how each stage is driven (optional; sensible defaults below):
+#   * auto      — a PR into this branch runs a real deploy to its org and
+#                 auto-merges with NO approval. Use for a low-friction dev entry.
+#   * approval  — a PR into this branch runs a CHECK-ONLY validation + posts the
+#                 component/coverage report; a reviewer APPROVING the PR then
+#                 triggers the real deploy + auto-merge. Use for gated stages.
+#   * on_demand — NOT PR-driven; deployed whenever you want via the manual
+#                 "Promote" workflow (Actions tab). Use for qa/stage.
+# Defaults when `gate:` is omitted: the FIRST env falls back to the global
+# `require_pr_approval` flag (approval if true, auto if false); every later env
+# defaults to on_demand.
+# `jira_status:` (optional) is the Jira status each stage transitions the linked
+# story to after a successful deploy (requires notifications.jira + JIRA_* secrets).
+environments:
+  - name: dev
+    branch: gh-actions-dev
+    gh_environment: dev
+    gate: auto                      # feature PR -> auto-deploy + auto-merge
+    test_level: RunSpecifiedTests   # optional; defaults to RunSpecifiedTests
+    jira_status: In Dev             # optional; moves the story here after deploy
+  - name: int
+    branch: gh-actions-int
+    gh_environment: int
+    gate: approval                  # dev PR -> validate + report; approve -> deploy
+    jira_status: In Int
+  - name: qa
+    branch: gh-actions-qa
+    gh_environment: qa
+    gate: on_demand                 # deploy via the manual Promote workflow
+    jira_status: In QA
+  - name: stage
+    branch: gh-actions-stage
+    gh_environment: stage
+    gate: on_demand                 # deploy via the manual Promote workflow
+    jira_status: In Stage
+
+# ---- Production (isolated, manual, reviewer-gated) -------------------------
+# Remove this whole block if a project has no separate prod flow.
+production:
+  branch: gh-actions-main               # branch that represents production
+  deploy_environment: prod              # GitHub Environment WITH required reviewers
+  validate_environment: prod-validate   # GitHub Environment WITHOUT reviewers (check-only)
+  release_branch_prefix: "release/"     # weekly release branches
+  test_level: RunSpecifiedTests
+  # Canary test(s) for a PRODUCTION destructive / no-Apex deploy. Production
+  # forbids NoTestRun whenever Apex is involved (including deletions), so a
+  # destructive-only change must still run a test. A deletion has no coverage
+  # requirement, so a single stable passing test satisfies the platform without
+  # running the whole (possibly red) org suite. Comma-separated; blank =
+  # RunLocalTests.
+  destructive_tests: "AIAssistantForSalesControllerTest"
+
+# ---- Quality gates --------------------------------------------------------
+# Static code analysis (PMD / SonarQube) is handled by your organisation's dedicated
+# GitHub Actions from the internal marketplace — it is NOT part of this
+# pipeline. The only gate enforced here is Apex test coverage, which fires
+# during the org deploy and only when *.cls / *.trigger change.
+quality_gates:
+  apex_coverage: true  # fail the deploy if changed Apex is below the threshold
+
+# Minimum aggregate Apex code coverage (%) required by the apex_coverage gate.
+coverage_threshold: 85
+
+# ---- Deployment options ----------------------------------------------------
+# How Profiles / Permission Sets are deployed (REQ-006):
+#   full         (default) — deploy the COMPLETE profile/permission-set from
+#                source. Safest when every referenced component already exists in
+#                the target org (baseline / full deploys).
+#   incremental  — for each profile/PS in the delta, strip it down to only the
+#                permission entries that reference components ALSO in this delta
+#                (field/object/class/tab/app/recordType/… permissions), keeping
+#                profile-level settings like userPermissions. Avoids "component
+#                does not exist" failures on orgs that lag behind.
+profiles_mode: full
+
+# An admin can add this label to a PR to bypass the quality gates above when
+# needed. The bypass is honored ONLY if the person who added the label has
+# admin/maintain permission on the repo (verified at run time).
+bypass_label: bypass-quality-gates
+
+# ---- Notifications ---------------------------------------------------------
+notifications:
+  chat: true           # Post deploy outcomes to a team chat channel.
+                       # Supports Slack, Microsoft Teams, any JSON webhook, and
+                       # token-based chat APIs. Configure ONE of:
+                       #   * CHAT_WEBHOOK_URL  — an incoming webhook (Slack/Teams/
+                       #     anything). The provider is auto-detected from the URL.
+                       #   * CHAT_API_URL + CHAT_API_TOKEN + CHAT_CHANNEL_ID — a
+                       #     bot-token chat API.
+                       # Optionally set CHAT_PROVIDER to force one of:
+                       #   slack | teams | generic | api
+                       # Leave the secrets unset and this is a silent no-op.
+                       # A chat failure NEVER fails a deploy — it only warns.
+  jira: true           # needs JIRA_BASE_URL + JIRA_EMAIL + JIRA_API_TOKEN secrets.
+                       # Links a story by an issue key in the feature branch name
+                       # (e.g. feature/PROJ-123-foo). On each deploy the linked
+                       # story is commented + transitioned to that env's
+                       # `jira_status`. On-demand qa/stage promotions triggered
+                       # from Jira pass the story key through automatically.

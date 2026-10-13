@@ -1,0 +1,4 @@
+# int    int-admin    https://test.salesforce.com   cicd@acme.com.int
+# qa     qa-admin     https://test.salesforce.com   cicd@acme.com.qa
+# stage  stage-admin  https://test.salesforce.com   cicd@acme.com.stg
+# prod   prod-admin   https://login.salesforce.com  cicd@acme.com

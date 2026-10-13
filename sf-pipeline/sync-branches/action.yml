@@ -1,0 +1,100 @@
+name: "Realign env branches to baseline"
+description: >-
+  Force every environment branch (int/qa/stage) back to the baseline (prod)
+  branch after a release lands. Env branches diverge because PRs are squash-
+  merged into them (new SHAs) while the release merges the original commits —
+  same content, different history. Realigning keeps a clean base so the next
+  feature PR shows only its own diff. Env branches are protected, so this
+  snapshots protection, lifts it, force-pushes, and restores it byte-for-byte.
+
+inputs:
+  baseline_branch:
+    required: true
+  env_branches:
+    description: "JSON array of env branch names (baseline is skipped if present)."
+    required: true
+  pipeline_pat:
+    description: "PAT that can administer branch protection (falls back to github_token)."
+    required: false
+    default: ""
+  github_token:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        BASELINE: ${{ inputs.baseline_branch }}
+        ENV_BRANCHES: ${{ inputs.env_branches }}
+        PIPELINE_PAT: ${{ inputs.pipeline_pat }}
+      run: |
+        set -euo pipefail
+        git fetch origin --prune
+        TIP="$(git rev-parse "origin/$BASELINE")"
+        echo "Baseline $BASELINE @ ${TIP:0:8}"
+
+        PUSH_TOKEN="${PIPELINE_PAT:-$GH_TOKEN}"
+        PUSH_URL="https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+        # Turn a GET-protection payload into a PUT-compatible one for restore.
+        read -r -d '' XFORM <<'PY' || true
+        import sys, json
+        d = json.load(sys.stdin)
+        rsc = d.get("required_status_checks")
+        out = {
+          "required_status_checks": ({"strict": rsc.get("strict", False),
+                                      "contexts": rsc.get("contexts", [])} if rsc else None),
+          "enforce_admins": bool((d.get("enforce_admins") or {}).get("enabled")),
+          "required_pull_request_reviews": None,
+          "restrictions": None,
+        }
+        pr = d.get("required_pull_request_reviews")
+        if pr:
+            out["required_pull_request_reviews"] = {
+              "dismiss_stale_reviews": pr.get("dismiss_stale_reviews", False),
+              "require_code_owner_reviews": pr.get("require_code_owner_reviews", False),
+              "required_approving_review_count": pr.get("required_approving_review_count", 0),
+            }
+        r = d.get("restrictions")
+        if r:
+            out["restrictions"] = {
+              "users": [u["login"] for u in r.get("users", [])],
+              "teams": [t["slug"] for t in r.get("teams", [])],
+              "apps":  [a["slug"] for a in r.get("apps", [])],
+            }
+        for k in ("allow_force_pushes","allow_deletions","required_linear_history",
+                  "required_conversation_resolution","block_creations"):
+            v = d.get(k)
+            if isinstance(v, dict):
+                out[k] = bool(v.get("enabled"))
+        json.dump(out, sys.stdout)
+        PY
+
+        for b in $(echo "$ENV_BRANCHES" | python3 -c "import sys,json;print(' '.join(json.load(sys.stdin)))"); do
+          [ "$b" = "$BASELINE" ] && continue
+          echo "::group::Syncing $b -> ${TIP:0:8}"
+          SNAP="/tmp/prot-$b.json"; HAD_PROT=""
+          if GH_TOKEN="$PUSH_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/branches/$b/protection" >/tmp/prot-raw-$b.json 2>/dev/null; then
+            HAD_PROT="yes"
+            python3 -c "$XFORM" </tmp/prot-raw-$b.json >"$SNAP"
+            GH_TOKEN="$PUSH_TOKEN" gh api -X DELETE "repos/${GITHUB_REPOSITORY}/branches/$b/protection" >/dev/null 2>&1 \
+              && echo "protection lifted on $b"
+          fi
+          restore() {
+            if [ -n "$HAD_PROT" ] && [ -s "$SNAP" ]; then
+              GH_TOKEN="$PUSH_TOKEN" gh api -X PUT "repos/${GITHUB_REPOSITORY}/branches/$b/protection" --input "$SNAP" >/dev/null 2>&1 \
+                && echo "protection restored on $b" \
+                || echo "::error::Failed to restore protection on $b — restore manually from $SNAP"
+            fi
+          }
+          trap restore EXIT
+          if git push "$PUSH_URL" "$TIP:refs/heads/$b" --force; then
+            echo "synced $b -> ${TIP:0:8}"
+          else
+            echo "::warning::Could not realign $b — sync it manually."
+          fi
+          restore; trap - EXIT
+          echo "::endgroup::"
+        done

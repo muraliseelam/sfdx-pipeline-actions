@@ -1,0 +1,302 @@
+name: Prod Release
+
+# ONE production file. Two actions, selected by the `action` input:
+#
+#   action: assemble  → build/refresh release/<version> from the prod branch and
+#                       merge in the selected story branches. A human then opens
+#                       the release → prod PR.
+#   action: release   → preflight (release PR authorized + green) → validate
+#                       (check-only against prod-validate) → [prod reviewer gate]
+#                       → quick-deploy to prod → merge the PR, tag, GitHub Release,
+#                       and realign the env branches. (default)
+#
+# Every branch/env name comes from sf-pipeline/pipeline.config.yml.
+
+on:
+  workflow_call:
+    inputs:
+      action:
+        description: "assemble | release"
+        type: string
+        required: false
+        default: "release"
+      version:
+        description: "Release version (e.g. 2026.31). Assemble: blank = ISO year.week."
+        type: string
+        required: false
+        default: ""
+      stories:
+        description: "Assemble only: explicit space/comma-separated story branches (else auto-gather)."
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: prod-release
+  cancel-in-progress: false
+
+jobs:
+  # ---- Read config (one source of truth for branch/env names) -----------------
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      ref:                ${{ steps.ref.outputs.ref }}
+      baseline_branch:    ${{ steps.cfg.outputs.baseline_branch }}
+      source_path:        ${{ steps.cfg.outputs.source_path }}
+      api_version:        ${{ steps.cfg.outputs.api_version }}
+      node_version:       ${{ steps.cfg.outputs.node_version }}
+      profiles_mode:      ${{ steps.cfg.outputs.profiles_mode }}
+      prod_branch:        ${{ steps.cfg.outputs.prod_branch }}
+      prod_deploy_env:    ${{ steps.cfg.outputs.prod_deploy_env }}
+      prod_validate_env:  ${{ steps.cfg.outputs.prod_validate_env }}
+      prod_test_level:    ${{ steps.cfg.outputs.prod_test_level }}
+      prod_destructive_tests: ${{ steps.cfg.outputs.prod_destructive_tests }}
+      release_prefix:     ${{ steps.cfg.outputs.release_prefix }}
+      env_branches:       ${{ steps.cfg.outputs.env_branches }}
+      chat:               ${{ steps.cfg.outputs.chat }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with: { mode: outputs }
+      - id: ref
+        run: echo "ref=${{ steps.cfg.outputs.release_prefix }}${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+
+  # ===========================================================================
+  #  action: assemble — build the release branch
+  # ===========================================================================
+  assemble:
+    if: ${{ inputs.action == 'assemble' }}
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.prod_branch }}
+          fetch-depth: 0
+      - name: Determine version + configure git
+        id: ver
+        env:
+          RELEASE_PREFIX: ${{ needs.plan.outputs.release_prefix }}
+        run: |
+          V="${{ inputs.version }}"; [ -z "$V" ] && V="$(date -u +%G.%V)"
+          echo "version=$V"          >> "$GITHUB_OUTPUT"
+          echo "branch=${RELEASE_PREFIX}$V" >> "$GITHUB_OUTPUT"
+          git config user.name  "sf-release-bot"
+          git config user.email "sf-release-bot@users.noreply.github.com"
+      - name: Gather stories (merged PRs promoted to stage)
+        id: gather
+        if: ${{ inputs.stories == '' }}
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/release-gather@main
+        with:
+          github_token: ${{ github.token }}
+      - name: Build release branch + merge stories
+        env:
+          PROD_BRANCH: ${{ needs.plan.outputs.prod_branch }}
+          BR: ${{ steps.ver.outputs.branch }}
+          MANUAL: ${{ inputs.stories }}
+          GATHERED: ${{ steps.gather.outputs.stories }}
+        run: |
+          set -euo pipefail
+          LIST="${MANUAL:-}"; [ -z "$LIST" ] && LIST="${GATHERED:-}"
+          LIST="$(echo "${LIST//,/ }" | xargs || true)"
+          echo "Release will include: ${LIST:-<none>}"
+          git fetch origin --prune
+          # Preflight: every named story branch must exist.
+          for s in $LIST; do
+            git ls-remote --exit-code --heads origin "$s" >/dev/null 2>&1 || \
+              { echo "::error::Story branch '$s' does not exist on origin."; exit 1; }
+          done
+          # Create or refresh release/<version> from the prod branch.
+          if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+            git checkout -B "$BR" "origin/$BR"; git merge --no-edit "origin/$PROD_BRANCH"
+          else
+            git checkout -B "$BR" "origin/$PROD_BRANCH"
+          fi
+          for s in $LIST; do
+            git fetch origin "$s"
+            git merge --no-edit "origin/$s" || \
+              { echo "::error::Merge conflict merging $s — rebase it on $PROD_BRANCH and re-run."; exit 1; }
+          done
+          git push origin "HEAD:$BR"
+      - name: Summarize + release PR link
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROD_BRANCH: ${{ needs.plan.outputs.prod_branch }}
+          BR: ${{ steps.ver.outputs.branch }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          EXISTING="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BR" --base "$PROD_BRANCH" --state open --json number --jq '.[0].number' || true)"
+          COMPARE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${PROD_BRANCH}...${BR}?expand=1"
+          {
+            echo "## Release v${VERSION} assembled on \`${BR}\`"
+            if [ -n "$EXISTING" ]; then echo "➡️ Release PR already open: #${EXISTING}"
+            else echo "➡️ **Open the release PR:** [${BR} → ${PROD_BRANCH}](${COMPARE})"; fi
+            echo ""
+            echo "Next: add the \`prod-approved\` label (or get an Approve review), then run **Prod Release** with action \`release\` and version \`${VERSION}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  #  action: release — validate + deploy to production
+  # ===========================================================================
+  preflight:
+    if: ${{ inputs.action == 'release' }}
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+    outputs:
+      pr_number: ${{ steps.pf.outputs.pr_number }}
+    steps:
+      - id: pf
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/release-preflight@main
+        with:
+          head_branch: ${{ needs.plan.outputs.ref }}
+          base_branch: ${{ needs.plan.outputs.prod_branch }}
+          version: ${{ inputs.version }}
+          github_token: ${{ github.token }}
+
+  # Validation-only deploy to prod (captures a validated deploy id to quick-deploy).
+  validate:
+    if: ${{ inputs.action == 'release' }}
+    needs: [plan, preflight]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.plan.outputs.prod_validate_env }}
+    outputs:
+      deploy_id: ${{ steps.deploy.outputs.deploy_id }}
+    steps:
+      - name: Chat — validation starting
+        if: ${{ needs.plan.outputs.chat == 'true' }}
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/notify@main
+        with:
+          message: "🚀 **Prod validation starting** for **v${{ inputs.version }}**. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}
+          api_url:     ${{ secrets.CHAT_API_URL }}
+          api_token:   ${{ secrets.CHAT_API_TOKEN }}
+          channel_id:  ${{ secrets.CHAT_CHANNEL_ID }}
+      - uses: actions/checkout@v4
+        with: { ref: "${{ needs.plan.outputs.ref }}", fetch-depth: 0 }
+      - id: deploy
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/deploy@main
+        with:
+          environment: prod-validate
+          ref: ${{ needs.plan.outputs.ref }}
+          check_only: "true"
+          test_level: ${{ needs.plan.outputs.prod_test_level }}
+          destructive_test_names: ${{ needs.plan.outputs.prod_destructive_tests }}
+          manifest_title: "Prod validation"
+          baseline_branch: ${{ needs.plan.outputs.baseline_branch }}
+          source_path: ${{ needs.plan.outputs.source_path }}
+          api_version: ${{ needs.plan.outputs.api_version }}
+          node_version: ${{ needs.plan.outputs.node_version }}
+          profiles_mode: ${{ needs.plan.outputs.profiles_mode }}
+          sf_consumer_key: ${{ secrets.SF_CONSUMER_KEY }}
+          sf_username: ${{ secrets.SF_USERNAME }}
+          sf_instance_url: ${{ secrets.SF_INSTANCE_URL }}
+          sf_jwt_key: ${{ secrets.SF_JWT_KEY }}
+
+  validate-notify:
+    if: ${{ always() && inputs.action == 'release' && needs.plan.outputs.chat == 'true' }}
+    needs: [plan, validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/notify@main
+        with:
+          message: ${{ needs.validate.result == 'success' && format('✅ **Prod validation PASSED** for v{0} — awaiting deploy approval.', inputs.version) || format('❌ **Prod validation FAILED** for v{0}. {1}/{2}/actions/runs/{3}', inputs.version, github.server_url, github.repository, github.run_id) }}
+          webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}
+          api_url:     ${{ secrets.CHAT_API_URL }}
+          api_token:   ${{ secrets.CHAT_API_TOKEN }}
+          channel_id:  ${{ secrets.CHAT_CHANNEL_ID }}
+
+  # Quick-deploy the validated id — gated by the prod environment reviewer.
+  deploy:
+    if: ${{ inputs.action == 'release' }}
+    needs: [plan, validate]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.plan.outputs.prod_deploy_env }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ needs.plan.outputs.ref }}", fetch-depth: 0 }
+      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/deploy@main
+        with:
+          environment: prod
+          ref: ${{ needs.plan.outputs.ref }}
+          check_only: "false"
+          quick_deploy_id: ${{ needs.validate.outputs.deploy_id }}
+          manifest_title: "Prod deploy"
+          baseline_branch: ${{ needs.plan.outputs.baseline_branch }}
+          source_path: ${{ needs.plan.outputs.source_path }}
+          api_version: ${{ needs.plan.outputs.api_version }}
+          node_version: ${{ needs.plan.outputs.node_version }}
+          sf_consumer_key: ${{ secrets.SF_CONSUMER_KEY }}
+          sf_username: ${{ secrets.SF_USERNAME }}
+          sf_instance_url: ${{ secrets.SF_INSTANCE_URL }}
+          sf_jwt_key: ${{ secrets.SF_JWT_KEY }}
+
+  deploy-notify:
+    if: ${{ always() && inputs.action == 'release' && needs.plan.outputs.chat == 'true' && needs.deploy.result != 'skipped' }}
+    needs: [plan, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/notify@main
+        with:
+          message: ${{ needs.deploy.result == 'success' && format('✅ **Prod VALIDATED & DEPLOYED** — v{0} is live. Deployed by @{1}.', inputs.version, github.actor) || format('❌ **Prod DEPLOY FAILED** for v{0} (validation had passed). {1}/{2}/actions/runs/{3}', inputs.version, github.server_url, github.repository, github.run_id) }}
+          webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}
+          api_url:     ${{ secrets.CHAT_API_URL }}
+          api_token:   ${{ secrets.CHAT_API_TOKEN }}
+          channel_id:  ${{ secrets.CHAT_CHANNEL_ID }}
+
+  # Merge the release PR (post-deploy), tag, GitHub Release, realign env branches.
+  finalize:
+    if: ${{ inputs.action == 'release' }}
+    needs: [plan, preflight, deploy]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+      BASELINE: ${{ needs.plan.outputs.baseline_branch }}
+      PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Configure git
+        run: |
+          git config user.name  "sf-release-bot"
+          git config user.email "sf-release-bot@users.noreply.github.com"
+      - name: Merge release PR (post-deploy), tag + GitHub Release
+        run: |
+          set -euo pipefail
+          [ -n "${PR_NUMBER:-}" ] || { echo "::error::No release PR number from preflight."; exit 1; }
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --merge --delete-branch
+          git fetch origin --prune --tags
+          git checkout "$BASELINE"; git pull --ff-only origin "$BASELINE"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            git tag -a "v${VERSION}" -m "Release v${VERSION}"; git push origin "v${VERSION}"
+          fi
+          if ! gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "v${VERSION}" --title "Release v${VERSION}" --generate-notes --target "$BASELINE"
+          fi
+      - name: Realign env branches to the new baseline
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/sync-branches@main
+        with:
+          baseline_branch: ${{ needs.plan.outputs.baseline_branch }}
+          env_branches: ${{ needs.plan.outputs.env_branches }}
+          pipeline_pat: ${{ secrets.PIPELINE_PAT }}
+          github_token: ${{ github.token }}
+      - name: Chat — released
+        if: ${{ needs.plan.outputs.chat == 'true' }}
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/notify@main
+        with:
+          message: "🎉 **Prod RELEASE published** — v${{ inputs.version }} is live, merged to `${{ needs.plan.outputs.baseline_branch }}`, tagged, and released. ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ inputs.version }}"
+          webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}
+          api_url:     ${{ secrets.CHAT_API_URL }}
+          api_token:   ${{ secrets.CHAT_API_TOKEN }}
+          channel_id:  ${{ secrets.CHAT_CHANNEL_ID }}

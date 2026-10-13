@@ -1,0 +1,240 @@
+name: PR Validation
+
+# CHECK-ONLY validation for approval-gated PRs (the entry stage, e.g. int).
+#
+#   plan     → resolve the PR's target env + delta baseline; mark pr-validation
+#              PENDING so an `approved` label can't stick before validation ends
+#   bypass   → is an admin `bypass` label active?
+#   changes  → detect the deployable delta vs the target branch
+#   validate → CHECK-ONLY deploy + Apex coverage against the org (no merge)
+#   status   → delete the phantom "deployed" marker the check-only run creates
+#   comment  → post ONE unified validation report on the PR
+#   signal   → flip the durable `pr-validation` commit status success/failure
+#
+# The real deploy + merge happen later in deploy.yml when the PR is approved.
+# Everything is driven by the target branch's gate in pipeline.config.yml, so a
+# PR whose base isn't an approval-gated stage resolves to is_stage=false and every
+# downstream job is skipped.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- Resolve target env + delta baseline; mark pr-validation pending --------
+  plan:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    outputs:
+      source_path:        ${{ steps.cfg.outputs.source_path }}
+      api_version:        ${{ steps.cfg.outputs.api_version }}
+      node_version:       ${{ steps.cfg.outputs.node_version }}
+      delta_baseline:     ${{ steps.cfg.outputs.delta_baseline }}
+      eff_baseline:       ${{ steps.base.outputs.eff_baseline }}
+      q_apex_coverage:    ${{ steps.cfg.outputs.q_apex_coverage }}
+      coverage_threshold: ${{ steps.cfg.outputs.coverage_threshold }}
+      profiles_mode:      ${{ steps.cfg.outputs.profiles_mode }}
+      bypass_label:       ${{ steps.cfg.outputs.bypass_label }}
+      gate:               ${{ steps.resolve.outputs.r_gate }}
+      is_stage:           ${{ steps.guard.outputs.is_stage }}
+      env_name:           ${{ steps.resolve.outputs.r_name }}
+      gh_environment:     ${{ steps.resolve.outputs.r_gh_environment }}
+      test_level:         ${{ steps.resolve.outputs.r_test_level }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with: { mode: outputs }
+      - id: resolve
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with:
+          mode: resolve
+          arg: "${{ github.base_ref || github.event.pull_request.base.ref || steps.cfg.outputs.entry_branch }}"
+      - id: guard
+        env:
+          IS_STAGE: ${{ steps.resolve.outputs.r_is_stage }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          IS=$IS_STAGE
+          [ "$EVENT" = "workflow_dispatch" ] && IS=true
+          echo "is_stage=$IS" >> "$GITHUB_OUTPUT"
+      # delta_baseline=target → validate against the PR's target env branch so the
+      # check-only report matches what the approval deploy will actually push.
+      - id: base
+        env:
+          DELTA_BASELINE: ${{ steps.cfg.outputs.delta_baseline }}
+          TARGET_BRANCH: ${{ github.base_ref || github.event.pull_request.base.ref }}
+          PROD_BASELINE: ${{ steps.cfg.outputs.baseline_branch }}
+        run: |
+          if [ "${DELTA_BASELINE:-prod}" = "target" ] && [ -n "${TARGET_BRANCH:-}" ]; then
+            EFF="$TARGET_BRANCH"
+          else
+            EFF="$PROD_BASELINE"
+          fi
+          echo "eff_baseline=$EFF" >> "$GITHUB_OUTPUT"
+      - name: Mark pr-validation pending
+        if: ${{ github.event_name == 'pull_request' && steps.resolve.outputs.r_gate == 'approval' }}
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/status@main
+        with:
+          sha: ${{ github.event.pull_request.head.sha }}
+          context: pr-validation
+          state: pending
+          description: "Validation + coverage running…"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- Admin bypass label -----------------------------------------------------
+  bypass:
+    needs: plan
+    if: ${{ needs.plan.outputs.is_stage == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      active: ${{ steps.b.outputs.active }}
+    steps:
+      - id: b
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/bypass@main
+        with:
+          pr_number: ${{ github.event.pull_request.number }}
+          bypass_label: ${{ needs.plan.outputs.bypass_label }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- Detect the deployable delta --------------------------------------------
+  changes:
+    needs: plan
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.is_stage == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.delta.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - id: delta
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/changes@main
+        with:
+          node_version: ${{ needs.plan.outputs.node_version }}
+          baseline_branch: ${{ needs.plan.outputs.eff_baseline }}
+          api_version: ${{ needs.plan.outputs.api_version }}
+          manifest_title: "Changes"
+          env_name: ${{ needs.plan.outputs.env_name }}
+          compare_branch: ${{ github.event.pull_request.base.ref }}
+          delta_merge_base: "true"
+
+  # ---- CHECK-ONLY validation deploy + coverage (no merge) ---------------------
+  validate:
+    needs: [plan, changes, bypass]
+    if: >-
+      always() && needs.plan.result == 'success' && needs.changes.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' && needs.plan.outputs.gate == 'approval'))
+    runs-on: ubuntu-latest
+    environment: ${{ needs.plan.outputs.gh_environment }}
+    outputs:
+      has_changes: ${{ steps.deploy.outputs.has_changes }}
+      outcome: ${{ steps.deploy.outputs.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - id: deploy
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/deploy@main
+        with:
+          environment: ${{ needs.plan.outputs.env_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          check_only: "true"
+          test_level: ${{ needs.plan.outputs.test_level }}
+          manifest_title: "Validate"
+          baseline_branch: ${{ needs.plan.outputs.eff_baseline }}
+          delta_merge_base: "true"
+          source_path: ${{ needs.plan.outputs.source_path }}
+          api_version: ${{ needs.plan.outputs.api_version }}
+          node_version: ${{ needs.plan.outputs.node_version }}
+          coverage_gate: ${{ needs.plan.outputs.q_apex_coverage }}
+          coverage_threshold: ${{ needs.plan.outputs.coverage_threshold }}
+          profiles_mode: ${{ needs.plan.outputs.profiles_mode }}
+          bypass: ${{ needs.bypass.outputs.active }}
+          sf_consumer_key: ${{ secrets.SF_CONSUMER_KEY }}
+          sf_username: ${{ secrets.SF_USERNAME }}
+          sf_instance_url: ${{ secrets.SF_INSTANCE_URL }}
+          sf_jwt_key: ${{ secrets.SF_JWT_KEY }}
+
+  # ---- Delete the phantom "deployed" marker the check-only run creates --------
+  validate-status:
+    needs: [plan, validate]
+    if: ${{ always() && github.event_name == 'pull_request' && needs.validate.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      deployments: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          GH_ENV: ${{ needs.plan.outputs.gh_environment }}
+        with:
+          script: |
+            const env = process.env.GH_ENV;
+            const sha = context.payload.pull_request.head.sha;
+            const deps = await github.rest.repos.listDeployments({
+              owner: context.repo.owner, repo: context.repo.repo, sha, environment: env,
+            });
+            for (const d of deps.data) {
+              await github.rest.repos.createDeploymentStatus({
+                owner: context.repo.owner, repo: context.repo.repo, deployment_id: d.id,
+                state: 'inactive',
+                description: 'Check-only validation completed — no changes were deployed.',
+              });
+              try {
+                await github.rest.repos.deleteDeployment({
+                  owner: context.repo.owner, repo: context.repo.repo, deployment_id: d.id,
+                });
+              } catch (e) {
+                console.log(`Could not delete deployment ${d.id}: ${e.message}`);
+              }
+            }
+
+  # ---- Post ONE unified validation report on the PR ---------------------------
+  comment:
+    needs: [plan, changes, validate, bypass]
+    if: >-
+      always() && github.event_name != 'workflow_dispatch' &&
+      needs.plan.result == 'success' && needs.plan.outputs.gate == 'approval'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/report@main
+        with:
+          environment: ${{ needs.plan.outputs.env_name }}
+          phase: validate
+          bypass: ${{ needs.bypass.outputs.active }}
+          validate_result: ${{ needs.validate.result }}
+          has_changes: ${{ needs.changes.outputs.has_changes }}
+          deploy_outcome: ${{ needs.validate.outputs.outcome }}
+
+  # ---- Flip the durable pr-validation status (the approval gate keys off it) ---
+  signal:
+    needs: [plan, validate]
+    if: >-
+      always() && github.event_name == 'pull_request' &&
+      needs.plan.result == 'success' && needs.plan.outputs.gate == 'approval'
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/status@main
+        with:
+          sha: ${{ github.event.pull_request.head.sha }}
+          context: pr-validation
+          state: ${{ needs.validate.result == 'success' && 'success' || 'failure' }}
+          description: ${{ needs.validate.result == 'success' && 'Validation + coverage passed — ready for approval.' || 'Validation/coverage did not pass.' }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

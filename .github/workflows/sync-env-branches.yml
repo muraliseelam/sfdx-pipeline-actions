@@ -1,0 +1,89 @@
+name: Sync Env Branches
+
+# After a production go-live, merge the production branch into each promotion-chain
+# environment branch so their delta-vs-prod sheds the just-shipped stories. Merges
+# cleanly when possible, otherwise opens a PR for manual conflict resolution.
+#
+# Fully config-driven: the environment branch list and the production branch are
+# read from sf-pipeline/pipeline.config.yml — nothing here is hardcoded.
+
+on:
+  # Reusable: called by prod-release after go-live, or by a project's manual
+  # caller. The caller owns any workflow_dispatch trigger.
+  workflow_call:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # ---- Read the config so the matrix + base branch come from one file --------
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      branches: ${{ steps.cfg.outputs.env_branches }}
+      prod_branch: ${{ steps.cfg.outputs.prod_branch }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with:
+          mode: outputs
+
+  sync:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJSON(needs.plan.outputs.branches) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.plan.outputs.prod_branch }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "sf-release-bot"
+          git config user.email "sf-release-bot@users.noreply.github.com"
+
+      - name: Merge ${{ needs.plan.outputs.prod_branch }} into ${{ matrix.branch }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROD_BRANCH: ${{ needs.plan.outputs.prod_branch }}
+        run: |
+          BR="${{ matrix.branch }}"
+          git fetch origin --prune
+          if ! git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+            echo "Branch $BR does not exist yet — creating it from $PROD_BRANCH."
+            git push origin "$PROD_BRANCH:refs/heads/$BR"
+            exit 0
+          fi
+          git checkout -B "$BR" "origin/$BR"
+          if git merge --no-edit "origin/$PROD_BRANCH"; then
+            if git push origin "HEAD:$BR"; then
+              echo "Merged $PROD_BRANCH into $BR."
+            else
+              # $BR is protected (e.g. the entry branch requires a PR). Fall back to a
+              # sync PR; if the org also blocks Actions from creating PRs, warn but
+              # do NOT fail the release — the delta-vs-prod auto-sheds shipped stories.
+              echo "::warning::Direct push to protected '$BR' was rejected — attempting a sync PR."
+              SYNC_BR="sync/${PROD_BRANCH}-into-${BR}-${{ github.run_id }}"
+              git push origin "HEAD:$SYNC_BR" || true
+              gh pr create --base "$BR" --head "$SYNC_BR" \
+                --title "Sync $PROD_BRANCH into $BR" \
+                --body "Automated post-release sync. '$BR' is protected — review and merge." \
+                || echo "::warning::Could not open a sync PR for '$BR' (Actions PR creation may be disabled at the org). An admin should merge $PROD_BRANCH into '$BR' manually."
+            fi
+          else
+            echo "::warning::Merge conflict syncing $PROD_BRANCH into $BR — opening a PR."
+            git merge --abort
+            SYNC_BR="sync/${PROD_BRANCH}-into-${BR}-${{ github.run_id }}"
+            git checkout -B "$SYNC_BR" "origin/$BR"
+            git push origin "HEAD:$SYNC_BR" || true
+            gh pr create --base "$BR" --head "$SYNC_BR" \
+              --title "Sync $PROD_BRANCH into $BR" \
+              --body "Automated post-release sync hit conflicts. Please resolve." \
+              || echo "::warning::Could not open a conflict-resolution PR for '$BR'. An admin should merge $PROD_BRANCH into '$BR' manually."
+          fi

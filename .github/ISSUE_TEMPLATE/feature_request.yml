@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest a change to the pipeline
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This pipeline is consumed by other repositories, so most changes affect
+        somebody else's production deployment path. The more concrete you can be
+        about the problem, the better.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can you not do today, and what do you do instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like to happen
+    validations:
+      required: true
+
+  - type: dropdown
+    id: compat
+    attributes:
+      label: Would this change behaviour for existing consumers?
+      options:
+        - "No — additive and opt-in"
+        - "Yes — existing projects would behave differently"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered

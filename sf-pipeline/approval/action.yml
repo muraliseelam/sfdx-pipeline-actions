@@ -1,0 +1,122 @@
+name: "Resolve approval + PR context"
+description: >-
+  Decide whether an approval-gated deploy may proceed, and surface the PR
+  context the rest of the pipeline needs. Handles three entry paths:
+    * a native "Approve" review,
+    * the self-serve `approved` label (admin-only on the entry stage),
+    * an admin workflow_dispatch override (manual_pr) that waives peer approval.
+  Outputs proceed=true only for an approval-gated stage that cleared its gate.
+
+inputs:
+  manual_pr:
+    description: "Admin override: PR number to deploy without a peer approval (blank = event-driven)."
+    required: false
+    default: ""
+  github_token:
+    description: "Token for permission checks + PR lookups."
+    required: true
+
+outputs:
+  proceed:
+    description: "true when the deploy may run."
+    value: ${{ steps.gate.outputs.proceed }}
+  pr_number:
+    value: ${{ steps.pr.outputs.pr_number }}
+  base_ref:
+    value: ${{ steps.pr.outputs.base_ref }}
+  head_sha:
+    value: ${{ steps.pr.outputs.head_sha }}
+  head_ref:
+    value: ${{ steps.pr.outputs.head_ref }}
+  pr_title:
+    value: ${{ steps.pr.outputs.pr_title }}
+
+runs:
+  using: composite
+  steps:
+    # 1) Work out which PR we are acting on, and how it was authorized.
+    - id: pr
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ github.repository }}
+        MANUAL_PR: ${{ inputs.manual_pr }}
+        ACTOR: ${{ github.actor }}
+        REVIEW_STATE: ${{ github.event.review.state }}
+        REVIEW_USER: ${{ github.event.review.user.login }}
+        SENDER: ${{ github.event.sender.login }}
+        LABEL_NAME: ${{ github.event.label.name }}
+        EVT_PR: ${{ github.event.pull_request.number }}
+        EVT_BASE: ${{ github.event.pull_request.base.ref }}
+        EVT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        EVT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        EVT_TITLE: ${{ github.event.pull_request.title }}
+      run: |
+        set -uo pipefail
+        if [ "${REVIEW_STATE:-}" = "approved" ] || [ "${LABEL_NAME:-}" = "approved" ]; then
+          if [ "${REVIEW_STATE:-}" = "approved" ]; then
+            METHOD=review; APPROVER="${REVIEW_USER:-$ACTOR}"
+          else
+            METHOD=label;  APPROVER="${SENDER:-$ACTOR}"
+          fi
+          PRNUM="$EVT_PR"; BASE="$EVT_BASE"; HSHA="$EVT_HEAD_SHA"; HREF="$EVT_HEAD_REF"; TITLE="$EVT_TITLE"
+        else
+          # Admin override: the triggering actor must be admin/maintain on the repo.
+          METHOD=manual; APPROVER="$ACTOR"
+          PERM=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" -q .permission 2>/dev/null || echo "")
+          if [ "$PERM" != "admin" ] && [ "$PERM" != "maintain" ]; then
+            echo "::error::Manual deploy override requires admin/maintain; @$ACTOR has '${PERM:-none}'."
+            exit 1
+          fi
+          J=$(gh api "repos/$REPO/pulls/$MANUAL_PR")
+          PRNUM="$MANUAL_PR"
+          BASE=$(printf '%s' "$J"  | python3 -c "import sys,json;print(json.load(sys.stdin)['base']['ref'])")
+          HSHA=$(printf '%s' "$J"  | python3 -c "import sys,json;print(json.load(sys.stdin)['head']['sha'])")
+          HREF=$(printf '%s' "$J"  | python3 -c "import sys,json;print(json.load(sys.stdin)['head']['ref'])")
+          TITLE=$(printf '%s' "$J" | python3 -c "import sys,json;print(json.load(sys.stdin)['title'])")
+        fi
+        {
+          echo "pr_number=$PRNUM"; echo "base_ref=$BASE"; echo "head_sha=$HSHA"
+          echo "head_ref=$HREF"; echo "pr_title=$TITLE"
+          echo "method=$METHOD"; echo "approver=$APPROVER"
+        } >> "$GITHUB_OUTPUT"
+        echo "PR #$PRNUM -> $BASE (method=$METHOD, approver=$APPROVER)"
+
+    # 2) Look up the target stage's gate + chain position from the config.
+    - id: resolve
+      uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+      with: { mode: resolve, arg: "${{ steps.pr.outputs.base_ref }}" }
+    - id: pd
+      continue-on-error: true
+      uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+      with: { mode: prdeploy, arg: "${{ steps.resolve.outputs.r_name }}" }
+
+    # 3) Final decision. Only approval-gated stages deploy here; on the entry
+    #    stage the `approved` LABEL must come from an admin (developers can't
+    #    self-approve their own entry PR).
+    - id: gate
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ github.repository }}
+        BASE: ${{ steps.pr.outputs.base_ref }}
+        GATE: ${{ steps.resolve.outputs.r_gate }}
+        METHOD: ${{ steps.pr.outputs.method }}
+        APPROVER: ${{ steps.pr.outputs.approver }}
+        IS_ENTRY: ${{ steps.pd.outputs.r_is_entry }}
+        PR: ${{ steps.pr.outputs.pr_number }}
+      run: |
+        set -uo pipefail
+        PROCEED=false
+        [ "$GATE" = "approval" ] && PROCEED=true
+        if [ "$PROCEED" = "true" ] && [ "${METHOD:-}" = "label" ] && [ "${IS_ENTRY:-}" = "true" ]; then
+          PERM=$(gh api "repos/$REPO/collaborators/$APPROVER/permission" -q .permission 2>/dev/null || echo "")
+          if [ "$PERM" != "admin" ]; then
+            PROCEED=false
+            gh api -X DELETE "repos/$REPO/issues/$PR/labels/approved" >/dev/null 2>&1 || true
+            gh pr comment "$PR" --repo "$REPO" --body "🚫 On an **int** (entry) PR the \`approved\` label can only be added by a repo **admin**. @$APPROVER has \`${PERM:-none}\` permission, so the label was removed. Get a reviewer's **Approve** review, or ask an admin to apply the label." >/dev/null 2>&1 || true
+            echo "::notice::Denied entry-stage 'approved' label from @$APPROVER (permission=${PERM:-none})."
+          fi
+        fi
+        echo "proceed=$PROCEED" >> "$GITHUB_OUTPUT"
+        echo "Base '$BASE' (gate='${GATE:-none}', method='${METHOD:-}', entry='${IS_ENTRY:-}') -> proceed=$PROCEED"
