@@ -200,6 +200,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 11. Personalisation placeholders (informational only)
+# ---------------------------------------------------------------------------
+# The shipped template legitimately still contains these, so this must never
+# fail — it exists so that a personalised copy gets told what it missed.
+# Tokens are assembled at run time so this script does not match itself.
+echo
+echo "11. Personalisation (informational)"
+L='<'; R='>'
+PH=$(grep -rlE "${L}COPYRIGHT HOLDER${R}|${L}SECURITY CONTACT${R}|${L}CONDUCT CONTACT${R}" \
+       . --exclude-dir=.git 2>/dev/null | grep -v '^\./scripts/personalize\.sh$' || true)
+SLUG_UPSTREAM='your-org/sfdx-'"pipeline-actions"   # split: see note below
+SLUG=$(grep -rlF "$SLUG_UPSTREAM" \
+         . --exclude-dir=.git 2>/dev/null | grep -v '^\./scripts/validate\.sh$' || true)
+# The upstream slug is assembled from two halves on purpose. Written whole, it
+# would be a literal occurrence in this file, so set-repo-owner.sh would rewrite
+# it to the new slug and this check would then match every personalised file.
+if [[ -z "$PH" && -z "$SLUG" ]]; then
+  pass "no unfilled placeholders — this copy is personalised"
+else
+  printf '  \033[33m•\033[0m template still has placeholders (expected upstream).\n'
+  [[ -n "$SLUG"  ]] && printf '      repo slug unset in %s file(s)\n' "$(wc -l <<< "$SLUG" | tr -d ' ')"
+  [[ -n "$PH"    ]] && printf '      identity placeholders in %s file(s)\n' "$(wc -l <<< "$PH" | tr -d ' ')"
+  printf '      Run ./scripts/personalize.sh before publishing. See PUBLISHING.md.\n'
+fi
+
+# ---------------------------------------------------------------------------
 echo
 if [[ $FAIL -eq 0 ]]; then
   printf '\033[32mAll checks passed.\033[0m\n'

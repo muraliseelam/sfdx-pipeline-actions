@@ -90,6 +90,9 @@ internal reference to point at that tag:
 
 `main` keeps `@main`. Only tags are self-referential.
 
+Publishing a fork or a fresh copy under a different owner has extra steps —
+see [PUBLISHING.md](PUBLISHING.md).
+
 ## Code of conduct
 
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).

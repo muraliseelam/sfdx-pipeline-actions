@@ -50,6 +50,11 @@ FILES=$(grep -rlF "$CURRENT" \
           --include='*.drawio' \
           . 2>/dev/null | grep -v '^\./\.git/' || true)
 
+# Never rewrite the tooling that performs the rewrite. Bash reads a script
+# incrementally as it executes, so editing one mid-run makes it resume at a byte
+# offset that now lands in the middle of a different statement.
+FILES=$(grep -vE '^\./scripts/(set-repo-owner|personalize)\.sh$' <<< "$FILES" || true)
+
 if [[ -z "$FILES" ]]; then
   echo "No files referenced ${CURRENT}."
   exit 0

@@ -6,7 +6,7 @@
 
 *One copy of the pipeline. Every Salesforce repo gets the same CI/CD — with zero logic duplicated.*
 
-**[📘 Product Documentation](./docs/Product_Documentation.md)** &nbsp;·&nbsp; **[🚀 User Guide](./docs/Pipeline_User_Guide.md)** &nbsp;·&nbsp; **[🤝 Contributing](./CONTRIBUTING.md)**
+**[📘 Product Documentation](./docs/Product_Documentation.md)** &nbsp;·&nbsp; **[🚀 User Guide](./docs/Pipeline_User_Guide.md)** &nbsp;·&nbsp; **[🤝 Contributing](./CONTRIBUTING.md)** &nbsp;·&nbsp; **[📦 Publishing](./PUBLISHING.md)**
 
 </div>
 
@@ -222,6 +222,7 @@ Two documents, and **only** two:
 |:--:|:--|:--|
 | 📘 | **[Product_Documentation.md](./docs/Product_Documentation.md)** | **How it works** — architecture & diagrams · branching strategy · environments & secrets · full config reference · all four stages · label/status state machine · delta baselines · profiles · quality gates · audit trail · ops runbooks · workflow/action/script catalogue |
 | 🚀 | **[Pipeline_User_Guide.md](./docs/Pipeline_User_Guide.md)** | **How to use it** — ship a change day to day · promote and release · onboard a new project in 10 steps · the four ops runbooks · troubleshooting · quick reference |
+| 📦 | **[PUBLISHING.md](./PUBLISHING.md)** | **Publishing your own copy** — personalise the repo slug and licence · cut the `v1` tags consumers pin to · why tagging `main` directly ships a broken release |
 
 🖼️ Editable draw.io sources and rendered PNGs → [`docs/diagrams/`](./docs/diagrams/)
 
