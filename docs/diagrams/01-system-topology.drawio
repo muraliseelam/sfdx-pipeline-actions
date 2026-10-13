@@ -32,7 +32,7 @@
           <mxGeometry x="70" y="540" width="320" height="40" as="geometry" />
         </mxCell>
 
-        <mxCell id="centBox" value="CENTRAL&#10;your-org/sfdx-pipeline-actions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f6f8fa;strokeColor=#5B7186;strokeWidth=2;arcSize=4;verticalAlign=top;fontStyle=1;fontSize=13;fontColor=#0D274D;spacingTop=6;" vertex="1" parent="1">
+        <mxCell id="centBox" value="CENTRAL&#10;muraliseelam/sfdx-pipeline-actions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f6f8fa;strokeColor=#5B7186;strokeWidth=2;arcSize=4;verticalAlign=top;fontStyle=1;fontSize=13;fontColor=#0D274D;spacingTop=6;" vertex="1" parent="1">
           <mxGeometry x="620" y="100" width="720" height="520" as="geometry" />
         </mxCell>
 

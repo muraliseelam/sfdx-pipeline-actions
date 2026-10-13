@@ -48,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: a
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/approval@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/approval@main
         with:
           manual_pr: ${{ inputs.manual_pr }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -77,13 +77,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: cfg
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with: { mode: outputs }
       - id: resolve
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with: { mode: resolve, arg: "${{ needs.ctx.outputs.base_ref }}" }
       - id: pd
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with: { mode: prdeploy, arg: "${{ steps.resolve.outputs.r_name }}" }
       # delta_baseline=target → diff against the PR's target env branch.
       - id: base
@@ -104,7 +104,7 @@ jobs:
       active: ${{ steps.b.outputs.active }}
     steps:
       - id: b
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/bypass@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/bypass@main
         with:
           pr_number: ${{ needs.ctx.outputs.pr_number }}
           bypass_label: ${{ needs.plan.outputs.bypass_label }}
@@ -123,7 +123,7 @@ jobs:
           ref: ${{ needs.ctx.outputs.head_sha }}
           fetch-depth: 0
       - id: delta
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/changes@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/changes@main
         with:
           node_version: ${{ needs.plan.outputs.node_version }}
           baseline_branch: ${{ needs.plan.outputs.eff_baseline }}
@@ -142,7 +142,7 @@ jobs:
       deployments: read
       statuses: read
     steps:
-      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/guard@main
+      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/guard@main
         with:
           pr_number: ${{ needs.ctx.outputs.pr_number }}
           base_ref: ${{ needs.ctx.outputs.base_ref }}
@@ -173,7 +173,7 @@ jobs:
           ref: ${{ needs.ctx.outputs.head_sha }}
           fetch-depth: 0
       - id: deploy
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/deploy@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
         with:
           environment: ${{ needs.plan.outputs.env_name }}
           ref: ${{ needs.ctx.outputs.head_sha }}
@@ -195,7 +195,7 @@ jobs:
           sf_jwt_key: ${{ secrets.SF_JWT_KEY }}
       - name: Update Jira story
         if: ${{ success() }}
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/jira@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/jira@main
         with:
           environment: ${{ needs.plan.outputs.env_name }}
           status: ${{ needs.plan.outputs.jira_status }}
@@ -206,7 +206,7 @@ jobs:
           jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
       - name: Mark deploy gate green (unlocks merge)
         if: ${{ success() && steps.deploy.outcome == 'success' }}
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/status@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/status@main
         with:
           sha: ${{ needs.ctx.outputs.head_sha }}
           context: deploy-${{ needs.plan.outputs.env_name }}
@@ -224,7 +224,7 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/merge-pr@main
+      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/merge-pr@main
         with:
           pr_number: ${{ needs.ctx.outputs.pr_number }}
           base_ref: ${{ needs.ctx.outputs.base_ref }}
@@ -261,7 +261,7 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - uses: your-org/sfdx-pipeline-actions/sf-pipeline/report@main
+      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/report@main
         with:
           environment: ${{ needs.plan.outputs.env_name }}
           phase: deploy

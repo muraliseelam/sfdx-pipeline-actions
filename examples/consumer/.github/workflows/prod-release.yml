@@ -22,7 +22,7 @@ on:
 
 jobs:
   prod:
-    uses: your-org/sfdx-pipeline-actions/.github/workflows/prod-release.yml@v1
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/prod-release.yml@v1
     secrets: inherit
     with:
       action: ${{ github.event.inputs.action }}

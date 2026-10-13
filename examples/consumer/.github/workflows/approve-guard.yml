@@ -18,7 +18,7 @@ permissions:
 jobs:
   guard:
     if: ${{ github.event.label.name == 'approved' }}
-    uses: your-org/sfdx-pipeline-actions/.github/workflows/approve-guard.yml@v1
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/approve-guard.yml@v1
     secrets: inherit
     with:
       pr_number: ${{ github.event.pull_request.number }}

@@ -5,8 +5,9 @@
 **Please do not open a public issue for a security problem.**
 
 Report it privately through
-[GitHub Security Advisories](https://github.com/your-org/sfdx-pipeline-actions/security/advisories/new),
-or email the maintainers at `<SECURITY CONTACT>`.
+[GitHub Security Advisories](https://github.com/muraliseelam/sfdx-pipeline-actions/security/advisories/new).
+That is the only reporting channel, and it is monitored — the maintainer's
+public address is a `noreply` one and cannot receive mail.
 
 Please include:
 
@@ -35,7 +36,7 @@ are worth being explicit about.
 Consumers must reference a released tag:
 
 ```yaml
-uses: your-org/sfdx-pipeline-actions/.github/workflows/deploy.yml@v1
+uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/deploy.yml@v1
 ```
 
 Referencing `@main` means you execute whatever is on our development branch at

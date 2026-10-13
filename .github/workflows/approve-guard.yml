@@ -48,11 +48,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: cfg
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with:
           mode: outputs
       - id: resolve
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with:
           mode: resolve
           arg: ${{ inputs.base_ref }}

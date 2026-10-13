@@ -17,7 +17,7 @@ action reaches its sibling scripts through `$GITHUB_ACTION_PATH`:
 
 ```yaml
 # .github/workflows/deploy.yml  (reusable — runs in the consumer's checkout)
-- uses: your-org/sfdx-pipeline-actions/sf-pipeline/deploy@main   # ✅
+- uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main   # ✅
 
 - run: bash sf-pipeline/scripts/delta.sh                         # ❌ not there
 ```
@@ -33,7 +33,7 @@ in someone else's repository.
 ## Getting set up
 
 ```bash
-git clone https://github.com/your-org/sfdx-pipeline-actions
+git clone https://github.com/muraliseelam/sfdx-pipeline-actions
 cd sfdx-pipeline-actions
 ./scripts/set-repo-owner.sh your-fork/sfdx-pipeline-actions   # repoint internal refs
 ```

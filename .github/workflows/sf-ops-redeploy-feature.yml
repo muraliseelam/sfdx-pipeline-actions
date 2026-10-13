@@ -54,7 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: cfg
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with:
           mode: outputs
       - name: Resolve target environment
@@ -89,7 +89,7 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Deploy ${{ inputs.feature_ref }} to ${{ needs.plan.outputs.name }}
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/deploy@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
         with:
           environment: ${{ needs.plan.outputs.name }}
           ref: ${{ steps.ref.outputs.sha }}

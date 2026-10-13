@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   init:
-    uses: your-org/sfdx-pipeline-actions/.github/workflows/project-init.yml@v1
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/project-init.yml@v1
     secrets: inherit
     with:
       apply: ${{ inputs.apply }}

@@ -19,5 +19,5 @@ permissions:
 
 jobs:
   sync:
-    uses: your-org/sfdx-pipeline-actions/.github/workflows/sync-env-branches.yml@v1
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/sync-env-branches.yml@v1
     secrets: inherit

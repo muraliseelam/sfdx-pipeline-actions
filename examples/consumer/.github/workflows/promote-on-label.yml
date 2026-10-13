@@ -32,7 +32,7 @@ jobs:
   promote:
     # Fire for ANY `deploy:*` label; the central workflow validates the name.
     if: ${{ startsWith(github.event.label.name, 'deploy:') }}
-    uses: your-org/sfdx-pipeline-actions/.github/workflows/sf-promote-label.yml@v1
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/sf-promote-label.yml@v1
     secrets: inherit
     with:
       control_pr: ${{ github.event.pull_request.number }}

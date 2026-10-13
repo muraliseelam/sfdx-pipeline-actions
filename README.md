@@ -92,8 +92,8 @@ cp sf-pipeline/pipeline.config.example.yml sf-pipeline/pipeline.config.yml
 **2.** Point the callers at your copy of this repository:
 
 ```bash
-grep -rl 'your-org/sfdx-pipeline-actions' .github/workflows/ \
-  | xargs sed -i '' 's|your-org/sfdx-pipeline-actions|YOUR_ORG/sfdx-pipeline-actions|g'
+grep -rl 'muraliseelam/sfdx-pipeline-actions' .github/workflows/ \
+  | xargs sed -i '' 's|muraliseelam/sfdx-pipeline-actions|YOUR_ORG/sfdx-pipeline-actions|g'
 ```
 
 **3.** Edit `sf-pipeline/pipeline.config.yml` — your orgs, branches and gates.
@@ -131,7 +131,7 @@ permissions:
 
 jobs:
   validate:
-    uses: your-org/sfdx-pipeline-actions/.github/workflows/pr-validation.yml@v1
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/pr-validation.yml@v1
     secrets: inherit
 ```
 
@@ -187,7 +187,7 @@ The **only** file read from the caller's workspace is
 Pin a release tag — never a branch:
 
 ```yaml
-uses: your-org/sfdx-pipeline-actions/.github/workflows/pr-validation.yml@v1
+uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/pr-validation.yml@v1
 ```
 
 | Ref | Behaviour | Use it when |

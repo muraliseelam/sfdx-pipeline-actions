@@ -27,5 +27,5 @@ jobs:
     if: >-
       (github.event_name == 'pull_request_review' && github.event.review.state == 'approved') ||
       (github.event_name == 'pull_request' && github.event.label.name == 'approved')
-    uses: your-org/sfdx-pipeline-actions/.github/workflows/deploy.yml@v1
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/deploy.yml@v1
     secrets: inherit

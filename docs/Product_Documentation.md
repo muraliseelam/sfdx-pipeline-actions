@@ -10,7 +10,7 @@ DevOps pipeline built on GitHub Actions.
 
 **Scope.** This describes the GitHub Actions pipeline platform. There is **no
 Salesforce-side application** — GitHub Actions is the entire product. Everything
-below is drawn from committed source in `your-org/sfdx-pipeline-actions`
+below is drawn from committed source in `muraliseelam/sfdx-pipeline-actions`
 and the reference consumer `your-org/sfdx-pipeline-example`, and was confirmed by an
 end-to-end run (acme PRs #186 → #187 → #188).
 
@@ -1025,7 +1025,7 @@ ten workflows:
 
 ```yaml
 # .github/workflows/deploy.yml, on main
-- uses: your-org/sfdx-pipeline-actions/sf-pipeline/deploy@main
+- uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
 ```
 
 A consumer pinning `@v1` gets the *workflow file* frozen at `v1` — but if that file
@@ -1098,14 +1098,14 @@ BASE=$(git rev-parse main)
 
 # --- immutable patch tag: internals pinned to the exact version -------------
 git checkout --detach $BASE
-sed -i '' -E 's|(your-org/sfdx-pipeline-actions/[^@[:space:]]+)@main|\1@v1.1.0|g' \
+sed -i '' -E 's|(muraliseelam/sfdx-pipeline-actions/[^@[:space:]]+)@main|\1@v1.1.0|g' \
   .github/workflows/*.yml
 git commit -qam "release: pin internal action references to v1.1.0"
 git tag -a v1.1.0 -m "Pipeline v1.1.0"
 
 # --- moving major tag: internals pinned to @v1 ------------------------------
 git checkout --detach $BASE
-sed -i '' -E 's|(your-org/sfdx-pipeline-actions/[^@[:space:]]+)@main|\1@v1|g' \
+sed -i '' -E 's|(muraliseelam/sfdx-pipeline-actions/[^@[:space:]]+)@main|\1@v1|g' \
   .github/workflows/*.yml
 git commit -qam "release: pin internal action references to v1"
 git tag -f -a v1 -m "Pipeline v1"

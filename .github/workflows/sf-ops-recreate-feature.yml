@@ -44,7 +44,7 @@ jobs:
 
       - name: Resolve baseline from pipeline config
         id: cfg
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with:
           mode: outputs
 

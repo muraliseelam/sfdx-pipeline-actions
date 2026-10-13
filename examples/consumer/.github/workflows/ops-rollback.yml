@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   rollback:
-    uses: your-org/sfdx-pipeline-actions/.github/workflows/sf-ops-rollback.yml@v1
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/sf-ops-rollback.yml@v1
     secrets: inherit
     with:
       pr_number: ${{ inputs.pr_number }}

@@ -52,7 +52,7 @@ From this repository, copy into your own repo:
 
 ```bash
 # from the root of YOUR repo
-git clone --depth 1 https://github.com/your-org/sfdx-pipeline-actions /tmp/sfdx-pipeline
+git clone --depth 1 https://github.com/muraliseelam/sfdx-pipeline-actions /tmp/sfdx-pipeline
 mkdir -p .github/workflows sf-pipeline
 cp /tmp/sfdx-pipeline/examples/consumer/.github/workflows/*.yml .github/workflows/
 cp /tmp/sfdx-pipeline/sf-pipeline/pipeline.config.example.yml sf-pipeline/pipeline.config.yml
@@ -69,15 +69,15 @@ stays in this repository and is versioned here.
 Every caller has one `uses:` line like:
 
 ```yaml
-uses: your-org/sfdx-pipeline-actions/.github/workflows/pr-validation.yml@v1
+uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/pr-validation.yml@v1
 ```
 
-Replace `your-org/sfdx-pipeline-actions` with wherever this repository actually
+Replace `muraliseelam/sfdx-pipeline-actions` with wherever this repository actually
 lives. One command does all eleven:
 
 ```bash
-grep -rl 'your-org/sfdx-pipeline-actions' .github/workflows \
-  | xargs sed -i '' 's|your-org/sfdx-pipeline-actions|OWNER/REPO|g'   # macOS
+grep -rl 'muraliseelam/sfdx-pipeline-actions' .github/workflows \
+  | xargs sed -i '' 's|muraliseelam/sfdx-pipeline-actions|OWNER/REPO|g'   # macOS
 # Linux: drop the '' after -i
 ```
 

@@ -48,8 +48,11 @@ an individual is officially representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behaviour may be
-reported to the community leaders responsible for enforcement at
-`<CONDUCT CONTACT>`. All complaints will be reviewed and investigated promptly
+reported to the community leaders responsible for enforcement by opening a
+[private security advisory](https://github.com/muraliseelam/sfdx-pipeline-actions/security/advisories/new),
+which is private to the maintainers, or by contacting
+[@muraliseelam](https://github.com/muraliseelam) directly on GitHub. All
+complaints will be reviewed and investigated promptly
 and fairly. Community leaders are obligated to respect the privacy and security
 of the reporter of any incident.
 

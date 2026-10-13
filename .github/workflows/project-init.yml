@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Provision from pipeline.config.yml
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/init@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/init@main
         with:
           apply: ${{ inputs.apply }}
           config: ${{ inputs.config }}
