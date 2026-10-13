@@ -62,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: cfg
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@v1
         with: { mode: outputs }
       - id: ref
         run: echo "ref=${{ steps.cfg.outputs.release_prefix }}${{ inputs.version }}" >> "$GITHUB_OUTPUT"
@@ -92,7 +92,7 @@ jobs:
       - name: Gather stories (PRs promoted to the last environment)
         id: gather
         if: ${{ inputs.stories == '' }}
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/release-gather@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/release-gather@v1
         with:
           label: ${{ needs.plan.outputs.release_label }}
           github_token: ${{ github.token }}
@@ -159,7 +159,7 @@ jobs:
       pr_number: ${{ steps.pf.outputs.pr_number }}
     steps:
       - id: pf
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/release-preflight@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/release-preflight@v1
         with:
           head_branch: ${{ needs.plan.outputs.ref }}
           base_branch: ${{ needs.plan.outputs.prod_branch }}
@@ -177,7 +177,7 @@ jobs:
     steps:
       - name: Chat — validation starting
         if: ${{ needs.plan.outputs.chat == 'true' }}
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@v1
         with:
           message: "🚀 **Prod validation starting** for **v${{ inputs.version }}**. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}
@@ -187,7 +187,7 @@ jobs:
       - uses: actions/checkout@v4
         with: { ref: "${{ needs.plan.outputs.ref }}", fetch-depth: 0 }
       - id: deploy
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@v1
         with:
           environment: prod-validate
           ref: ${{ needs.plan.outputs.ref }}
@@ -210,7 +210,7 @@ jobs:
     needs: [plan, validate]
     runs-on: ubuntu-latest
     steps:
-      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@main
+      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@v1
         with:
           message: ${{ needs.validate.result == 'success' && format('✅ **Prod validation PASSED** for v{0} — awaiting deploy approval.', inputs.version) || format('❌ **Prod validation FAILED** for v{0}. {1}/{2}/actions/runs/{3}', inputs.version, github.server_url, github.repository, github.run_id) }}
           webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}
@@ -227,7 +227,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ needs.plan.outputs.ref }}", fetch-depth: 0 }
-      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
+      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@v1
         with:
           environment: prod
           ref: ${{ needs.plan.outputs.ref }}
@@ -248,7 +248,7 @@ jobs:
     needs: [plan, deploy]
     runs-on: ubuntu-latest
     steps:
-      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@main
+      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@v1
         with:
           message: ${{ needs.deploy.result == 'success' && format('✅ **Prod VALIDATED & DEPLOYED** — v{0} is live. Deployed by @{1}.', inputs.version, github.actor) || format('❌ **Prod DEPLOY FAILED** for v{0} (validation had passed). {1}/{2}/actions/runs/{3}', inputs.version, github.server_url, github.repository, github.run_id) }}
           webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}
@@ -287,7 +287,7 @@ jobs:
             gh release create "v${VERSION}" --title "Release v${VERSION}" --generate-notes --target "$BASELINE"
           fi
       - name: Realign env branches to the new baseline
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/sync-branches@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/sync-branches@v1
         with:
           baseline_branch: ${{ needs.plan.outputs.baseline_branch }}
           env_branches: ${{ needs.plan.outputs.env_branches }}
@@ -295,7 +295,7 @@ jobs:
           github_token: ${{ github.token }}
       - name: Chat — released
         if: ${{ needs.plan.outputs.chat == 'true' }}
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@v1
         with:
           message: "🎉 **Prod RELEASE published** — v${{ inputs.version }} is live, merged to `${{ needs.plan.outputs.baseline_branch }}`, tagged, and released. ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ inputs.version }}"
           webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}

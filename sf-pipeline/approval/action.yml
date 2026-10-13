@@ -84,11 +84,11 @@ runs:
 
     # 2) Look up the target stage's gate + chain position from the config.
     - id: resolve
-      uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
+      uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@v1
       with: { mode: resolve, arg: "${{ steps.pr.outputs.base_ref }}" }
     - id: pd
       continue-on-error: true
-      uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
+      uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@v1
       with: { mode: prdeploy, arg: "${{ steps.resolve.outputs.r_name }}" }
 
     # 3) Final decision. Only approval-gated stages deploy here; on the entry

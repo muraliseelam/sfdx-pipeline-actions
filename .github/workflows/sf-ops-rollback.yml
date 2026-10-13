@@ -49,7 +49,7 @@ jobs:
 
       - name: Resolve config
         id: cfg
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@v1
         with:
           mode: outputs
 

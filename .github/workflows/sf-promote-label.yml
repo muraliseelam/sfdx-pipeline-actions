@@ -100,10 +100,10 @@ jobs:
           echo "name=$N" >> "$GITHUB_OUTPUT"
           echo "Promotion target environment: $N"
       - id: cfg
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@v1
         with: { mode: outputs }
       - id: pd
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@v1
         with: { mode: prdeploy, arg: "${{ steps.envn.outputs.name }}" }
 
   # ---- Ensure the <env> PR exists + is conflict-free (surface to control PR) ---
@@ -217,7 +217,7 @@ jobs:
           fetch-depth: 0
 
       - name: Ordering guard — predecessor deployed for this commit
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/guard@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/guard@v1
         with:
           pr_number: ${{ needs.prepare.outputs.env_pr }}
           base_ref: ${{ needs.plan.outputs.env_branch }}
@@ -229,7 +229,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - id: deploy
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@v1
         with:
           environment: ${{ needs.plan.outputs.env_name }}
           ref: ${{ inputs.head_sha }}
@@ -252,7 +252,7 @@ jobs:
 
       - name: Update Jira story
         if: ${{ success() }}
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/jira@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/jira@v1
         with:
           environment: ${{ needs.plan.outputs.env_name }}
           status: ${{ needs.plan.outputs.jira_status }}
@@ -264,7 +264,7 @@ jobs:
 
       - name: Mark deploy gate green (unlocks merge)
         if: ${{ success() && steps.deploy.outcome == 'success' }}
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/status@main
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/status@v1
         with:
           sha: ${{ inputs.head_sha }}
           context: deploy-${{ needs.plan.outputs.env_name }}
@@ -279,7 +279,7 @@ jobs:
     if: ${{ needs.deploy.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/merge-pr@main
+      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/merge-pr@v1
         with:
           pr_number: ${{ needs.prepare.outputs.env_pr }}
           base_ref: ${{ needs.plan.outputs.env_branch }}
