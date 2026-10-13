@@ -47,11 +47,11 @@ EOF
 
 cd "$(dirname "$0")/.."
 
-echo "==> 1/2  Repointing internal references at ${REPO}"
+echo "==> 1/3  Repointing internal references at ${REPO}"
 ./scripts/set-repo-owner.sh "$REPO" | sed 's/^/    /'
 
 echo
-echo "==> 2/2  Filling in identity placeholders"
+echo "==> 2/3  Filling in identity placeholders"
 
 # Replace a literal placeholder across the repo. Reports what it touched so a
 # silent no-op is never mistaken for success.
@@ -81,6 +81,30 @@ L='<'; R='>'
 fill "${L}COPYRIGHT HOLDER${R}" "$HOLDER"  "copyright holder"
 fill "${L}SECURITY CONTACT${R}" "$CONTACT" "security contact"
 fill "${L}CONDUCT CONTACT${R}"  "$CONTACT" "conduct contact"
+
+# ---------------------------------------------------------------------------
+# Commit identity
+# ---------------------------------------------------------------------------
+# Without a repository-local identity, git falls back to the machine's global
+# one. That is how an employer address ends up as the author of every commit in
+# a public repository — silently, and visible forever in the history. Setting it
+# here is local to this repository only and overrides nothing else on the
+# machine.
+echo
+echo "==> 3/3  Setting the commit identity for this repository"
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  git config user.name  "$HOLDER"
+  git config user.email "$CONTACT"
+  echo "    ✔ commits from this repository will be authored by ${HOLDER} <${CONTACT}>"
+  GLOBAL_EMAIL=$(git config --global user.email 2>/dev/null || true)
+  if [[ -n "$GLOBAL_EMAIL" && "$GLOBAL_EMAIL" != "$CONTACT" ]]; then
+    echo "      (the machine-wide identity is ${GLOBAL_EMAIL}; it is not used here)"
+  fi
+else
+  echo "    • not a git repository yet — after 'git init', run:"
+  echo "        git config user.name  \"${HOLDER}\""
+  echo "        git config user.email \"${CONTACT}\""
+fi
 
 echo
 # Split literal: written whole, set-repo-owner.sh would have rewritten it in

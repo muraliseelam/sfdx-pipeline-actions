@@ -38,6 +38,39 @@ That one command does all of this:
 
 It refuses to finish while any placeholder remains, so you cannot half-do it.
 
+### It also sets your commit identity
+
+The third thing the script does is set `user.name` and `user.email` **for this
+repository only**.
+
+This matters more than it sounds. Git has no per-repository identity by default
+— it falls back to your machine-wide one. If that machine-wide identity is a
+work address, then every commit in your new public repository is authored by
+your employer's email, permanently and visibly, and no amount of fixing the
+LICENSE afterwards undoes it.
+
+If you copy these files into a freshly `git init`-ed folder, that local setting
+does not come with them. Either copy the `.git` directory too, or re-run
+`personalize.sh` in the new folder, or set it by hand:
+
+```bash
+git config user.name  "Your Name"
+git config user.email you@example.com
+```
+
+Check before your first commit:
+
+```bash
+git config user.email      # must NOT be your work address
+```
+
+### A note on `gh` authentication
+
+`git push` over HTTPS uses whatever account `gh auth status` reports. If that is
+a work or enterprise account, the push is attributed to it regardless of your
+commit identity. Verify with `gh auth status`, and use `gh auth switch` or an
+SSH remote if it is not the account you intend to publish under.
+
 > **Why not just find-and-replace?** The slug appears in workflows, composite
 > actions, shell scripts, Markdown and the `.drawio` diagram sources. The script
 > discovers the current value rather than assuming it, so it still works if you
