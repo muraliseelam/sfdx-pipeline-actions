@@ -16,7 +16,7 @@
 
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 FAIL=0
 pass() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -116,6 +116,87 @@ if [[ $(wc -l <<< "$REFS" | tr -d ' ') -gt 1 ]]; then
   fail "mixed refs in internal references:"; echo "$REFS" | sed 's/^/      /'
 else
   pass "all internal references pin @${REFS}"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "7. Environment-name portability"
+# The whole value proposition is that environment names live only in the config.
+# This suite drives plan.py with non-standard names and branch != name.
+# ---------------------------------------------------------------------------
+if [[ -f tests/test_config_matrix.py ]]; then
+  if OUT=$(python3 tests/test_config_matrix.py 2>&1); then
+    pass "$(grep -oE 'All [0-9]+ checks passed' <<< "$OUT" || echo 'portability suite passed')"
+  else
+    fail "environment-name portability suite failed:"
+    grep -E '✗' <<< "$OUT" | sed 's/^/    /'
+  fi
+else
+  fail "tests/test_config_matrix.py is missing"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "8. Example consumer matches the example config"
+# A new user copies BOTH of these. If pr-validation.yml's branch filter does not
+# match environments[0].branch, their PRs silently never trigger anything —
+# the single most confusing possible first-run failure.
+# ---------------------------------------------------------------------------
+ENTRY=$(python3 -c '
+import sys, yaml
+c = yaml.safe_load(open("sf-pipeline/pipeline.config.example.yml"))
+e = (c.get("environments") or [])
+if not e: sys.exit("no environments in example config")
+print(e[0].get("branch") or e[0]["name"])
+')
+FILTER=$(python3 -c '
+import yaml
+w = yaml.safe_load(open("examples/consumer/.github/workflows/pr-validation.yml"))
+# PyYAML parses the bare key `on` as the boolean True
+k = "on" if "on" in w else True
+print(" ".join(w[k]["pull_request"]["branches"]))
+')
+if grep -qw -- "$ENTRY" <<< "$FILTER"; then
+  pass "example pr-validation.yml triggers on the entry branch '${ENTRY}' (filter: ${FILTER})"
+else
+  fail "example pr-validation.yml filters on '${FILTER}' but the example config's entry branch is '${ENTRY}'"
+fi
+
+PREFIX=$(python3 -c '
+import yaml
+c = yaml.safe_load(open("sf-pipeline/pipeline.config.example.yml"))
+print((c.get("production") or {}).get("release_branch_prefix", "release/"))
+')
+if grep -q -- "${PREFIX}" <<< "$FILTER"; then
+  pass "example pr-validation.yml also validates '${PREFIX}**' branches"
+else
+  fail "example pr-validation.yml never fires for '${PREFIX}**', so plan.py's release-branch path is unreachable"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "9. Documentation links resolve"
+# ---------------------------------------------------------------------------
+if OUT=$(python3 scripts/check-links.py 2>&1); then
+  pass "all relative markdown links and anchors resolve ($OUT)"
+else
+  fail "broken documentation links:"; echo "$OUT" | sed 's/^/    /'
+fi
+
+# ---------------------------------------------------------------------------
+head2 "10. Every reusable workflow has an example caller"
+# A consumer can only run what they have a caller for. A reusable workflow with
+# no example is effectively unreachable, and the docs end up telling people to
+# run something that is not in their repo.
+# ---------------------------------------------------------------------------
+MISSING=""
+for f in .github/workflows/*.yml; do
+  b=$(basename "$f" .yml)
+  grep -q 'workflow_call' "$f" || continue
+  grep -rqs "workflows/${b}.yml@" examples/consumer/.github/workflows/ \
+    || MISSING="${MISSING} ${b}"
+done
+if [[ -z "$MISSING" ]]; then
+  pass "all reusable workflows have an example caller"
+else
+  fail "reusable workflows with no example caller:${MISSING}"
 fi
 
 # ---------------------------------------------------------------------------

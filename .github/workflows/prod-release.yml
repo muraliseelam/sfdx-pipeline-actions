@@ -56,6 +56,7 @@ jobs:
       prod_test_level:    ${{ steps.cfg.outputs.prod_test_level }}
       prod_destructive_tests: ${{ steps.cfg.outputs.prod_destructive_tests }}
       release_prefix:     ${{ steps.cfg.outputs.release_prefix }}
+      release_label:      ${{ steps.cfg.outputs.release_label }}
       env_branches:       ${{ steps.cfg.outputs.env_branches }}
       chat:               ${{ steps.cfg.outputs.chat }}
     steps:
@@ -88,11 +89,12 @@ jobs:
           echo "branch=${RELEASE_PREFIX}$V" >> "$GITHUB_OUTPUT"
           git config user.name  "sf-release-bot"
           git config user.email "sf-release-bot@users.noreply.github.com"
-      - name: Gather stories (merged PRs promoted to stage)
+      - name: Gather stories (PRs promoted to the last environment)
         id: gather
         if: ${{ inputs.stories == '' }}
         uses: your-org/sfdx-pipeline-actions/sf-pipeline/release-gather@main
         with:
+          label: ${{ needs.plan.outputs.release_label }}
           github_token: ${{ github.token }}
       - name: Build release branch + merge stories
         env:

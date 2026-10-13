@@ -109,6 +109,11 @@ def cmd_outputs(cfg):
             "auto_json": envs,
             "env_branches": [e["branch"] for e in envs],
             "env_count": len(envs),
+            "last_env": envs[-1]["name"],
+            # Label the release train gathers on. Derived from the LAST env in the
+            # chain so renaming environments needs no change outside the config.
+            # Override with `production.release_label` only if you stamp manually.
+            "release_label": prod.get("release_label") or f"deployed:{envs[-1]['name']}",
             "prod_branch": prod.get("branch", ""),
             "prod_deploy_env": prod.get("deploy_environment", ""),
             "prod_validate_env": prod.get("validate_environment", ""),
@@ -253,6 +258,7 @@ def cmd_prdeploy(cfg, target):
             "r_name": env["name"],
             "r_gh_environment": env["gh_environment"],
             "r_test_level": env["test_level"],
+            "r_jira_status": env.get("jira_status", ""),
             "r_require_env": require_env,
             # This env's own trunk branch (the base a PR merges into once deployed).
             "r_branch": env["branch"],

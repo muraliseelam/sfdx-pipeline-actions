@@ -2,7 +2,8 @@ name: "SF Pipeline Release Gather"
 description: >-
   Resolve the set of story branches for a weekly release from the pipeline's own
   deployment state — NO Jira required. Gathers every OPEN pull request that has
-  been promoted all the way to stage (label `deployed:stage`) and is targeting the
+  been promoted all the way to the LAST environment in the promotion chain (label
+  `deployed:<last env>`) and is targeting the
   production baseline branch, then emits the space-separated list of their head
   branches. A PR can opt OUT of the release by adding the `hold` label. Merged or
   closed PRs drop out naturally. Fails fast with a readable message when nothing
@@ -10,7 +11,10 @@ description: >-
 
 inputs:
   label:
-    description: "PR label that marks a branch as ready for release (fully promoted to stage)."
+    description: >-
+      PR label that marks a branch as ready for release. Callers should pass the
+      `release_label` output of `plan.py outputs`, which derives it from the last
+      configured environment so renaming environments needs no change here.
     required: false
     default: "deployed:stage"
   exclude_label:
@@ -61,9 +65,9 @@ runs:
         [ -n "$BASE" ] && BASE_ARGS=(--base "$BASE")
 
         # One query for every MERGED PR carrying the release label; then locally
-        # drop any that also carry the exclude/hold label. Stage promotion PRs are
-        # squash-merged into the stage branch once their deploy succeeds, so the
-        # release set is the collection of MERGED PRs labeled `deployed:stage`.
+        # drop any that also carry the exclude/hold label. Promotion PRs are
+        # squash-merged into the target env branch once their deploy succeeds, so
+        # the release set is the collection of MERGED PRs carrying $LABEL.
         # jq keeps branch + number aligned and stable (sorted by PR number).
         RAW="$(gh pr list --repo "$REPO" --state merged --label "$LABEL" "${BASE_ARGS[@]}" \
                  --json number,headRefName,labels --limit 200 \
@@ -77,14 +81,14 @@ runs:
         echo "::endgroup::"
 
         if [ -z "$STORIES" ]; then
-          echo "::error::No merged PRs are labeled '$LABEL'${BASE:+ (base $BASE)}. Promote at least one branch to stage (its stage PR gets '$LABEL' and merges automatically), or remove a '$EXCLUDE_LABEL' hold, then re-run."
+          echo "::error::No merged PRs are labeled '$LABEL'${BASE:+ (base $BASE)}. Promote at least one branch through the full chain (the final promotion PR gets '$LABEL' and merges automatically), or remove a '$EXCLUDE_LABEL' hold, then re-run."
           exit 1
         fi
 
         # A gathered PR whose head branch no longer exists on origin was already
         # shipped in a PRIOR release and its feature branch cleaned up — it should
         # drop out of the set, NOT fail the whole release. (Merged PRs keep their
-        # `deployed:stage` label forever, so without this every past release keeps
+        # their release label forever, so without this every past release keeps
         # re-appearing here and aborts once its branch is deleted.) Skip the missing
         # ones with a notice and rebuild the aligned STORIES/KEYS from the
         # survivors; only fail if nothing live remains.

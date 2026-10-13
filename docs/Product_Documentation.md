@@ -94,14 +94,14 @@ flowchart LR
 
     subgraph CENT["CENTRAL — sfdx-pipeline-actions"]
         direction TB
-        RW["<b>.github/workflows/*.yml</b><br/>10 reusable workflows<br/><i>on: workflow_call</i>"]
-        CA["<b>sf-pipeline/&lt;action&gt;/action.yml</b><br/>14 composite actions"]
+        RW["<b>.github/workflows/*.yml</b><br/>11 reusable workflows<br/><i>on: workflow_call</i>"]
+        CA["<b>sf-pipeline/&lt;action&gt;/action.yml</b><br/>17 composite actions"]
         SC["<b>sf-pipeline/scripts/*</b><br/>14 shared helpers"]
         RW -->|"uses: …/sf-pipeline/&lt;action&gt;@main"| CA
         CA -->|"$GITHUB_ACTION_PATH/../scripts/…"| SC
     end
 
-    CW ==>|"uses: …/.github/workflows/X.yml@main<br/><b>secrets: inherit</b>"| RW
+    CW ==>|"uses: …/.github/workflows/X.yml@v1<br/><b>secrets: inherit</b>"| RW
     CFG -.->|"read at run time from<br/>the CALLER's checkout"| CA
     SRC -.->|"delta source"| CA
 
@@ -159,6 +159,45 @@ flowchart TB
 **Consequence:** any new shared logic must be added as a composite action, or
 inside an existing one. A reusable workflow that shells out to a script path
 directly will work in the central repo's own tests and fail in every consumer.
+
+### Environment-name independence
+
+The second half of portability is that this platform has **no opinion about what
+you call your environments**. `int → qa → stage` is a worked example, not a
+contract. A project whose chain is `mon → tue → wed → thu → prod` changes
+`pipeline.config.yml` and nothing else.
+
+This holds because environment names are never written into pipeline logic. They
+are read from the config at run time and flow outward:
+
+| Derived thing | Derived from |
+|---|---|
+| Git branch for a stage | `environments[].branch` |
+| GitHub Environment (secrets) | `environments[].gh_environment`, defaulting to `name` |
+| Promotion label | `deploy:<name>` |
+| Deployment stamp label | `deployed:<name>` |
+| Commit status context | `deploy-<name>` |
+| Which stage is the entry point | `environments[0]` |
+| Which stage precedes a given one | list order |
+| Label the release train gathers by | `release_label`, defaulting to `deployed:<last name>` |
+
+Two properties matter for anyone extending this:
+
+1. **`name` and `branch` are independent.** A stage may be called `qa` and live
+   on branch `gh-actions-qa`. Any code that treats one as the other is a bug —
+   see the `resolve` vs `prdeploy` note in §6.
+2. **Chain length is not fixed.** One environment is valid (it is simultaneously
+   the entry and last stage); so is ten. Nothing assumes three.
+
+**The single unavoidable exception** is the `on: pull_request: branches:` filter
+in the consumer's `pr-validation.yml` caller. GitHub evaluates `on:` filters
+before any job exists, so that filter cannot read the config. It is the one
+environment name a consumer writes outside `pipeline.config.yml`, and the example
+caller flags it in a comment.
+
+`tests/test_config_matrix.py` enforces all of this, driving `plan.py` with
+non-standard names, with `branch != name`, and with a single-environment chain.
+It runs in CI and in `scripts/validate.sh`.
 
 ---
 
@@ -319,15 +358,27 @@ surface. It is read at run time by the `plan` composite action
 | **C — explicit override** | `instance_url:` + `integration_username:` | Exactly what you specify |
 
 Other production keys: `release_branch_prefix` (default `release/`), `test_level`,
-and `destructive_tests` (the canary — see §11).
+`destructive_tests` (the canary — see §11), and `release_label`.
+
+**`release_label`** is the label the release train gathers PRs by. It defaults to
+`deployed:<last environment's name>`, so a project that renames its final
+pre-production stage needs no change — the train follows the config. Set it
+explicitly only if you stamp a label the pipeline did not generate.
 
 ### The `plan` action's three modes
 
 | Mode | Input | Key outputs |
 |---|---|---|
-| `outputs` | — | The whole resolved config, including `eff_baseline` |
-| `resolve` | a branch | branch → env; `r_is_stage` is true **only** for `auto` / `approval` gates |
-| `prdeploy` | an env | `r_require_env` (the immediately preceding env, **regardless of its gate**), `r_is_entry`, `r_next_*` |
+| `outputs` | — | The whole resolved config, including `eff_baseline`, `last_env` and `release_label` |
+| `resolve` | a **branch** | branch → env; `r_is_stage` is true **only** for `auto` / `approval` gates |
+| `promote` | an **env name** | Guard rails for a manual promotion; refuses PR-driven stages |
+| `prdeploy` | an **env name** | `r_require_env` (the immediately preceding env, **regardless of its gate**), `r_is_entry`, `r_branch`, `r_next_*` |
+
+> **`resolve` is keyed by branch; `promote` and `prdeploy` are keyed by name.**
+> Passing an environment *name* to `resolve` silently returns nothing whenever
+> `name != branch`, because `resolve` deliberately treats an unmapped branch as
+> inert rather than an error. This distinction is covered by
+> `tests/test_config_matrix.py`.
 
 ### Reference configuration
 
@@ -348,7 +399,7 @@ production:
   validate_environment: prod-validate
   is_sandbox: true
   sandbox: acmeprod
-quality_gates: { pmd: true, sonar: true, apex_coverage: true }
+quality_gates: { apex_coverage: true }
 coverage_threshold: 85
 profiles_mode: incremental
 require_pr_approval: true
@@ -792,18 +843,22 @@ Step-by-step onboarding instructions live in
 | `prod-release.yml` | `assemble` and `release` — the production train |
 | `sync-env-branches.yml` | Replay `main` onto the env branches |
 | `org-bootstrap.yml` | Stand up a new org's connection and secrets |
+| `project-init.yml` | Create the branches, labels and GitHub Environments a config declares |
 | `sf-ops-recreate-feature.yml` | Recreate runbook |
 | `sf-ops-redeploy-feature.yml` | Redeploy runbook |
 | `sf-ops-rollback.yml` | Rollback runbook |
 
-> **No workflow in this repository triggers on `push` or `pull_request`.** All ten
-> are `workflow_call` only, so the central repo cannot self-trigger a deploy.
+> **No workflow in this repository triggers on `push` or `pull_request`.** All
+> eleven are `workflow_call` only, so the central repo cannot self-trigger a
+> deploy. (`ci.yml` is this repository's own static-check build and is not part
+> of the consumer surface.)
 
 ### Composite actions — `sf-pipeline/<name>/action.yml`
 
 | Action | Purpose |
 |---|---|
-| `plan` | Read the caller's config → outputs (`outputs` / `resolve` / `prdeploy` modes) |
+| `plan` | Read the caller's config → outputs (`outputs` / `resolve` / `promote` / `prdeploy` modes) |
+| `init` | Create the branches, labels and GitHub Environments the config declares |
 | `changes` | Install SF CLI + sfdx-git-delta; compute the delta and manifest |
 | `deploy` | auth → profiles → validate/deploy → coverage gate → report → audit |
 | `guard` | The three fatal pre-deploy guards |
@@ -813,7 +868,7 @@ Step-by-step onboarding instructions live in
 | `report` | The unified sticky PR comment |
 | `status` | Write `pr-validation` / `deploy-<env>` commit statuses |
 | `coverage` | Apex coverage gate |
-| `release-gather` | Collect `deployed:stage` PRs for a release |
+| `release-gather` | Collect the release label's PRs for a release (label from `release_label`) |
 | `release-preflight` | Verify the release PR exists, is authorized and green |
 | `sync-branches` | Merge `main` into env branches, degrading to a PR |
 | `jira` · `notify` | Integrations (no-ops when unconfigured) |
@@ -1121,11 +1176,16 @@ issues; no code defect is implied.
 
 | # | Where | Issue |
 |---|---|---|
-| D1 | Root README / platform config | Claims the delta is *never* computed against the target branch. `delta_baseline` is real (`plan.py`, default `prod`) and the reference consumer sets `target` |
-| D2 | `sf-pipeline/pipeline.config.example.yml` | Missing `delta_baseline`, the `org:` block, the production targeting modes and `require_pr_approval`; still states PMD/Sonar are external while the reference consumer enables both |
+| D1 | *(resolved)* | The README claimed the delta was *never* computed against the target branch. `delta_baseline` is real (`plan.py`, default `prod`) and is now documented and present in the example config |
+| D2 | *(resolved)* | The example config was missing `delta_baseline`, the `org:` block and the production targeting mode, and claimed PMD/Sonar were configurable. Static analysis is genuinely out of scope — `quality_gates` only reads `apex_coverage` — and the phantom keys are gone |
 | D3 | *(resolved)* | The previous `Product_Documentation.md` documented a **different project** (an unrelated earlier project) and contradicted the consumer contract. This rewrite replaces it |
-| D4 | Consumer README / setup guide | Names old filenames (`sf-pr-validation.yml`), "9 callers", `gh-actions-*` branches, and files not present in the clone |
-| D5 | Consumer `pr-validation.yml` | Trigger lists only `int`, omitting `release/**` |
+| D4 | *(resolved)* | The setup guide named old filenames, the wrong caller count and `gh-actions-*` branches. Part 1 was rewritten against the shipped files, and `scripts/validate.sh` checks 8 and 10 now enforce the example set against the example config |
+| D5 | *(resolved)* | The example `pr-validation.yml` trigger listed only the entry branch, so `plan.py`'s release-branch validation path was unreachable in a fresh consumer. The caller now also fires on `release/**`, and check 8 enforces it |
+
+> **There were two example configs** — `sf-pipeline/pipeline.config.example.yml`
+> and a second copy under `examples/consumer/` — and they had drifted apart in
+> gates, branch names and phantom keys. The duplicate was deleted; the former is
+> now the single template, and the README and guide both point at it.
 
 ### Open threads
 

@@ -13,9 +13,27 @@ source_path: force-app        # Root of your Salesforce metadata (sfdx format)
 api_version: "66.0"           # Metadata API version used for the delta package
 node_version: "22"            # Node version for the CLI + LWC Jest
 
-# Production baseline: the delta to deploy is ALWAYS computed against this branch,
-# so every environment receives the complete change set relative to Prod.
-baseline_branch: gh-actions-main
+# Production baseline: the branch that represents what production currently has.
+baseline_branch: main
+
+# What each deploy's delta is computed against:
+#   prod    — always against `baseline_branch`, so every environment receives the
+#             complete change set relative to production. Safest default.
+#   target  — against the PR's own target branch, so a deploy carries only what
+#             that specific branch is missing. Smaller packages, but an
+#             environment can drift from production.
+delta_baseline: prod
+
+# ---- Salesforce org naming (only needed for Org Bootstrap) ----------------
+# Lets the bootstrap tooling derive each org's login URL and integration
+# username instead of you typing them per environment. Delete this block if you
+# set `instance_url:` and `integration_username:` on each environment by hand.
+#
+#   sandbox URL  -> https://{prod_org}--{sandbox}.sandbox.my.salesforce.com
+#   sandbox user -> {username_base}.{sandbox}
+org:
+  prod_org: acme                          # your production My Domain, before --sandbox
+  username_base: "pipeline.user@acme.com" # integration user; sandboxes append ".{sandbox}"
 
 # ---- Promotion chain (the automatic Int -> ... -> last part) ---------------
 # List as many or as few environments as you have — 3, 4, or 5 all work with no
@@ -37,25 +55,31 @@ baseline_branch: gh-actions-main
 # defaults to on_demand.
 # `jira_status:` (optional) is the Jira status each stage transitions the linked
 # story to after a successful deploy (requires notifications.jira + JIRA_* secrets).
+#
+# `name:` and `branch:` are independent. `name` is what appears in labels
+# (`deploy:<name>`), commit statuses (`deploy-<name>`) and workflow inputs;
+# `branch` is the actual git branch. They are the same below because that is the
+# least surprising default, but if your pipeline branches are prefixed — say
+# `pipeline/qa` — set `branch:` to that and leave `name: qa`.
 environments:
   - name: dev
-    branch: gh-actions-dev
+    branch: dev
     gh_environment: dev
     gate: auto                      # feature PR -> auto-deploy + auto-merge
     test_level: RunSpecifiedTests   # optional; defaults to RunSpecifiedTests
     jira_status: In Dev             # optional; moves the story here after deploy
   - name: int
-    branch: gh-actions-int
+    branch: int
     gh_environment: int
     gate: approval                  # dev PR -> validate + report; approve -> deploy
     jira_status: In Int
   - name: qa
-    branch: gh-actions-qa
+    branch: qa
     gh_environment: qa
     gate: on_demand                 # deploy via the manual Promote workflow
     jira_status: In QA
   - name: stage
-    branch: gh-actions-stage
+    branch: stage
     gh_environment: stage
     gate: on_demand                 # deploy via the manual Promote workflow
     jira_status: In Stage
@@ -63,18 +87,38 @@ environments:
 # ---- Production (isolated, manual, reviewer-gated) -------------------------
 # Remove this whole block if a project has no separate prod flow.
 production:
-  branch: gh-actions-main               # branch that represents production
+  branch: main               # branch that represents production
   deploy_environment: prod              # GitHub Environment WITH required reviewers
   validate_environment: prod-validate   # GitHub Environment WITHOUT reviewers (check-only)
   release_branch_prefix: "release/"     # weekly release branches
   test_level: RunSpecifiedTests
+
+  # How the production org itself is addressed. Three mutually exclusive modes:
+  #   A) a SANDBOX acting as production (common for training / pilot projects):
+  #        is_sandbox: true
+  #        sandbox: acmeprod
+  #   B) a REAL production org — the default:
+  #        is_sandbox: false
+  #   C) explicit override, ignoring the `org:` block entirely:
+  #        instance_url: https://acme.my.salesforce.com
+  #        integration_username: pipeline.user@acme.com
+  is_sandbox: false
+
   # Canary test(s) for a PRODUCTION destructive / no-Apex deploy. Production
   # forbids NoTestRun whenever Apex is involved (including deletions), so a
   # destructive-only change must still run a test. A deletion has no coverage
   # requirement, so a single stable passing test satisfies the platform without
   # running the whole (possibly red) org suite. Comma-separated; blank =
   # RunLocalTests.
-  destructive_tests: "AIAssistantForSalesControllerTest"
+  # Replace with the name of a small, stable, always-passing Apex test class in
+  # YOUR org. Leave blank if you do not have one.
+  destructive_tests: "MyStableSmokeTest"
+
+  # Label the release train gathers PRs by. Defaults to `deployed:<name of the
+  # last environment above>`, so renaming your final pre-production stage needs
+  # no change here. Override only if you stamp a label the pipeline did not
+  # generate.
+  # release_label: "deployed:stage"
 
 # ---- Quality gates --------------------------------------------------------
 # Static code analysis (PMD / SonarQube) is handled by your organisation's dedicated

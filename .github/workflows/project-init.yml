@@ -1,0 +1,63 @@
+name: Project Init (provision branches, labels, environments)
+
+# One-shot setup for a NEW consumer repository.
+#
+# Reads the consumer's own sf-pipeline/pipeline.config.yml and creates
+# everything the pipeline needs that GitHub will not create by itself:
+#
+#   * every environment branch and the production branch
+#   * every label (approved, hold, <bypass_label>, deploy:<env>, deployed:<env>)
+#   * every GitHub Environment named in the config
+#
+# Idempotent and additive: it never deletes or moves a branch, label,
+# environment or secret, so it is safe to re-run after adding or renaming an
+# environment. Dry run by default — run once to preview, then with apply=true.
+#
+# Creating GitHub Environments needs a token with repo ADMIN. Pass one as the
+# PIPELINE_PAT secret; without it the run still does branches and labels and
+# prints the environments to add by hand instead of failing.
+
+on:
+  workflow_call:
+    inputs:
+      apply:
+        description: "false = preview only (default). true = create things."
+        type: boolean
+        required: false
+        default: false
+      config:
+        description: "Path to pipeline.config.yml in the calling repo"
+        type: string
+        required: false
+        default: "sf-pipeline/pipeline.config.yml"
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision from pipeline.config.yml
+        uses: your-org/sfdx-pipeline-actions/sf-pipeline/init@main
+        with:
+          apply: ${{ inputs.apply }}
+          config: ${{ inputs.config }}
+          github_token: ${{ secrets.PIPELINE_PAT || github.token }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Project init — ${{ inputs.apply && 'APPLIED' || 'DRY RUN' }}"
+            echo
+            if [ "${{ inputs.apply }}" != "true" ]; then
+              echo "Nothing was created. Re-run with **apply = true** once the plan above looks right."
+            else
+              echo "Branches, labels and environments are provisioned."
+              echo "Next: add the four \`SF_*\` secrets to each environment, then apply branch protection."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

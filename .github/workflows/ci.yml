@@ -31,6 +31,9 @@ jobs:
       - name: Run static checks
         run: ./scripts/validate.sh
 
+      - name: Environment-name portability suite
+        run: python3 tests/test_config_matrix.py
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest

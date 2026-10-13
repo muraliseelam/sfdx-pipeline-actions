@@ -16,10 +16,9 @@ on:
         required: true
         type: string
       environment:
-        description: "Target environment (int, qa, stage, …)"
+        description: "Target environment — one of the `name:` values in pipeline.config.yml"
         required: true
         type: string
-        default: "int"
       dry_run:
         description: "Validate only (check-only). Uncheck for a REAL deploy."
         required: false

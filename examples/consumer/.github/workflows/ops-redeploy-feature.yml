@@ -2,7 +2,7 @@ name: Ops — Redeploy Feature
 
 # Thin caller (REQ-005.3 / REQ-017.1). Idempotently (re)deploys a feature delta to
 # any environment. dry_run defaults to true (check-only). Uncheck dry_run for a REAL
-# manual deploy to a higher org (int/qa/stage). Does NOT move any env branch.
+# manual deploy to a higher org. Does NOT move any env branch.
 on:
   workflow_dispatch:
     inputs:
@@ -11,11 +11,12 @@ on:
         required: true
         type: string
       environment:
-        description: "Target environment"
+        # Free-form on purpose: a dropdown would hardcode environment names in
+        # this caller, so renaming one in pipeline.config.yml would silently
+        # break it. An unknown name fails fast with the list of valid ones.
+        description: "Target environment (a `name:` from sf-pipeline/pipeline.config.yml)"
         required: true
-        default: "int"
-        type: choice
-        options: ["int", "qa", "stage"]
+        type: string
       dry_run:
         description: "Validate only (check-only). Uncheck for a REAL deploy."
         required: false

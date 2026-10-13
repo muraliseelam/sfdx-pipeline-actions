@@ -8,11 +8,11 @@ description: >-
 
 inputs:
   mode:
-    description: "outputs | resolve | promote"
+    description: "outputs | resolve | promote | prdeploy"
     required: false
     default: "outputs"
   arg:
-    description: "Branch (resolve) or environment name (promote). Ignored for outputs."
+    description: "Branch (resolve) or environment name (promote / prdeploy). Ignored for outputs."
     required: false
     default: ""
   config:
@@ -37,6 +37,8 @@ outputs:
   prod_test_level: { description: "Prod test level", value: "${{ steps.run.outputs.prod_test_level }}" }
   prod_destructive_tests: { description: "Prod destructive canary tests", value: "${{ steps.run.outputs.prod_destructive_tests }}" }
   release_prefix: { description: "Release branch prefix", value: "${{ steps.run.outputs.release_prefix }}" }
+  last_env: { description: "Name of the last environment in the promotion chain", value: "${{ steps.run.outputs.last_env }}" }
+  release_label: { description: "PR label the release train gathers on (deployed:<last env>)", value: "${{ steps.run.outputs.release_label }}" }
   q_apex_coverage: { description: "Coverage gate enabled", value: "${{ steps.run.outputs.q_apex_coverage }}" }
   coverage_threshold: { description: "Coverage threshold", value: "${{ steps.run.outputs.coverage_threshold }}" }
   profiles_mode: { description: "Profiles/PS mode", value: "${{ steps.run.outputs.profiles_mode }}" }

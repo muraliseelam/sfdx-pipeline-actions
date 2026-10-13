@@ -1,18 +1,22 @@
-name: Promote on label (deploy:qa / deploy:stage)
+name: Promote on label
 
-# Thin caller — label-driven qa/stage promotion, orchestrated FROM the int PR.
+# Thin caller — label-driven promotion, orchestrated FROM the entry-environment
+# PR (the control surface).
 #
-# The int PR is the control surface. After the change is deployed to int and the
-# int PR is merged, a developer adds `deploy:qa` (then later `deploy:stage`) to
-# that same PR. This hands off to the central orchestrator, which auto-creates
-# the feature→<env> PR, deploys the delta to the <env> org, and merges it ONLY
-# after a clean deploy — stamping `deployed:<env>` back on the int PR. Merge
-# conflicts (or deploy failures) are surfaced right here on the int PR with a
-# link to the env PR, and the `deploy:<env>` label is removed so it can be
-# re-added once resolved.
+# After a change is deployed to the entry environment, a developer adds a
+# `deploy:<env>` label to that same PR for each later hop. This hands off to the
+# central orchestrator, which auto-creates the feature→<env> PR, deploys the
+# delta to that org, and merges it ONLY after a clean deploy — stamping
+# `deployed:<env>` back on the control PR. Merge conflicts and deploy failures
+# are surfaced right here on the control PR with a link to the env PR, and the
+# `deploy:<env>` label is removed so it can be re-added once resolved.
 #
-# Everything up to and including int stays in deploy.yml; this only covers the
-# qa/stage hops. Labeling a merged/closed PR still fires `pull_request: labeled`.
+# The environment name is taken from the label itself, so THIS FILE NAMES NO
+# ENVIRONMENTS — adding or renaming one is a pipeline.config.yml change only.
+# A label naming an unconfigured environment fails fast in the central workflow
+# with the list of valid names.
+#
+# Labeling a merged or closed PR still fires `pull_request: labeled`.
 on:
   pull_request:
     types: [labeled]
@@ -26,13 +30,12 @@ permissions:
 
 jobs:
   promote:
-    if: >-
-      github.event.label.name == 'deploy:qa' ||
-      github.event.label.name == 'deploy:stage'
+    # Fire for ANY `deploy:*` label; the central workflow validates the name.
+    if: ${{ startsWith(github.event.label.name, 'deploy:') }}
     uses: your-org/sfdx-pipeline-actions/.github/workflows/sf-promote-label.yml@v1
     secrets: inherit
     with:
       control_pr: ${{ github.event.pull_request.number }}
-      target_env: ${{ github.event.label.name == 'deploy:qa' && 'qa' || 'stage' }}
+      label_name: ${{ github.event.label.name }}
       head_ref: ${{ github.event.pull_request.head.ref }}
       head_sha: ${{ github.event.pull_request.head.sha }}

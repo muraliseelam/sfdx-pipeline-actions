@@ -86,7 +86,7 @@ it. They hold **no pipeline logic of their own**.
 
 ```bash
 cp -r examples/consumer/.github/workflows/. .github/workflows/
-cp examples/consumer/sf-pipeline/pipeline.config.yml sf-pipeline/
+cp sf-pipeline/pipeline.config.example.yml sf-pipeline/pipeline.config.yml
 ```
 
 **2.** Point the callers at your copy of this repository:
@@ -97,10 +97,17 @@ grep -rl 'your-org/sfdx-pipeline-actions' .github/workflows/ \
 ```
 
 **3.** Edit `sf-pipeline/pipeline.config.yml` — your orgs, branches and gates.
+**This is the only file you edit per project.** Name your environments whatever
+you like: `dev/int/qa/stage` and `mon/tue/wed/thu` work equally well, and the
+chain can be any length.
 
-**4.** Create the environment branches, GitHub Environments and JWT secrets.
+**4.** Set the `branches:` filter in `.github/workflows/pr-validation.yml` to your
+**entry** branch. It is the one environment name that lives outside the config.
 
-➡️ **[Full step-by-step — User Guide, Part 3](./docs/Pipeline_User_Guide.md#part-3--onboard-a-new-project)**
+**5.** Run the **Project Init** workflow from the Actions tab (dry run first). It
+creates every branch, label and GitHub Environment your config declares.
+
+➡️ **[Full step-by-step — User Guide, Part 1](./docs/Pipeline_User_Guide.md#part-1--set-up-the-pipeline-one-time)**
 
 ---
 
@@ -114,7 +121,7 @@ name: PR Validation
 on:
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize]
-    branches: [int]          # 👈 the entry branch — the ONLY literal outside the config
+    branches: [dev]          # 👈 the entry branch — the ONLY literal outside the config
 
 permissions:
   contents: write

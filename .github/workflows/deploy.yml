@@ -1,4 +1,4 @@
-name: Deploy (approval → int / qa / stage)
+name: Deploy (approval-gated environment deploy)
 
 # Approval-driven, deploy-then-merge for every PR-driven stage.
 #

@@ -14,7 +14,7 @@ on:
   workflow_call:
     inputs:
       environment:
-        description: GitHub Environment to populate (int/qa/stage/prod/...)
+        description: GitHub Environment to populate (must match a gh_environment in pipeline.config.yml)
         required: true
         type: string
       instance_url:

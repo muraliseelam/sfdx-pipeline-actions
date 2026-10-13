@@ -1,10 +1,11 @@
-name: Promote on label (deploy:qa / deploy:stage)
+name: Promote on label (deploy:<env>)
 
-# Label-driven promotion, orchestrated FROM the int PR (the control surface).
+# Label-driven promotion, orchestrated FROM the entry-environment PR (the
+# control surface).
 #
-# When `deploy:qa` (or `deploy:stage`) is added to a PR, this:
+# When a `deploy:<env>` label is added to a PR, this:
 #   prepare  → ensure a feature→<env> PR exists; if it CONFLICTS with the env
-#              branch, comment the error + link back on the CONTROL (int) PR and
+#              branch, comment the error + link back on the CONTROL PR and
 #              stop (nothing deploys, no branch moves).
 #   deploy   → ordering guard (predecessor deployed for THIS commit) → real
 #              deploy of the delta to the <env> org.
@@ -13,8 +14,8 @@ name: Promote on label (deploy:qa / deploy:stage)
 #              clear the `deploy:<env>` trigger label.
 #   report   → on any failure, surface a ❌ note + run link on the control PR.
 #
-# Everything up to and including int is unchanged (handled by deploy.yml). This
-# only drives qa/stage promotion off a label on the int PR.
+# Deploys driven by a PR into an environment branch are unchanged (handled by
+# deploy.yml). This only drives label-based promotion from the control PR.
 
 on:
   workflow_call:
@@ -24,9 +25,20 @@ on:
         type: string
         required: true
       target_env:
-        description: "Environment to promote to (qa | stage)."
+        description: >-
+          Environment to promote to — one of the `name:` values in
+          pipeline.config.yml. Optional if `label_name` is supplied.
         type: string
-        required: true
+        required: false
+        default: ""
+      label_name:
+        description: >-
+          The `deploy:<env>` label that triggered this run. The environment is
+          derived by stripping the `deploy:` prefix, so a consumer caller never
+          needs to name its environments. Ignored when `target_env` is set.
+        type: string
+        required: false
+        default: ""
       head_ref:
         description: "Feature branch (PR head) to promote."
         type: string
@@ -45,7 +57,7 @@ permissions:
 
 # One promotion per env+branch at a time.
 concurrency:
-  group: promote-label-${{ inputs.target_env }}-${{ inputs.head_ref }}
+  group: promote-label-${{ inputs.target_env || inputs.label_name }}-${{ inputs.head_ref }}
   cancel-in-progress: false
 
 jobs:
@@ -59,23 +71,40 @@ jobs:
       q_apex_coverage:    ${{ steps.cfg.outputs.q_apex_coverage }}
       coverage_threshold: ${{ steps.cfg.outputs.coverage_threshold }}
       profiles_mode:      ${{ steps.cfg.outputs.profiles_mode }}
-      env_name:           ${{ steps.resolve.outputs.r_name }}
-      gh_environment:     ${{ steps.resolve.outputs.r_gh_environment }}
-      test_level:         ${{ steps.resolve.outputs.r_test_level }}
-      jira_status:        ${{ steps.resolve.outputs.r_jira_status }}
+      env_name:           ${{ steps.pd.outputs.r_name }}
+      env_branch:         ${{ steps.pd.outputs.r_branch }}
+      gh_environment:     ${{ steps.pd.outputs.r_gh_environment }}
+      test_level:         ${{ steps.pd.outputs.r_test_level }}
+      jira_status:        ${{ steps.pd.outputs.r_jira_status }}
       require_env:        ${{ steps.pd.outputs.r_require_env }}
       is_entry:           ${{ steps.pd.outputs.r_is_entry }}
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve target environment name
+        id: envn
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target_env }}
+          LABEL: ${{ inputs.label_name }}
+        run: |
+          set -euo pipefail
+          # Prefer an explicit target_env; otherwise derive it from the trigger
+          # label by stripping the `deploy:` prefix. Deriving it means a consumer
+          # caller never has to name its environments.
+          N="${TARGET:-}"
+          if [ -z "$N" ] && [ -n "${LABEL:-}" ]; then N="${LABEL#deploy:}"; fi
+          if [ -z "$N" ]; then
+            echo "::error::Pass either target_env or label_name (a 'deploy:<env>' label)."
+            exit 1
+          fi
+          echo "name=$N" >> "$GITHUB_OUTPUT"
+          echo "Promotion target environment: $N"
       - id: cfg
         uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
         with: { mode: outputs }
-      - id: resolve
-        uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
-        with: { mode: resolve, arg: "${{ inputs.target_env }}" }
       - id: pd
         uses: your-org/sfdx-pipeline-actions/sf-pipeline/plan@main
-        with: { mode: prdeploy, arg: "${{ steps.resolve.outputs.r_name }}" }
+        with: { mode: prdeploy, arg: "${{ steps.envn.outputs.name }}" }
 
   # ---- Ensure the <env> PR exists + is conflict-free (surface to control PR) ---
   prepare:
@@ -86,7 +115,7 @@ jobs:
       env_pr_url: ${{ steps.ensure.outputs.env_pr_url }}
       skip:       ${{ steps.ensure.outputs.skip }}
     steps:
-      - name: Ensure feature→${{ inputs.target_env }} PR + check mergeability
+      - name: Ensure feature→${{ needs.plan.outputs.env_name }} PR + check mergeability
         id: ensure
         shell: bash
         env:
@@ -94,7 +123,8 @@ jobs:
           PAT: ${{ secrets.PIPELINE_PAT || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           CONTROL_PR: ${{ inputs.control_pr }}
-          ENVN: ${{ inputs.target_env }}
+          ENVN: ${{ needs.plan.outputs.env_name }}
+          ENVBR: ${{ needs.plan.outputs.env_branch }}
           HEAD: ${{ inputs.head_ref }}
         run: |
           set -uo pipefail
@@ -107,11 +137,11 @@ jobs:
           fi
 
           # Find an existing open feature→env PR, else create one.
-          pr=$(gh pr list --repo "$REPO" --head "$HEAD" --base "$ENVN" --state open \
+          pr=$(gh pr list --repo "$REPO" --head "$HEAD" --base "$ENVBR" --state open \
                  --json number -q '.[0].number' 2>/dev/null || echo "")
           if [ -z "$pr" ]; then
             title=$(gh pr view "$CONTROL_PR" --repo "$REPO" --json title -q .title 2>/dev/null || echo "$HEAD")
-            if ! url=$(GH_TOKEN="$PAT" gh pr create --repo "$REPO" --base "$ENVN" --head "$HEAD" \
+            if ! url=$(GH_TOKEN="$PAT" gh pr create --repo "$REPO" --base "$ENVBR" --head "$HEAD" \
                          --title "$title → $ENVN" \
                          --body "Auto-created by \`deploy:$ENVN\` on #$CONTROL_PR. Deploy-then-merge; no branch moves until the $ENVN org deploy succeeds." 2>/tmp/prerr); then
               err="$(tr -d '\n' </tmp/prerr)"
@@ -123,20 +153,20 @@ jobs:
               # reporting that as success leaves the developer watching a green
               # check while nothing moves. Fail loudly instead.
               if printf '%s' "$err" | grep -qi "No commits between"; then
-                echo "::notice::$HEAD is already in $ENVN — nothing to promote."
+                echo "::notice::$HEAD is already in $ENVBR — nothing to promote."
                 echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
               fi
 
               printf '%s\n' \
                 "❌ **Promotion to \`$ENVN\` could not start.**" \
                 "" \
-                "The \`$HEAD\` → \`$ENVN\` pull request could not be created:" \
+                "The \`$HEAD\` → \`$ENVBR\` pull request could not be created:" \
                 "" \
                 '```' \
                 "$err" \
                 '```' \
                 "" \
-                "A \`Bad credentials\` error here means the **\`PIPELINE_PAT\`** repository secret has expired or been revoked; it must be rotated before any \`deploy:qa\` or \`deploy:stage\` label will work." \
+                "A \`Bad credentials\` error here means the **\`PIPELINE_PAT\`** repository secret has expired or been revoked; it must be rotated before any \`deploy:<env>\` label will work." \
                 "" \
                 "**Nothing was deployed and no branch moved.** Re-add the \`deploy:$ENVN\` label once it is fixed." > /tmp/prfail.md
               gh pr comment "$CONTROL_PR" --repo "$REPO" --body-file /tmp/prfail.md || true
@@ -162,12 +192,12 @@ jobs:
             printf '%s\n' \
               "❌ **Promotion to \`$ENVN\` is blocked — merge conflicts.**" \
               "" \
-              "The auto-created PR **[#$pr]($url)** (\`$HEAD\` → \`$ENVN\`) conflicts with the \`$ENVN\` branch." \
+              "The auto-created PR **[#$pr]($url)** (\`$HEAD\` → \`$ENVBR\`) conflicts with the \`$ENVBR\` branch." \
               "" \
               "**To proceed:** resolve the conflicts on **[#$pr]($url)**, then re-add the \`deploy:$ENVN\` label here. Nothing was deployed and no branch moved." > /tmp/conflict-body.md
             gh pr comment "$CONTROL_PR" --repo "$REPO" --body-file /tmp/conflict-body.md
             gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true
-            echo "::error::feature→$ENVN PR #$pr conflicts with $ENVN — surfaced on control PR #$CONTROL_PR."
+            echo "::error::feature→$ENVBR PR #$pr conflicts with $ENVBR — surfaced on control PR #$CONTROL_PR."
             exit 1
           fi
           echo "feature→$ENVN PR #$pr is mergeable (state='$state')."
@@ -190,7 +220,7 @@ jobs:
         uses: your-org/sfdx-pipeline-actions/sf-pipeline/guard@main
         with:
           pr_number: ${{ needs.prepare.outputs.env_pr }}
-          base_ref: ${{ inputs.target_env }}
+          base_ref: ${{ needs.plan.outputs.env_branch }}
           head_sha: ${{ inputs.head_sha }}
           env_name: ${{ needs.plan.outputs.env_name }}
           require_env: ${{ needs.plan.outputs.require_env }}
@@ -206,7 +236,7 @@ jobs:
           check_only: "false"
           test_level: ${{ needs.plan.outputs.test_level }}
           manifest_title: "Deploy"
-          baseline_branch: ${{ inputs.target_env }}
+          baseline_branch: ${{ needs.plan.outputs.env_branch }}
           delta_merge_base: "true"
           source_path: ${{ needs.plan.outputs.source_path }}
           api_version: ${{ needs.plan.outputs.api_version }}
@@ -252,7 +282,7 @@ jobs:
       - uses: your-org/sfdx-pipeline-actions/sf-pipeline/merge-pr@main
         with:
           pr_number: ${{ needs.prepare.outputs.env_pr }}
-          base_ref: ${{ inputs.target_env }}
+          base_ref: ${{ needs.plan.outputs.env_branch }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Stamp deployed:<env> + notify control PR
@@ -285,7 +315,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          ENVN: ${{ inputs.target_env }}
+          ENVN: ${{ needs.plan.outputs.env_name }}
           ENV_PR: ${{ needs.prepare.outputs.env_pr }}
           ENV_PR_URL: ${{ needs.prepare.outputs.env_pr_url }}
           CONTROL_PR: ${{ inputs.control_pr }}

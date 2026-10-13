@@ -1,6 +1,6 @@
 name: "Realign env branches to baseline"
 description: >-
-  Force every environment branch (int/qa/stage) back to the baseline (prod)
+  Force every environment branch back to the production baseline branch
   branch after a release lands. Env branches diverge because PRs are squash-
   merged into them (new SHAs) while the release merges the original commits —
   same content, different history. Realigning keeps a clean base so the next

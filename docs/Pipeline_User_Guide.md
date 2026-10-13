@@ -1,7 +1,8 @@
 # Salesforce DevOps Pipeline — User Guide
 
-**Step-by-step instructions for using the pipeline.** Follow the part that matches
-your role.
+**Step-by-step instructions for setting up and using the pipeline.** Start at
+Part 1 if you are standing it up for the first time; jump to the part that
+matches your role otherwise.
 
 > **Want to know how it works under the hood?** See
 > **[Product_Documentation.md](./Product_Documentation.md)** — architecture,
@@ -13,19 +14,354 @@ your role.
 
 | Part | For | Section |
 |---|---|---|
-| 1 | Developers | [Ship a change — day to day](#part-1--ship-a-change-day-to-day) |
-| 2 | Release managers | [Promote and release](#part-2--promote-and-release) |
-| 3 | Platform / DevOps | [Onboard a new project](#part-3--onboard-a-new-project) |
+| 1 | **Setting it up the first time** | [Set up the pipeline](#part-1--set-up-the-pipeline-one-time) |
+| 2 | Developers | [Ship a change — day to day](#part-2--ship-a-change-day-to-day) |
+| 3 | Release managers | [Promote and release](#part-3--promote-and-release) |
 | 4 | Anyone on call | [Ops runbooks](#part-4--ops-runbooks) |
 | 5 | Everyone | [Troubleshooting](#part-5--troubleshooting) |
 | 6 | Everyone | [Quick reference](#part-6--quick-reference) |
 
-Examples use the reference project **`sfdx-pipeline-example`**, whose chain is
-`int → qa → stage → main(prod)`. Substitute your own environment names.
+Examples use a reference project whose chain is `int → qa → stage → main(prod)`.
+**Those names are examples, not requirements** — they come from one config file
+and you can call your stages anything. If your chain is `mon → tue → wed → prod`,
+write that in `pipeline.config.yml` and the whole pipeline follows.
 
 ---
 
-## Part 1 — Ship a change, day to day
+## Part 1 — Set up the pipeline (one time)
+
+**Time: about 30 minutes**, most of it waiting for Salesforce.
+
+You need: a GitHub repo with your Salesforce metadata in it, admin rights on that
+repo, and a System Administrator login for each Salesforce org you want to deploy
+to.
+
+At the end you will have a working pipeline. You do **not** need to understand the
+pipeline to finish this part — just follow the steps in order.
+
+---
+
+### Step 1 — Copy two things into your repo
+
+From this repository, copy into your own repo:
+
+| Copy this | To here |
+|---|---|
+| `examples/consumer/.github/workflows/` (11 files) | `.github/workflows/` |
+| `sf-pipeline/pipeline.config.example.yml` | `sf-pipeline/pipeline.config.yml` |
+
+```bash
+# from the root of YOUR repo
+git clone --depth 1 https://github.com/your-org/sfdx-pipeline-actions /tmp/sfdx-pipeline
+mkdir -p .github/workflows sf-pipeline
+cp /tmp/sfdx-pipeline/examples/consumer/.github/workflows/*.yml .github/workflows/
+cp /tmp/sfdx-pipeline/sf-pipeline/pipeline.config.example.yml sf-pipeline/pipeline.config.yml
+```
+
+Those eleven workflow files are **callers**: each is a trigger plus a single
+`uses:` line. They contain no logic, and you should never add any. All the logic
+stays in this repository and is versioned here.
+
+---
+
+### Step 2 — Point the callers at this repository
+
+Every caller has one `uses:` line like:
+
+```yaml
+uses: your-org/sfdx-pipeline-actions/.github/workflows/pr-validation.yml@v1
+```
+
+Replace `your-org/sfdx-pipeline-actions` with wherever this repository actually
+lives. One command does all eleven:
+
+```bash
+grep -rl 'your-org/sfdx-pipeline-actions' .github/workflows \
+  | xargs sed -i '' 's|your-org/sfdx-pipeline-actions|OWNER/REPO|g'   # macOS
+# Linux: drop the '' after -i
+```
+
+**Keep the `@v1`.** It is a moving major tag: you get fixes automatically, and
+breaking changes ship as `v2` so you opt in by changing one character. Never pin
+`@main` — every commit here would reach your production pipeline instantly.
+
+---
+
+### Step 3 — Describe your environments
+
+Open `sf-pipeline/pipeline.config.yml`. **This is the only file you edit per
+project.** Everything else is generic.
+
+The part that matters is the `environments:` list. Name them whatever your
+company calls them — the pipeline does not care. If your chain is
+`dev → test → preprod → live`, write exactly that:
+
+```yaml
+baseline_branch: main          # the branch that represents PRODUCTION
+
+environments:                  # your promotion chain, IN ORDER. First = entry.
+  - name: dev                  # whatever you call it
+    branch: dev                # the git branch for this stage
+    gh_environment: dev        # the GitHub Environment holding this org's secrets
+    gate: auto                 # see the table below
+  - name: test
+    branch: test
+    gh_environment: test
+    gate: approval
+  - name: preprod
+    branch: preprod
+    gh_environment: preprod
+    gate: on_demand
+  - name: live
+    branch: live
+    gh_environment: live
+    gate: on_demand
+
+production:
+  branch: main
+  validate_environment: prod-validate   # NO required reviewers
+  deploy_environment: prod              # WITH required reviewers
+  release_branch_prefix: "release/"
+```
+
+You can have **1 environment or 10**. Add, remove or rename freely — nothing else
+in the pipeline needs to change.
+
+`gate:` decides how each stage is driven:
+
+| `gate:` | What happens | Use it for |
+|---|---|---|
+| `auto` | A PR into this branch deploys for real and merges itself, no approval | A low-friction dev stage |
+| `approval` | A PR runs check-only validation and posts a report; a reviewer approving then deploys and merges | Your main quality stage |
+| `on_demand` | Not PR-driven. Deployed when someone adds a `deploy:<name>` label | Later stages like preprod/live |
+
+> **Which `test_level`?** Leave it out and you get `RunSpecifiedTests`, which runs
+> only the tests covering what you changed. `NoTestRun` is faster but is rejected
+> by Salesforce for production deploys involving Apex.
+
+Full field-by-field reference:
+[Product_Documentation.md §6](./Product_Documentation.md#6-configuration-reference).
+
+---
+
+### Step 4 — Set the entry branch (the one extra edit)
+
+Open `.github/workflows/pr-validation.yml` and set the branch filter to your
+**first** environment's branch:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+    branches:
+      - dev          # <-- environments[0].branch from your config
+```
+
+This is **the only environment name anywhere outside
+`pipeline.config.yml`**. GitHub parses `on:` filters before any job starts, so
+this one filter cannot read your config file. Everything else — every other
+branch, environment and label — is read from the config at run time.
+
+Commit and push everything so far to your default branch.
+
+---
+
+### Step 5 — Let the pipeline build its own scaffolding
+
+You now need branches, labels and GitHub Environments that match your config.
+**Do not create them by hand.** Go to the **Actions** tab, pick **Project Init**,
+and click **Run workflow** with *apply* left **unchecked**.
+
+It prints exactly what it would create:
+
+```
+1/3  Branches
+  ✔ branch dev     (would create, from main)
+  ✔ branch test    (would create, from main)
+  ...
+2/3  Labels
+  ✔ label deploy:preprod   (would create)
+  ...
+3/3  GitHub Environments
+  ✔ environment dev        (would create)
+```
+
+Read it. If the branch and environment names are the ones you intended, run it
+again with **apply checked**. It is idempotent and additive — it never deletes or
+moves anything, so re-run it any time you add or rename an environment.
+
+> **"Environments cannot be created here"?** Creating a GitHub Environment needs
+> repo *admin*. Either run it as an admin, or add a personal access token with
+> admin rights as the `PIPELINE_PAT` repository secret and re-run. Branches and
+> labels are still created either way.
+
+Prefer a terminal? The same thing, locally:
+
+```bash
+bash /tmp/sfdx-pipeline/sf-pipeline/scripts/init-project.sh --repo OWNER/REPO
+# then, once the plan looks right:
+bash /tmp/sfdx-pipeline/sf-pipeline/scripts/init-project.sh --repo OWNER/REPO --apply
+```
+
+---
+
+### Step 6 — Connect your Salesforce orgs
+
+Each environment needs four secrets so the pipeline can log in to its org:
+
+| Secret | What it is |
+|---|---|
+| `SF_CONSUMER_KEY` | Consumer key of a connected app in that org |
+| `SF_USERNAME` | The integration user the pipeline logs in as |
+| `SF_INSTANCE_URL` | That org's login / My Domain URL |
+| `SF_JWT_KEY` | The private key, **base64-encoded** |
+
+**The easy way.** Run the **Org Bootstrap** workflow once per org from the Actions
+tab. It creates the connected app, generates the certificate, creates and
+configures the integration user, and writes all four secrets into the GitHub
+Environment for you. You supply the org's admin login and the environment name.
+
+**The manual way**, if your org restricts connected apps, is in
+[`sf-setup/README.md`](../sf-setup/README.md).
+
+Either way, secrets go in **Settings → Environments → `<env>` → Environment
+secrets**, *not* repository secrets. That separation is what stops a dev deploy
+from ever reaching production credentials.
+
+---
+
+### Step 7 — Put the only real gate on production
+
+**Settings → Environments → your `deploy_environment` (e.g. `prod`) → Required
+reviewers → add yourself or a release team.**
+
+That approval click is the production gate. Do this for the production deploy
+environment **and nothing else**:
+
+| Environment | Required reviewers? | Why |
+|---|---|---|
+| Entry (first stage) | **No** | The PR approval is already the gate |
+| Middle stages | Optional | Only if you want a second human per hop |
+| `validate_environment` | **No** | Check-only; must never block anyone |
+| `deploy_environment` | **Yes** | This click *is* the production gate |
+
+---
+
+### Step 8 — Apply branch protection
+
+```bash
+REPO=OWNER/REPO bash /tmp/sfdx-pipeline/sf-pipeline/scripts/setup-branch-protection.sh
+
+# for a real team — also stops admins committing straight to a branch:
+REPO=OWNER/REPO ENFORCE_ADMINS=true bash .../setup-branch-protection.sh
+```
+
+| Branch | What it gets |
+|---|---|
+| Entry | PR-only, required approval, required `validate` check, no force-push |
+| Later stages + prod | No force-push, no deletion, required `deploy-<env>` status |
+
+`ENFORCE_ADMINS` defaults to **false** so a solo admin keeps an escape hatch —
+GitHub will not let you approve your own PR.
+
+---
+
+### Step 9 — Optional integrations
+
+All of these are **silent no-ops if you skip them**. None can ever fail a deploy.
+
+| Want | Add these repository secrets |
+|---|---|
+| Chat notifications | `CHAT_WEBHOOK_URL` (Slack, Teams or any webhook — the provider is auto-detected) *or* `CHAT_API_URL` + `CHAT_API_TOKEN` + `CHAT_CHANNEL_ID` |
+| Jira story updates | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` |
+| Label-driven promotion across forks | `PIPELINE_PAT` (a PAT with repo write) |
+
+---
+
+### Step 10 — Smoke test before you trust it
+
+Ship one trivial change end to end. **Use a custom field, not Apex** — no Apex
+means the coverage gate is skipped, so you are testing the pipeline rather than
+your test suite.
+
+```bash
+git checkout -b feature/PROJ-1-smoke-test origin/main
+# add one custom field under force-app/
+git add -A && git commit -m "Smoke test" && git push -u origin HEAD
+gh pr create --base dev --title "Smoke test" --body "Verifying the pipeline"
+```
+
+Walk it through your whole chain and confirm each of these:
+
+- [ ] `pr-validation` runs and posts **one** sticky PR comment listing the components
+- [ ] Approving the PR triggers a real deploy, then an automatic merge
+- [ ] A `deployed:<env>` label appears on the PR
+- [ ] Adding `deploy:<next env>` promotes it to the next org
+- [ ] The component appears in each Salesforce org as it goes
+
+**Stop before production** on the first pass. When all of that works, you are
+done — go to [Part 2](#part-2--ship-a-change-day-to-day).
+
+---
+
+### If something goes wrong
+
+Everything in [Part 5 — Troubleshooting](#part-5--troubleshooting), plus the three
+mistakes that account for most failed first setups:
+
+| Symptom | Cause |
+|---|---|
+| Nothing happens when you open the PR | `pr-validation.yml`'s `branches:` filter does not match your entry branch (Step 4) |
+| `'xyz' is not a configured environment` | A label or input names an environment that is not in `pipeline.config.yml`. The error lists the valid names |
+| Login fails against the org | Secrets are repository secrets rather than **environment** secrets, or `SF_JWT_KEY` was not base64-encoded |
+
+---
+
+### Renaming, adding or removing environments
+
+Do it in `pipeline.config.yml`, then re-run **Project Init**. That is the whole
+procedure.
+
+The pipeline has no built-in environment names. `int`, `qa` and `stage` appear
+throughout these docs as an example, not a requirement. If your chain is
+`mon → tue → wed → thu → prod`, write that:
+
+```yaml
+environments:
+  - { name: mon, branch: mon, gh_environment: mon, gate: auto }
+  - { name: tue, branch: tue, gh_environment: tue, gate: approval }
+  - { name: wed, branch: wed, gh_environment: wed, gate: on_demand }
+  - { name: thu, branch: thu, gh_environment: thu, gate: on_demand }
+production:
+  branch: main
+  deploy_environment: prod
+  validate_environment: prod-validate
+```
+
+Everything else follows automatically — your promotion labels become
+`deploy:tue`, `deploy:wed`, `deploy:thu`; your commit statuses become `deploy-mon`
+and so on; the release train gathers `deployed:thu` because `thu` is your last
+stage.
+
+Checklist when you change the chain:
+
+1. Edit `environments:` in `pipeline.config.yml`.
+2. Re-run **Project Init** (dry run first). It creates the new branches, labels
+   and GitHub Environments. It will **not** delete the old ones — remove those by
+   hand once you are sure nothing is mid-flight.
+3. Add the Salesforce secrets to each new GitHub Environment (Step 6).
+4. If you changed the **first** environment, update the `branches:` filter in
+   `pr-validation.yml` (Step 4). This is the only file outside the config that
+   ever names an environment.
+5. Set required reviewers on the production deploy environment if it changed.
+
+> **A chain can be any length**, including one environment. Nothing assumes three.
+> **`name` and `branch` are independent too** — a stage called `qa` can live on a
+> branch called `gh-actions-qa`. Set both explicitly if they differ.
+
+---
+
+## Part 2 — Ship a change, day to day
 
 ### Step 1. Cut a feature branch from the baseline
 
@@ -113,8 +449,7 @@ feature/PROJ-123 ──PR──► int      pr-validation ✓ → approve → de
 ```
 
 ---
-
-## Part 2 — Promote and release
+## Part 3 — Promote and release
 
 ### Promote between environments
 
@@ -191,188 +526,6 @@ the baseline (**Recreate Feature Branch**) and push it into the sandbox with
 Always start the next story from the baseline branch.
 
 ---
-
-## Part 3 — Onboard a new project
-
-A consuming repo keeps **no pipeline logic**. It needs only thin caller workflows,
-one config file, and its metadata.
-
-### Step 1 — Copy the caller workflows
-
-Copy the eight caller workflows from the reference consumer
-(`your-org/sfdx-pipeline-example/.github/workflows/`) into your repo's
-`.github/workflows/`:
-
-```
-approve-guard.yml          ops-recreate-feature.yml   prod-release.yml
-deploy.yml                 ops-redeploy-feature.yml   promote-on-label.yml
-pr-validation.yml          ops-rollback.yml
-```
-
-Each is a trigger plus a single `uses:` pointing at the central repo. **Do not add
-logic to them.** If you find yourself writing steps in a caller, the change
-belongs in the central repo.
-
-### Step 2 — Point them at the central pipeline
-
-Every caller must reference the central repo with an explicit ref:
-
-```yaml
-jobs:
-  validate:
-    uses: your-org/sfdx-pipeline-actions/.github/workflows/pr-validation.yml@v1
-    secrets: inherit
-```
-
-**Pin `@v1`.** It is a moving major tag: it advances on every backward-compatible
-release, so you get fixes automatically, while breaking changes ship as `v2` and
-you opt in by changing one character. Pin `@v1.0.0` instead to freeze an exact
-build.
-
-> Do **not** pin `@main`. Every commit to the central repo would reach your
-> production pipeline instantly, with no opt-in and no rollback.
-
-### Step 3 — Add `sf-pipeline/pipeline.config.yml`
-
-This is **the only file you edit per project**. Start from
-[`pipeline.config.example.yml`](../sf-pipeline/pipeline.config.example.yml) in the
-central repo.
-
-```yaml
-source_path: force-app
-api_version: "61.0"
-node_version: "20"
-
-baseline_branch: main        # the branch representing production
-delta_baseline: target       # or: prod
-
-environments:                # your promotion chain, in order; first = entry
-  - name: int
-    branch: int
-    gh_environment: int
-    test_level: RunSpecifiedTests
-    gate: approval
-  - name: qa
-    branch: qa
-    gh_environment: qa
-    test_level: NoTestRun
-    gate: approval
-  - name: stage
-    branch: stage
-    gh_environment: stage
-    test_level: NoTestRun
-    gate: approval
-
-production:
-  branch: main
-  validate_environment: prod-validate   # ungated
-  deploy_environment: prod              # gated — required reviewers
-  release_prefix: r
-
-quality_gates:
-  pmd: true
-  sonar: true
-  apex_coverage: true
-coverage_threshold: 85
-
-profiles_mode: incremental
-require_pr_approval: true
-bypass_label: bypass-quality-gates
-
-notifications:
-  chat: true
-  jira: true
-```
-
-Field-by-field semantics are in
-[Product_Documentation.md §6](./Product_Documentation.md#6-configuration-reference).
-
-### Step 4 — Set the entry branch in the one `on:` block
-
-GitHub parses `on:` filters before any job runs, so they cannot read the config.
-The entry branch therefore appears literally **once**, in `pr-validation.yml`:
-
-```yaml
-on:
-  pull_request:
-    types: [opened, reopened, ready_for_review, synchronize]
-    branches: [int]
-```
-
-This is the **only** value duplicated outside `pipeline.config.yml`. Every other
-caller reads its branch names from the config.
-
-### Step 5 — Create the branches
-
-Create every branch named in the config — e.g. `int`, `qa`, `stage`, `main` — each
-pointing at the same starting commit.
-
-### Step 6 — Create the GitHub Environments and secrets
-
-For **each** `gh_environment`, plus both `production` environments, create a
-GitHub Environment and add four secrets:
-
-| Secret | Meaning |
-|---|---|
-| `SF_CONSUMER_KEY` | Connected-app consumer key (client id) |
-| `SF_USERNAME` | Integration user for that org |
-| `SF_INSTANCE_URL` | Login / My Domain URL |
-| `SF_JWT_KEY` | **base64-encoded** `server.key` |
-
-Gating rules:
-
-| Environment | Required reviewers? | Why |
-|---|---|---|
-| Entry (`int`) | **No** | The gate is the PR approval itself |
-| QA / Stage | Optional | Only if you want a second human per promotion |
-| `production.validate_environment` | **No** | Check-only; must not disturb anyone |
-| `production.deploy_environment` | **Yes** | This click *is* the production gate |
-
-> Can't create these by hand? Run the **Org Bootstrap** workflow. Together with the
-> `sf-setup/` kit in the central repo it creates the connected app, the JWT
-> certificate and the integration user, and writes the four secrets into the
-> GitHub Environment for you.
-
-### Step 7 — Optional repo-level secrets
-
-For notifications: `CHAT_API_TOKEN`, `CHAT_CHANNEL_ID` or `CHAT_WEBHOOK_URL`;
-`JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`. For Sonar: `SONAR_TOKEN`,
-`SONAR_HOST_URL`. Leave them out and those integrations become silent no-ops —
-they never fail a run.
-
-### Step 8 — Apply branch protection
-
-Codified and idempotent; needs `gh` authenticated with repo admin:
-
-```bash
-REPO=owner/repo bash sf-pipeline/scripts/setup-branch-protection.sh
-
-# strict mode for a real team — also forbids direct commits by admins:
-REPO=owner/repo ENFORCE_ADMINS=true bash sf-pipeline/scripts/setup-branch-protection.sh
-```
-
-| Branch | Protection applied |
-|---|---|
-| Entry | PR-only · required approvals · required checks `quality` + `validate` · stale reviews dismissed · conversation resolution · no force-push / delete |
-| Downstream + prod | Guard-rails: no force-push / no deletion, plus the required `deploy-<env>` status |
-
-`enforce_admins` defaults to **false** so a solo admin keeps an escape hatch —
-GitHub forbids approving your own PR. Set `ENFORCE_ADMINS=true` for a real team.
-
-### Step 9 — Create the labels
-
-`approved`, `deploy:<env>` and `deployed:<env>` for each environment, plus your
-`bypass_label`.
-
-### Step 10 — Smoke test
-
-Ship one trivial metadata change (a custom field is ideal — no Apex, so the
-coverage gate is skipped) through `int → qa → stage`. Confirm you see: one sticky
-PR comment, `pr-validation` success, the approval-triggered deploy, auto-merge,
-and `deployed:<env>` stamped at each hop. Stop before prod.
-
----
-
 ## Part 4 — Ops runbooks
 
 All four are `workflow_dispatch` — run them from the **Actions** tab.

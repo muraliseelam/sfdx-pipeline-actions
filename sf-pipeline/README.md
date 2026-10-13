@@ -80,7 +80,7 @@ One file to edit per project: `pipeline.config.yml`, copied from
 
 The full ten-step checklist — callers, config, branches, GitHub Environments and
 secrets, branch protection, labels and a smoke test — is in
-**[Pipeline_User_Guide.md — Part 3](../docs/Pipeline_User_Guide.md#part-3--onboard-a-new-project)**.
+**[Pipeline_User_Guide.md — Part 1](../docs/Pipeline_User_Guide.md#part-1--set-up-the-pipeline-one-time)**.
 
 Branch protection is scripted (idempotent; needs `gh` authenticated as a repo
 admin):

@@ -10,10 +10,23 @@ on:
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize]
     branches:
-      - int   # entry stage — the ONLY stage that runs check-only validation + coverage.
-              # qa/stage deploy on approval with NO validation and NO Apex tests
-              # (int already validated the change); their only gate is the ordering
-              # guard (predecessor deployed for this commit) + PR approval.
+      # ─────────────────────────────────────────────────────────────────────
+      #  THE ONE VALUE YOU MUST EDIT OUTSIDE pipeline.config.yml.
+      #  Set this to environments[0].branch — your ENTRY branch.
+      #  GitHub parses `on:` filters before any job runs, so this filter
+      #  cannot read the config file. Every other branch and environment name
+      #  in the whole pipeline comes from pipeline.config.yml.
+      # ─────────────────────────────────────────────────────────────────────
+      - dev
+      # Also validate PRs into a release branch. The production release train
+      # cuts these, and plan.py validates them against `prod-validate` (the
+      # check-only environment). Match `production.release_branch_prefix`.
+      - "release/**"
+      # The entry stage is the ONLY stage that runs check-only validation plus
+      # the coverage gate. Later stages deploy on approval with no re-validation
+      # and no Apex tests (the entry stage already validated the change); their
+      # gate is the ordering guard (predecessor deployed for this commit) plus
+      # the PR approval.
 
 permissions:
   contents: write
