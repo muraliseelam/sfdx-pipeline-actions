@@ -52,6 +52,7 @@ Every key is optional. `<NAME>` is the env name in upper case with non-alphanume
 | `github_environment` | `sf-<name>` | `production` | GitHub Environment the real deploy runs in |
 | `validation_environment` | `sf-<name>-validate` | `production-validate` | (production) Environment for the check-only validation |
 | `sync_after_release` | `true` | `false` | Reset this branch to `main` after each release |
+| `jira_status` | `""` | `""` | Jira status to move linked stories to after a deploy (needs `notifications.jira`) |
 | `production` | `false` | `true` | Set on one env only if production isn't listed last |
 
 ### Test policies
@@ -98,6 +99,8 @@ In every policy except `none`, a changed class without a resolvable test class f
 | `code_analyzer.enabled` | `true` | Run Salesforce Code Analyzer on changed files in PRs |
 | `code_analyzer.severity_threshold` | `2` | Block on this severity or worse (1 Critical, 2 High, 3 Moderate, 4 Low, 5 Info) |
 | `code_analyzer.rule_selector` | `Recommended` | Code Analyzer `--rule-selector` |
+| `dependency_lint` | `true` | Fail fast when a deleted (or changed) component is still referenced elsewhere in the source |
+| `bypass_label` | `bypass-quality-gates` | Label an admin/maintainer can add to waive the coverage and code-analysis gates (who added it is verified; compile and test failures are never waived) |
 
 ### `tests`
 | Key | Default | Meaning |
@@ -129,6 +132,7 @@ A class counts as a test when `@isTest` precedes its declaration (comments and s
 | `wait_minutes` | `120` | `--wait` for every deploy/validation |
 | `delta_output_dir` | `.sgd` | Where sfdx-git-delta writes `package/` and `destructiveChanges/` |
 | `ignore_warnings` | `false` | Pass `--ignore-warnings` |
+| `profiles_mode` | `full` | `full` deploys whole Profiles/Permission Sets; `incremental` deploys only the entries added or changed since the production baseline |
 
 ### `github`
 | Key | Default | Meaning |
@@ -143,8 +147,26 @@ A class counts as a test when `@isTest` precedes its declaration (comments and s
 Pinned versions, part of the CLI cache key: `node_version` (`22`), `sf_cli_version`, `sgd_version`
 (sfdx-git-delta), `code_analyzer_version`.
 
-### `notifications.webex`
-`enabled` (`false`) and `webhook_secret` (`WEBEX_WEBHOOK_URL`, an incoming-webhook URL).
+### `notifications.chat`
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Post deploy, release and sync outcomes to chat (a failure only warns) |
+| `provider` | `auto` | `slack`, `teams`, `webex`, `generic` (any JSON webhook) or `api`; `auto` detects from the webhook URL |
+| `webhook_secret` | `CHAT_WEBHOOK_URL` | Secret holding an incoming-webhook URL |
+| `api_url_secret` / `api_token_secret` / `channel_secret` | `CHAT_API_URL` / `CHAT_API_TOKEN` / `CHAT_CHANNEL_ID` | Token-based chat API instead of a webhook (e.g. Webex messages API + bot token + room id) |
+| `deploy_success` | `true` | Also announce successful env deploys (failures always are) |
+
+### `notifications.jira`
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | After each deploy, comment on and transition every Jira key found in the branch name, PR title or release notes to the env's `jira_status` |
+| `base_url_secret` / `email_secret` / `token_secret` | `JIRA_BASE_URL` / `JIRA_EMAIL` / `JIRA_API_TOKEN` | Jira Cloud credentials (best effort; a no-op when missing) |
+
+### `audit`
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | One JSON record per real deploy (who, what, where, commit, PR, components, coverage, job ID) |
+| `branch` | `audit-log` | Branch the records are appended to (`audit/audit-log.jsonl`), independent of Actions log retention |
 
 ## Examples
 

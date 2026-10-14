@@ -28,6 +28,11 @@ feature/* ──PR──▶ dev ──promote:int──▶ int ──promote:qa�
      env branches.
 
   Resumable, and it never deploys twice.
+- **Deploy safety nets.** A dependency lint for deleted metadata that is still referenced,
+  incremental profile and permission-set deploys, and an admin-only bypass label for the quality
+  gates.
+- **Operations.** One-click rollback (a revert PR through the pipeline), a durable audit-log
+  branch, and Slack/Teams/Webex/webhook notifications plus Jira transitions.
 - **Guardrails.** Branch protection with required checks, PR routing, meta-pair and
   "cut from main" checks, approval guards, per-org deploy locks, and production credentials scoped
   to protected branches.

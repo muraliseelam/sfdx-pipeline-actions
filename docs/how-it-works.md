@@ -130,6 +130,28 @@ Runs after each release (or by hand). Each env branch:
 The job runs in the protected `production-validate` environment, so an admin-capable token can live
 there instead of in repository secrets.
 
+### SF Rollback (manual)
+Reverts a merged PR or commit as a **new PR** that flows through the pipeline like any change, so the
+rollback is validated, approved, deployed and audited.
+- `target: production`: the change is already in `main`. The revert is cut from `main` and enters
+  at the first env, then is promoted and released.
+- `target: <env>`: an unreleased change on that env branch is reverted there.
+
+### Deploy safety nets (inside every validation and deploy)
+- **Dependency lint:** deleting a component that other source still references (a class, field,
+  picklist value…) fails before anything reaches the org.
+- **Profiles / permission sets:** `deploy.profiles_mode: incremental` deploys only the permission
+  entries added or changed since the production baseline.
+- **Admin bypass:** the `bypass-quality-gates` label, added by an admin or maintainer, waives only
+  the coverage and code-analysis gates.
+
+### Audit trail, chat and Jira
+- Every real deploy (env deploys and releases) writes one JSON record to the `audit-log` branch:
+  who, what, where, commit, PR, components, coverage and Salesforce job ID.
+- Outcomes can be posted to Slack, Microsoft Teams, Webex or any webhook (`notifications.chat`).
+- Jira stories named in the branch, PR title or release notes are commented on and moved to each
+  env's `jira_status` (`notifications.jira`).
+
 ### SF Pipeline Doctor (manual + weekly)
 Logs in to every org from GitHub with the pipeline's secrets, and checks the token.
 
