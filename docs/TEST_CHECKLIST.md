@@ -18,8 +18,8 @@ Legend: `[x]` done and verified · `[~]` in progress · `[ ]` to do · `[!]` blo
 - [x] U4 Destructive-delete dependency lint in the deploy action
 - [x] U5 Profiles / permission sets: `full` or `incremental` deploys
 - [x] U6 Admin bypass label for the coverage + code-analysis gates (admin/maintain verified at run time)
-- [ ] U7 Rollback runbook: revert a merged PR/commit as a PR that flows through the pipeline
-- [ ] U8 Optional dedicated integration user + least-privilege permission set in `jwt-setup`
+- [x] U7 Rollback runbook: revert a merged PR/commit as a PR that flows through the pipeline
+- [x] U8 Integration user: documented (dedicated user + profile pre-authorization via `jwt-setup --profile`); not automated: External Client Apps pre-authorize by profile, and creating users consumes org licenses
 - [ ] U9 Self-test runs the link checker; tests cover every ported feature
 
 ## A. Open-source architecture
