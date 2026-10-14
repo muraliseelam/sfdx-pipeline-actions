@@ -56,7 +56,7 @@ import branch_protection  # noqa: E402
 import pipeline_config  # noqa: E402
 from gh_helpers import GhError, gh_api, parse_json_stream  # noqa: E402
 
-LABEL_COLORS = {"approval": "0e8a16", "promote": "1d76db", "deploy": "d93f0b"}
+LABEL_COLORS = {"approval": "0e8a16", "promote": "1d76db", "deploy": "d93f0b", "bypass": "b60205"}
 
 
 class SetupError(Exception):
@@ -112,6 +112,7 @@ def wanted_labels(cfg: dict) -> dict[str, tuple[str, str]]:
     prefixes = cfg["github"]["labels"]
     labels = {
         cfg["approvals"]["label"]: (LABEL_COLORS["approval"], "Approves the PR for merge/deploy (sf-approval)"),
+        cfg["quality"]["bypass_label"]: (LABEL_COLORS["bypass"], "Admin only: waive the coverage + code-analysis gates"),
     }
     for name in chain[1:]:
         if not envs[name]["production"]:

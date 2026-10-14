@@ -67,6 +67,10 @@ approvals:
 quality:
   coverage_threshold: 85        # % every changed Apex class/trigger must reach
   coverage_exempt: []           # classes without executable lines (interfaces/enums are auto-detected)
+  dependency_lint: true         # block deleting metadata that other source still references
+  # An admin/maintainer can add this label to a PR to waive the coverage and code-analysis
+  # gates (never compile or test failures). Who added it is verified at run time.
+  bypass_label: bypass-quality-gates
 
 tests:
   require_companion: true       # changed Apex without a test class fails fast (never falls back to RunLocalTests)
@@ -88,6 +92,10 @@ deploy:
   wait_minutes: 120
   delta_output_dir: .sgd
   ignore_warnings: false
+  # Profiles / permission sets: full = the whole file from source; incremental =
+  # only the entries added or changed vs the production baseline (fewer
+  # "component does not exist" failures in orgs that lag behind).
+  profiles_mode: full
 
 github:
   pat_secret: SF_PIPELINE_PAT   # fine-grained PAT: contents, pull requests, workflows, administration (read/write)

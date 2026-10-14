@@ -16,6 +16,9 @@ Commands
                     --require exits 1 when not approved (the deploy approval guard).
   remove-label      --pr N --label L
                     Remove a label from a PR (no error if it isn't there).
+  bypass            --pr N --label L [--github-output]
+                    Is the admin bypass label on the PR AND was it added by someone with
+                    admin or maintain permission? A label added by anyone else is ignored.
   pr-marker         --pr N --name NAME [--set KEY=VALUE ...]
                     Read (prints JSON) or merge-update a JSON object stored in a
                     hidden <!-- NAME {...} --> block in the PR body. The release
@@ -159,6 +162,28 @@ def approval(repo: str, pr: int, required: int, label: str) -> tuple[bool, str, 
     return ok, why, info
 
 
+def labeled_by(timeline: list[dict], label: str) -> str | None:
+    """Login of whoever most recently added `label` (pure; unit-tested)."""
+    who = None
+    for event in timeline:
+        if event.get("event") == "labeled" and (event.get("label") or {}).get("name") == label:
+            who = (event.get("actor") or {}).get("login") or who
+    return who
+
+
+def bypass(repo: str, pr: int, label: str) -> tuple[bool, str]:
+    labels = [lbl.get("name") for lbl in gh_api(f"repos/{repo}/issues/{pr}/labels") or []]
+    if label not in labels:
+        return False, ""
+    who = labeled_by(gh_api(f"repos/{repo}/issues/{pr}/timeline?per_page=100", paginate=True) or [], label)
+    if not who:
+        return False, f"'{label}' is present but who added it couldn't be determined; ignoring it"
+    perm = (gh_api(f"repos/{repo}/collaborators/{who}/permission") or {}).get("permission")
+    if perm in ("admin", "maintain"):
+        return True, f"quality gates bypassed by @{who} ('{label}')"
+    return False, f"'{label}' was added by @{who} ({perm or 'no'} permission), not an admin/maintainer; ignoring it"
+
+
 def _marker_re(name: str) -> "re.Pattern[str]":
     return re.compile(r"<!--\s*" + re.escape(name) + r"\s+(\{.*?\})\s*-->", re.S)
 
@@ -234,6 +259,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--label", required=True)
 
+    p = sub.add_parser("bypass")
+    p.add_argument("--pr", type=int, required=True)
+    p.add_argument("--label", required=True)
+    p.add_argument("--github-output", action="store_true")
+
     p = sub.add_parser("pr-marker")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--name", required=True)
@@ -274,6 +304,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "remove-label":
             removed = remove_label(args.repo, args.pr, args.label)
             print(f"PR #{args.pr}: label {args.label!r} {'removed' if removed else 'was not present'}")
+        elif args.command == "bypass":
+            active, why = bypass(args.repo, args.pr, args.label)
+            if why and not active:
+                print(f"::warning title=Bypass ignored::{why}")
+            print(f"PR #{args.pr}: bypass {'ACTIVE' if active else 'inactive'}{' - ' + why if why else ''}")
+            if args.github_output and os.environ.get("GITHUB_OUTPUT"):
+                with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                    fh.write(f"active={'true' if active else 'false'}\nwhy={why}\n")
         elif args.command == "pr-marker":
             info = gh_api(f"repos/{args.repo}/pulls/{args.pr}")
             data = read_marker(info.get("body") or "", args.name)

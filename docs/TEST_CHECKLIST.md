@@ -15,9 +15,9 @@ Legend: `[x]` done and verified · `[~]` in progress · `[ ]` to do · `[!]` blo
 - [x] U1 Chat notifications: Slack / Teams / Webex / generic webhook / token API (from notify.sh)
 - [x] U2 Jira: comment + transition the story in the branch name on each deploy (per-env `jira_status`)
 - [x] U3 Durable audit trail: one JSON record per real deploy appended to an `audit-log` branch
-- [ ] U4 Destructive-delete dependency lint in the deploy action
-- [ ] U5 Profiles / permission sets: `full` or `incremental` deploys
-- [ ] U6 Admin bypass label for the coverage + code-analysis gates (admin/maintain verified at run time)
+- [x] U4 Destructive-delete dependency lint in the deploy action
+- [x] U5 Profiles / permission sets: `full` or `incremental` deploys
+- [x] U6 Admin bypass label for the coverage + code-analysis gates (admin/maintain verified at run time)
 - [ ] U7 Rollback runbook: revert a merged PR/commit as a PR that flows through the pipeline
 - [ ] U8 Optional dedicated integration user + least-privilege permission set in `jwt-setup`
 - [ ] U9 Self-test runs the link checker; tests cover every ported feature

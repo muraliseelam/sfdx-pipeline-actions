@@ -36,6 +36,10 @@ inputs:
     description: Token used to comment on the PR.
     required: false
     default: ${{ github.token }}
+  bypass:
+    description: Reason an admin bypass is in effect (empty = none). Waives the coverage gate only.
+    required: false
+    default: ""
 
 outputs:
   status:
@@ -165,9 +169,63 @@ runs:
         if [ "$has_pkg" = true ]; then echo "--- package.xml"; cat "$pkg"; fi
         if [ "$has_destructive" = true ]; then echo "--- destructiveChanges.xml"; cat "$destructive"; fi
 
+    - name: Dependency lint (deleted metadata still referenced?)
+      id: deplint
+      if: >-
+        inputs.mode != 'quick' && steps.delta.outputs.has_changes == 'true' &&
+        fromJSON(steps.cfg.outputs.json).dependency_lint == 'true'
+      shell: bash
+      env:
+        OUT_DIR: ${{ fromJSON(steps.cfg.outputs.json).delta_output_dir }}
+        SOURCE_PATH: ${{ fromJSON(steps.cfg.outputs.json).source_path }}
+        FROM_SHA: ${{ steps.delta.outputs.from }}
+        WORK: ${{ steps.prep.outputs.work }}
+      run: |
+        set -uo pipefail
+        python "$GITHUB_WORKSPACE/sf-pipeline/scripts/dependency_lint.py" --dir "$OUT_DIR" \
+          --source-root "$SOURCE_PATH" --baseline "$FROM_SHA" | tee "$WORK/dependency-lint.txt"
+        if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+          # Same fail-fast shape as a missing test: nothing is sent to the org, the report explains why.
+          python - "$WORK/dependency-lint.txt" "$WORK/deploy-result.json" <<'EOF'
+        import json, sys
+        lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+        errs = [l.split("::error::[dependency-lint] ", 1)[1] for l in lines if l.startswith("::error::[dependency-lint] ")]
+        json.dump({
+            "status": 1, "name": "DependencyLintError", "synthetic": True,
+            "message": "Metadata that is being deleted or changed is still referenced elsewhere in the source; "
+                       "nothing was deployed. Delete the dependents too, or keep the component.",
+            "result": {"status": "Failed", "success": False, "numberComponentErrors": len(errs),
+                       "details": {"componentFailures": [
+                           {"componentType": "Dependency", "fullName": "-", "problemType": "Error", "problem": e}
+                           for e in errs]}},
+        }, open(sys.argv[2], "w", encoding="utf-8"), indent=2)
+        EOF
+          echo "blocked=true" >> "$GITHUB_OUTPUT"
+        fi
+        exit 0
+
+    - name: Profiles / permission sets (incremental)
+      if: >-
+        inputs.mode != 'quick' && steps.delta.outputs.has_package == 'true' &&
+        steps.deplint.outputs.blocked != 'true' &&
+        fromJSON(steps.cfg.outputs.json).profiles_mode == 'incremental'
+      shell: bash
+      env:
+        PKG: ${{ steps.delta.outputs.package }}
+        SOURCE_PATH: ${{ fromJSON(steps.cfg.outputs.json).source_path }}
+        FROM_SHA: ${{ steps.delta.outputs.from }}
+        WORK: ${{ steps.prep.outputs.work }}
+      run: |
+        # Rewrites changed profiles / permission sets in the (ephemeral) checkout so only
+        # the entries added or changed since the production baseline are deployed.
+        python "$GITHUB_WORKSPACE/sf-pipeline/scripts/profiles.py" --package "$PKG" --source-root "$SOURCE_PATH" \
+          --mode incremental --baseline "$FROM_SHA" --summary-out "$WORK/profiles.md"
+
     - name: Resolve Apex test level
       id: tests
-      if: inputs.mode != 'quick' && steps.delta.outputs.has_changes == 'true'
+      if: >-
+        inputs.mode != 'quick' && steps.delta.outputs.has_changes == 'true' &&
+        steps.deplint.outputs.blocked != 'true'
       shell: bash
       env:
         ENV_NAME: ${{ inputs.environment }}
@@ -185,7 +243,8 @@ runs:
       id: run
       if: >-
         inputs.mode == 'quick' ||
-        (steps.delta.outputs.has_changes == 'true' && steps.tests.outputs.untested == '')
+        (steps.delta.outputs.has_changes == 'true' && steps.tests.outputs.untested == '' &&
+         steps.deplint.outputs.blocked != 'true')
       shell: bash
       env:
         MODE: ${{ inputs.mode }}
@@ -266,11 +325,13 @@ runs:
         PKG: ${{ steps.delta.outputs.package }}
         DESTRUCTIVE: ${{ steps.delta.outputs.destructive }}
         WORK: ${{ steps.prep.outputs.work }}
+        BYPASS: ${{ inputs.bypass }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         set -euo pipefail
         args=(--env "$ENV_NAME" --org "$ORG_ALIAS" --mode "$MODE" --threshold "$THRESHOLD"
               --output "$WORK/report.md" --run-url "$RUN_URL" --github-output)
+        if [ -n "$BYPASS" ]; then args+=(--bypass "$BYPASS"); fi
         if [ -n "$TO_SHA" ]; then args+=(--from "$FROM_SHA" --to "$TO_SHA" --baseline "$BASELINE"); fi
         if [ "$HAS_CHANGES" = false ]; then args+=(--no-changes); fi
         if [ -f "$WORK/test-plan.json" ]; then args+=(--plan "$WORK/test-plan.json"); fi
@@ -280,6 +341,7 @@ runs:
         if [ -d "$WORK/results" ]; then args+=(--coverage-dir "$WORK/results"); fi
         # --annotate puts compile errors and failing test lines on the PR's changed files.
         python "$GITHUB_WORKSPACE/sf-pipeline/scripts/deploy_report.py" "${args[@]}" --quiet --annotate "$SOURCE_PATH"
+        if [ -f "$WORK/profiles.md" ]; then printf '\n%s\n' "$(cat "$WORK/profiles.md")" >> "$WORK/report.md"; fi
         cat "$WORK/report.md" >> "$GITHUB_STEP_SUMMARY"
 
     - name: Comment report on PR

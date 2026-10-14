@@ -148,9 +148,11 @@ def resolve_target(source_root, meta_type, member):
 def git_show(ref, path):
     """Return the file contents at <ref>:<path>, or None if it does not exist."""
     try:
+        # git object paths always use '/', whatever the OS path separator is.
+        posix = path.replace(os.sep, "/").removeprefix("./")
         out = subprocess.run(
-            ["git", "show", f"{ref}:{path}"],
-            capture_output=True, text=True, check=False,
+            ["git", "show", f"{ref}:{posix}"],
+            capture_output=True, text=True, encoding="utf-8", check=False,
         )
     except FileNotFoundError:
         return None

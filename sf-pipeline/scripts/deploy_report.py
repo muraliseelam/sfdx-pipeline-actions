@@ -240,9 +240,12 @@ def build(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
         if outputs["overall_coverage"]:
             cov_lines += ["", f"Overall coverage of classes exercised by this run: **{outputs['overall_coverage']}%**"]
         cov_lines.append("")
+    waived = bool(below) and bool(getattr(args, "bypass", ""))
     if below:
         outputs["coverage_ok"] = "false"
         gate = f"❌ below {threshold:g}%: {', '.join(below)}"
+        if waived:
+            gate = f"⚠️ below {threshold:g}%: {', '.join(below)}: **waived** ({cell(args.bypass)})"
     elif evaluated and changed:
         gate = f"✅ all changed Apex ≥ {threshold:g}%"
     elif args.mode == "quick":
@@ -254,7 +257,7 @@ def build(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
         url = result.get("deployUrl") or ""
         summary_rows.append(("Job ID", f"[`{job_id}`]({url})" if url.startswith("https://") else f"`{job_id}`"))
 
-    passed = deploy_success and outputs["coverage_ok"] == "true"
+    passed = deploy_success and (outputs["coverage_ok"] == "true" or waived)
     outputs["passed"] = "true" if passed else "false"
     outputs["status"] = "success" if passed else "failed"
     if passed:
@@ -418,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--github-output", action="store_true")
     parser.add_argument("--annotate", metavar="SOURCE_PATH", help="emit ::error annotations on failing source lines")
     parser.add_argument("--quiet", action="store_true", help="don't echo the report to stdout")
+    parser.add_argument("--bypass", default="", help="admin bypass in effect (reason); waives the coverage gate")
     args = parser.parse_args(argv)
 
     text, outputs = build(args)

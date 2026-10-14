@@ -293,7 +293,7 @@ class DeployReportTests(unittest.TestCase):
         args = Namespace(
             env="int", org="int", mode="validate", result=str(res) if res else None, plan=str(self.plan),
             threshold=85.0, from_sha="a" * 40, to_sha="b" * 40, baseline="main", package=None,
-            destructive=None, coverage_dir=None, no_changes=False, run_url="https://example.invalid/run",
+            destructive=None, coverage_dir=None, no_changes=False, run_url="https://example.invalid/run", bypass="",
         )
         for k, v in extra.items():
             setattr(args, k, v)
@@ -342,6 +342,14 @@ class DeployReportTests(unittest.TestCase):
         self.assertEqual((out["status"], out["coverage_ok"]), ("failed", "false"))
         self.assertIn("NeverRun (not covered)", text)
         self.assertIn("| `Shape` | – | – | – | ➖ exempt", text)
+
+    def test_admin_bypass_waives_only_the_coverage_gate(self):
+        text, out = self.run_report(self.sf_result(True, 80), bypass="quality gates bypassed by @admin")
+        self.assertEqual((out["status"], out["coverage_ok"]), ("success", "false"))
+        self.assertIn("**waived**", text)
+        failed = self.sf_result(False, 95, componentFailures={"componentType": "ApexClass", "fullName": "X", "problem": "boom"})
+        _, out = self.run_report(failed, bypass="quality gates bypassed by @admin")
+        self.assertEqual(out["status"], "failed")  # deploy failures are never waived
 
     def test_coverage_gate_fails_below_threshold(self):
         text, out = self.run_report(self.sf_result(True, 80))
@@ -617,6 +625,16 @@ class GhHelpersTests(unittest.TestCase):
         self.assertIn("add the 'approved' label", why)
         self.assertIn("1/2", why)
 
+    def test_labeled_by_uses_the_latest_labeler(self):
+        timeline = [
+            {"event": "labeled", "label": {"name": "bypass-quality-gates"}, "actor": {"login": "dev1"}},
+            {"event": "unlabeled", "label": {"name": "bypass-quality-gates"}, "actor": {"login": "admin"}},
+            {"event": "labeled", "label": {"name": "approved"}, "actor": {"login": "lead"}},
+            {"event": "labeled", "label": {"name": "bypass-quality-gates"}, "actor": {"login": "admin"}},
+        ]
+        self.assertEqual(gh_helpers.labeled_by(timeline, "bypass-quality-gates"), "admin")
+        self.assertIsNone(gh_helpers.labeled_by(timeline, "deploy:qa"))
+
     def test_squash_subject_pr_reference(self):
         self.assertEqual(gh_helpers._PR_REF.search("E2E: tier service (#4)").group(1), "4")
         self.assertIsNone(gh_helpers._PR_REF.search("Merge branch 'main' into dev"))
@@ -661,6 +679,7 @@ class CodeAnalysisTests(unittest.TestCase):
         self.assertTrue(notes[1].startswith("::warning "))
         self.assertIn("1 blocking violation", code_analysis.render(result, "dev", 2, ""))
         self.assertEqual(code_analysis.analyze(data, threshold=1)["blocking"], [])
+        self.assertIn("**waived**", code_analysis.render(result, "dev", 2, "", bypass="bypassed by @admin"))
 
 
 def _working_python3() -> bool:
@@ -775,12 +794,61 @@ class JiraAndAuditTests(unittest.TestCase):
         self.assertIn("notifications.chat.provider", str(ctx.exception))
 
 
+class DependencyLintAndProfilesTests(unittest.TestCase):
+    def test_deleting_a_referenced_class_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root / "force-app/main/default/classes/Keeper.cls", "public class Keeper { Integer x() { return Doomed.y(); } }")
+            package_xml(root / ".sgd/destructiveChanges/destructiveChanges.xml", {"ApexClass": ["Doomed"]})
+            package_xml(root / ".sgd/package/package.xml", {})
+            proc = subprocess.run([sys.executable, str(SCRIPTS / "dependency_lint.py"), "--dir", ".sgd",
+                                   "--source-root", "force-app"], cwd=root, capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(proc.returncode, 1, proc.stdout)
+            self.assertIn("'Doomed' is being DELETED but is still referenced", proc.stdout)
+            # nothing references what's deleted -> passes
+            (root / "force-app/main/default/classes/Keeper.cls").write_text("public class Keeper {}", encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(SCRIPTS / "dependency_lint.py"), "--dir", ".sgd",
+                                   "--source-root", "force-app"], cwd=root, capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+
+    def test_incremental_permission_set_keeps_only_changed_entries(self):
+        def fls(field: str, edit: str) -> str:
+            return (f"<fieldPermissions><editable>{edit}</editable><field>{field}</field>"
+                    f"<readable>true</readable></fieldPermissions>")
+
+        def permset(edit_b: str) -> str:
+            return ('<?xml version="1.0" encoding="UTF-8"?>\n<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">'
+                    + fls("Account.A__c", "false") + fls("Account.B__c", edit_b)
+                    + "<label>Sales</label></PermissionSet>\n")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            def git(*args):
+                subprocess.run(["git", *args], cwd=tmp, check=True, capture_output=True)
+
+            ps = Path(tmp) / "force-app/main/default/permissionsets/Sales.permissionset-meta.xml"
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "ci@example.invalid")
+            git("config", "user.name", "ci")
+            write(ps, permset("false"))
+            git("add", "."), git("commit", "-qm", "baseline")
+            ps.write_text(permset("true"), encoding="utf-8")  # only Account.B__c changes
+            pkg = package_xml(Path(tmp) / ".sgd/package/package.xml", {"PermissionSet": ["Sales"]})
+            proc = subprocess.run([sys.executable, str(SCRIPTS / "profiles.py"), "--package", str(pkg),
+                                   "--source-root", "force-app", "--mode", "incremental", "--baseline", "main"],
+                                  cwd=tmp, capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            trimmed = ps.read_text(encoding="utf-8")
+            self.assertIn("Account.B__c", trimmed)
+            self.assertNotIn("Account.A__c", trimmed)       # unchanged entry stripped
+            self.assertIn("<label>Sales</label>", trimmed)    # required singleton kept
+
+
 class BootstrapTests(unittest.TestCase):
     def test_labels_for_five_and_four_stages(self):
         five = bootstrap.wanted_labels(CFG)
         self.assertEqual(
             sorted(five),
-            sorted(["approved", "promote:int", "promote:qa", "promote:stage",
+            sorted(["approved", "bypass-quality-gates", "promote:int", "promote:qa", "promote:stage",
                     "deploy:dev", "deploy:int", "deploy:qa", "deploy:stage"]),
         )
         four = bootstrap.wanted_labels(

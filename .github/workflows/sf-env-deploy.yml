@@ -36,6 +36,7 @@ jobs:
       sha: ${{ steps.route.outputs.sha }}
       pr: ${{ steps.route.outputs.pr }}
       label: ${{ steps.route.outputs.label }}
+      bypass: ${{ steps.bypass.outputs.active == 'true' && steps.bypass.outputs.why || '' }}
     steps:
       # Pushes read config from the (protected) env branch itself; label and
       # dispatch runs read it from the default branch, so a PR can't relax its
@@ -123,6 +124,15 @@ jobs:
           echo "Plan: $reason"
           echo "**Plan:** $reason" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Admin bypass label
+        id: bypass
+        if: steps.route.outputs.run == 'true' && steps.route.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.route.outputs.pr }}
+          LABEL: ${{ fromJSON(steps.cfg.outputs.json).bypass_label }}
+        run: python3 sf-pipeline/scripts/gh_helpers.py bypass --pr "$PR" --label "$LABEL" --github-output
+
   approval-guard:
     name: Approval guard
     needs: plan
@@ -204,6 +214,7 @@ jobs:
           environment: ${{ needs.plan.outputs.env }}
           mode: deploy
           pr-number: ${{ github.event_name == 'pull_request' && needs.plan.outputs.pr || '' }}
+          bypass: ${{ needs.plan.outputs.bypass }}
 
       - name: Audit record
         if: always() && steps.deploy.outcome != 'skipped'

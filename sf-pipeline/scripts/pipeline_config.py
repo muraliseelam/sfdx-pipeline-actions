@@ -67,6 +67,8 @@ DEFAULTS: dict[str, Any] = {
         "coverage_threshold": 75,
         "coverage_exempt": [],
         "code_analyzer": {"enabled": True, "severity_threshold": 2, "rule_selector": "Recommended"},
+        "dependency_lint": True,
+        "bypass_label": "bypass-quality-gates",
     },
     "tests": {
         "require_companion": True,
@@ -88,7 +90,7 @@ DEFAULTS: dict[str, Any] = {
         "status_check": "sf-approval",
         "auto_merge": True,
     },
-    "deploy": {"wait_minutes": 120, "delta_output_dir": ".sgd", "ignore_warnings": False},
+    "deploy": {"wait_minutes": 120, "delta_output_dir": ".sgd", "ignore_warnings": False, "profiles_mode": "full"},
     "tooling": {
         "node_version": "22",
         "sf_cli_version": "2.153.5",
@@ -297,6 +299,8 @@ def validate(cfg: dict, repo_root: Path | None = None) -> list[str]:
     if not is_int(sev) or not 1 <= sev <= 5:
         errs.append("quality.code_analyzer.severity_threshold must be 1 (Critical) .. 5 (Info)")
     need_str(analyzer, "rule_selector", "quality.code_analyzer")
+    need_bool(quality, "dependency_lint", "quality")
+    need_str(quality, "bypass_label", "quality")
 
     tests = cfg["tests"]
     need_bool(tests, "require_companion", "tests")
@@ -327,6 +331,8 @@ def validate(cfg: dict, repo_root: Path | None = None) -> list[str]:
         errs.append("deploy.wait_minutes must be an integer >= 1")
     need_str(deploy, "delta_output_dir", "deploy")
     need_bool(deploy, "ignore_warnings", "deploy")
+    if deploy.get("profiles_mode") not in ("full", "incremental"):
+        errs.append("deploy.profiles_mode must be full or incremental")
 
     for key in ("node_version", "sf_cli_version", "sgd_version", "code_analyzer_version"):
         need_str(cfg["tooling"], key, "tooling")
@@ -467,6 +473,9 @@ def globals_view(cfg: dict) -> dict[str, str]:
         "wait_minutes": _s(cfg["deploy"]["wait_minutes"]),
         "delta_output_dir": _s(cfg["deploy"]["delta_output_dir"]),
         "ignore_warnings": _s(cfg["deploy"]["ignore_warnings"]),
+        "profiles_mode": _s(cfg["deploy"]["profiles_mode"]),
+        "dependency_lint": _s(cfg["quality"]["dependency_lint"]),
+        "bypass_label": _s(cfg["quality"]["bypass_label"]),
         "node_version": _s(cfg["tooling"]["node_version"]),
         "sf_cli_version": _s(cfg["tooling"]["sf_cli_version"]),
         "sgd_version": _s(cfg["tooling"]["sgd_version"]),

@@ -63,13 +63,15 @@ def analyze(data: dict, threshold: int) -> dict:
     }
 
 
-def render(result: dict, env: str, threshold: int, run_url: str) -> str:
+def render(result: dict, env: str, threshold: int, run_url: str, bypass: str = "") -> str:
     marker = f"<!-- sf-pipeline-analysis:{env} -->"
     out = [marker, "## 🔍 Code Analysis (Salesforce Code Analyzer)", ""]
     blocking, violations = result["blocking"], result["violations"]
     counts = result["counts"]
     summary = " · ".join(f"{ICON[s]} {SEVERITY[s]} {counts[s]}" for s in sorted(SEVERITY) if counts.get(s))
-    if blocking:
+    if blocking and bypass:
+        out.append(f"⚠️ **{len(blocking)} blocking violation(s)** (severity {SEVERITY[threshold]} or worse), **waived**: {cell(bypass)}.")
+    elif blocking:
         out.append(f"❌ **{len(blocking)} blocking violation(s)** (severity {SEVERITY[threshold]} or worse) in the changed files.")
     elif violations:
         out.append(f"✅ No violations at {SEVERITY[threshold]} or worse; {len(violations)} lower-severity finding(s) below.")
@@ -134,12 +136,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-url", default="")
     parser.add_argument("--annotate", action="store_true")
     parser.add_argument("--github-output", action="store_true")
+    parser.add_argument("--bypass", default="", help="admin bypass in effect (reason): blocking findings don't fail")
     args = parser.parse_args(argv)
 
     path = Path(args.results)
     data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     result = analyze(data, args.threshold)
-    text = render(result, args.env, args.threshold, args.run_url)
+    text = render(result, args.env, args.threshold, args.run_url, args.bypass)
     Path(args.output).write_text(text, encoding="utf-8")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -150,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
           f"{len(result['engine_errors'])} engine error(s)")
     if args.github_output and os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-            fh.write(f"passed={'false' if result['blocking'] else 'true'}\n")
+            fh.write(f"passed={'false' if result['blocking'] and not args.bypass else 'true'}\n")
             fh.write(f"blocking={len(result['blocking'])}\n")
             fh.write(f"total={len(result['violations'])}\n")
             fh.write(f"marker=<!-- sf-pipeline-analysis:{args.env} -->\n")

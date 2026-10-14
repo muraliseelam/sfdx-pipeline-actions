@@ -12,7 +12,7 @@ name: SF PR Validation
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -20,8 +20,9 @@ permissions:
   statuses: write
 
 concurrency:
-  # Title/body edits get their own group so they never cancel a running validation.
-  group: sf-pr-validation-${{ github.event.pull_request.number }}-${{ github.event.action == 'edited' && !github.event.changes.base && github.run_id || 'validate' }}
+  # Title/body edits and label changes get their own group so they never cancel a running
+  # validation (a bypass-label change starts a fresh one; other labels are ignored).
+  group: sf-pr-validation-${{ github.event.pull_request.number }}-${{ ((github.event.action == 'edited' && !github.event.changes.base) || github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.run_id || 'validate' }}
   cancel-in-progress: true
 
 jobs:
@@ -33,6 +34,7 @@ jobs:
       run: ${{ steps.route.outputs.run }}
       env: ${{ steps.cfg.outputs.env }}
       cfg: ${{ steps.cfg.outputs.json }}
+      bypass: ${{ steps.bypass.outputs.active == 'true' && steps.bypass.outputs.why || '' }}
     steps:
       - name: Checkout pipeline files (default branch)
         uses: actions/checkout@v7
@@ -55,6 +57,8 @@ jobs:
           FOUND: ${{ steps.cfg.outputs.found }}
           ACTION: ${{ github.event.action }}
           BASE_CHANGED: ${{ github.event.changes.base != null }}
+          LABEL: ${{ github.event.label.name }}
+          BYPASS_LABEL: ${{ fromJSON(steps.cfg.outputs.json).bypass_label }}
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
           IS_PROD: ${{ fromJSON(steps.cfg.outputs.json).is_production }}
@@ -67,12 +71,23 @@ jobs:
             run=false; reason="base branch '${BASE_REF}' is not an environment branch"
           elif [ "$ACTION" = "edited" ] && [ "$BASE_CHANGED" != "true" ]; then
             run=false; reason="PR edited without a base-branch change"
+          elif { [ "$ACTION" = "labeled" ] || [ "$ACTION" = "unlabeled" ]; } && [ "$LABEL" != "$BYPASS_LABEL" ]; then
+            run=false; reason="label '${LABEL}' doesn't affect validation"
           elif [ "$IS_PROD" = "true" ] && [[ "$HEAD_REF" == "$RELEASE_PREFIX"* ]]; then
             run=false; reason="release PRs are validated by the SF Prod Release workflow"
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "Plan: $reason"
           echo "**Plan:** $reason" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Admin bypass label
+        id: bypass
+        if: steps.route.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          LABEL: ${{ fromJSON(steps.cfg.outputs.json).bypass_label }}
+        run: python3 sf-pipeline/scripts/gh_helpers.py bypass --pr "$PR" --label "$LABEL" --github-output
 
       - name: Mark gate pending
         if: steps.route.outputs.run == 'true'
@@ -180,6 +195,7 @@ jobs:
           environment: ${{ needs.plan.outputs.env }}
           mode: validate
           pr-number: ${{ github.event.pull_request.number }}
+          bypass: ${{ needs.plan.outputs.bypass }}
 
       - name: Report a failed org login on the PR
         if: failure() && steps.validate.outcome == 'skipped'
@@ -256,10 +272,12 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           ENV_NAME: ${{ needs.plan.outputs.env }}
           THRESHOLD: ${{ fromJSON(needs.plan.outputs.cfg).code_analyzer_threshold }}
+          BYPASS: ${{ needs.plan.outputs.bypass }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python sf-pipeline/scripts/code_analysis.py --results "$RUNNER_TEMP/code-analyzer.json" --env "$ENV_NAME" \
-            --threshold "$THRESHOLD" --output "$RUNNER_TEMP/analysis.md" --run-url "$RUN_URL" --annotate --github-output
+            --threshold "$THRESHOLD" --output "$RUNNER_TEMP/analysis.md" --run-url "$RUN_URL" --annotate --github-output \
+            --bypass "$BYPASS"
           cat "$RUNNER_TEMP/analysis.md" >> "$GITHUB_STEP_SUMMARY"
           python3 sf-pipeline/scripts/gh_helpers.py upsert-comment --pr "$PR_NUMBER" \
             --marker "<!-- sf-pipeline-analysis:${ENV_NAME} -->" --body-file "$RUNNER_TEMP/analysis.md"
