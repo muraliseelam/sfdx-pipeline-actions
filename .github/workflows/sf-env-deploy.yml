@@ -162,6 +162,9 @@ jobs:
     if: needs.plan.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    permissions:
+      contents: write       # append to the audit branch
+      pull-requests: write  # report comment on label deploys
     environment:
       name: ${{ fromJSON(needs.plan.outputs.cfg).github_environment }}
     # GitHub keeps one pending job per group and a newer one replaces it. Branch
@@ -185,7 +188,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: git checkout "origin/${DEFAULT_BRANCH}" -- .github/actions sf-pipeline
 
-      - name: sf CLI + JWT auth
+      - name: sf CLI + org login
         uses: ./.github/actions/sf-setup
         with:
           environment: ${{ needs.plan.outputs.env }}
@@ -202,12 +205,73 @@ jobs:
           mode: deploy
           pr-number: ${{ github.event_name == 'pull_request' && needs.plan.outputs.pr || '' }}
 
+      - name: Audit record
+        if: always() && steps.deploy.outcome != 'skipped'
+        uses: ./.github/actions/audit
+        with:
+          enabled: ${{ fromJSON(needs.plan.outputs.cfg).audit_enabled }}
+          branch: ${{ fromJSON(needs.plan.outputs.cfg).audit_branch }}
+          environment: ${{ needs.plan.outputs.env }}
+          status: ${{ steps.deploy.outputs.status || 'failed' }}
+          sha: ${{ needs.plan.outputs.sha }}
+          pr: ${{ needs.plan.outputs.pr }}
+          job-id: ${{ steps.deploy.outputs.job-id }}
+          test-level: ${{ steps.deploy.outputs.test-level }}
+          coverage: ${{ steps.deploy.outputs.overall-coverage }}
+          threshold: ${{ fromJSON(needs.plan.outputs.cfg).coverage_threshold }}
+          package: ${{ fromJSON(needs.plan.outputs.cfg).delta_output_dir }}/package/package.xml
+
+      - name: PR details (for Jira and chat)
+        id: prinfo
+        if: steps.deploy.outputs.status == 'success' && needs.plan.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.plan.outputs.pr }}
+        run: |
+          info="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title,headRefName,url)"
+          {
+            echo "title=$(jq -r .title <<<"$info" | tr -d '\r\n')"
+            echo "head=$(jq -r .headRefName <<<"$info")"
+            echo "url=$(jq -r .url <<<"$info")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Jira
+        if: steps.deploy.outputs.status == 'success'
+        uses: ./.github/actions/jira
+        with:
+          enabled: ${{ fromJSON(needs.plan.outputs.cfg).jira_enabled }}
+          text: ${{ steps.prinfo.outputs.head }} ${{ steps.prinfo.outputs.title }}
+          environment: ${{ needs.plan.outputs.env }}
+          status: ${{ fromJSON(needs.plan.outputs.cfg).jira_status }}
+          base-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).jira_base_url_secret] }}
+          email: ${{ secrets[fromJSON(needs.plan.outputs.cfg).jira_email_secret] }}
+          token: ${{ secrets[fromJSON(needs.plan.outputs.cfg).jira_token_secret] }}
+
+      - name: Notify success
+        if: steps.deploy.outputs.status == 'success' && fromJSON(needs.plan.outputs.cfg).chat_deploy_success == 'true'
+        uses: ./.github/actions/notify
+        with:
+          enabled: ${{ fromJSON(needs.plan.outputs.cfg).chat_enabled }}
+          provider: ${{ fromJSON(needs.plan.outputs.cfg).chat_provider }}
+          webhook-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_webhook_secret] }}
+          api-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_api_url_secret] }}
+          api-token: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_api_token_secret] }}
+          channel-id: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_channel_secret] }}
+          message: >-
+            ✅ **Deployed to `${{ needs.plan.outputs.env }}`**: ${{ steps.prinfo.outputs.title || needs.plan.outputs.sha }}
+            ${{ steps.prinfo.outputs.url && format('([PR]({0}))', steps.prinfo.outputs.url) || '' }} · test level ${{ steps.deploy.outputs.test-level }}
+            · [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
       - name: Notify failure or cancellation
         if: failure() || cancelled()
         uses: ./.github/actions/notify
         with:
-          enabled: ${{ fromJSON(needs.plan.outputs.cfg).webex_enabled }}
-          webhook-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).webex_secret] }}
+          enabled: ${{ fromJSON(needs.plan.outputs.cfg).chat_enabled }}
+          provider: ${{ fromJSON(needs.plan.outputs.cfg).chat_provider }}
+          webhook-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_webhook_secret] }}
+          api-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_api_url_secret] }}
+          api-token: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_api_token_secret] }}
+          channel-id: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_channel_secret] }}
           message: >-
             ❌ **Salesforce deploy to `${{ needs.plan.outputs.env }}` ${{ job.status }}**
             (commit `${{ needs.plan.outputs.sha }}`, PR ${{ needs.plan.outputs.pr || 'n/a' }}).

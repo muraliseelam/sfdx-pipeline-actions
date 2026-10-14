@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import http.server
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -27,6 +30,7 @@ import branch_protection  # noqa: E402
 import code_analysis  # noqa: E402
 import deploy_report  # noqa: E402
 import gh_helpers  # noqa: E402
+import jira  # noqa: E402
 import pipeline_config  # noqa: E402
 import preflight  # noqa: E402
 import specified_tests  # noqa: E402
@@ -657,6 +661,118 @@ class CodeAnalysisTests(unittest.TestCase):
         self.assertTrue(notes[1].startswith("::warning "))
         self.assertIn("1 blocking violation", code_analysis.render(result, "dev", 2, ""))
         self.assertEqual(code_analysis.analyze(data, threshold=1)["blocking"], [])
+
+
+def _working_python3() -> bool:
+    exe = shutil.which("python3")
+    if not exe:
+        return False
+    try:
+        return subprocess.run([exe, "-c", "print(1)"], capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+class _Capture(http.server.BaseHTTPRequestHandler):
+    received: list = []
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length") or 0)
+        type(self).received.append((self.path, dict(self.headers), self.rfile.read(length).decode("utf-8")))
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *args):  # silence
+        pass
+
+
+@unittest.skipUnless(shutil.which("bash") and shutil.which("curl") and _working_python3(),
+                     "needs bash, curl and python3 (as on GitHub runners)")
+class NotifyScriptTests(unittest.TestCase):
+    """notify.sh against a local HTTP endpoint: provider detection and payloads."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = http.server.HTTPServer(("127.0.0.1", 0), _Capture)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def send(self, message: str, **env) -> tuple[str, dict, dict]:
+        _Capture.received.clear()
+        run_env = dict(os.environ, TMPDIR=tempfile.gettempdir(), CHAT_WEBHOOK_URL="", CHAT_API_URL="",
+                       CHAT_API_TOKEN="", CHAT_CHANNEL_ID="", CHAT_PROVIDER="auto")
+        run_env.update(env)
+        proc = subprocess.run(["bash", str(SCRIPTS / "notify.sh"), message], env=run_env,
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(_Capture.received), 1, proc.stdout + proc.stderr)
+        path, headers, body = _Capture.received[0]
+        return path, headers, json.loads(body)
+
+    def url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def test_providers(self):
+        _, _, body = self.send("hi *there*", CHAT_WEBHOOK_URL=self.url("/hooks"), CHAT_PROVIDER="slack")
+        self.assertEqual(body, {"text": "hi *there*"})
+        _, _, body = self.send("hi", CHAT_WEBHOOK_URL=self.url("/teams"), CHAT_PROVIDER="teams")
+        self.assertEqual((body["@type"], body["text"]), ("MessageCard", "hi"))
+        _, _, body = self.send("**bold**", CHAT_WEBHOOK_URL=self.url("/webex"), CHAT_PROVIDER="webex")
+        self.assertEqual(body, {"markdown": "**bold**"})
+        _, _, body = self.send('quote " and\nnewline', CHAT_WEBHOOK_URL=self.url("/any"))  # auto -> generic
+        self.assertEqual(body["markdown"], 'quote " and\nnewline')
+        _, headers, body = self.send("api", CHAT_API_URL=self.url("/v1/messages"), CHAT_API_TOKEN="t0k",
+                                     CHAT_CHANNEL_ID="room-1")
+        self.assertEqual(headers.get("Authorization"), "Bearer t0k")
+        self.assertEqual((body["roomId"], body["markdown"]), ("room-1", "api"))
+
+    def test_unconfigured_is_a_silent_no_op(self):
+        proc = subprocess.run(["bash", str(SCRIPTS / "notify.sh"), "x"], capture_output=True, text=True,
+                              env=dict(os.environ, CHAT_WEBHOOK_URL="", CHAT_API_URL="", CHAT_PROVIDER="auto"))
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("not configured", proc.stdout)
+
+
+class JiraAndAuditTests(unittest.TestCase):
+    def test_jira_keys_and_no_op_without_credentials(self):
+        self.assertEqual(sorted(set(jira.KEY_RE.findall("feature/PROJ-12-x fixes ABC-1 and PROJ-12"))), ["ABC-1", "PROJ-12"])
+        env = {k: v for k, v in os.environ.items() if not k.startswith("JIRA_")}
+        proc = subprocess.run([sys.executable, str(SCRIPTS / "jira.py"), "deploy-text", "PROJ-1", "int", "In Int"],
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("credentials not configured", proc.stdout)
+
+    def test_audit_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = package_xml(Path(tmp) / "package.xml", {"ApexClass": ["A", "B"], "CustomLabel": ["L"]})
+            env = dict(os.environ, AUDIT_DIR=str(Path(tmp) / "out"), AUDIT_TYPE="Release", AUDIT_ENVIRONMENT="prod",
+                       AUDIT_STATUS="success", AUDIT_SHA="0123456789abcdef", AUDIT_PR="7", AUDIT_DEPLOY_ID="0Af1",
+                       AUDIT_TEST_LEVEL="RunLocalTests", AUDIT_COVERAGE="91.5", AUDIT_THRESHOLD="85",
+                       AUDIT_PACKAGE=str(pkg), GITHUB_STEP_SUMMARY=str(Path(tmp) / "summary.md"))
+            proc = subprocess.run([sys.executable, str(SCRIPTS / "audit.py")], capture_output=True, text=True,
+                                  env=env, encoding="utf-8")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            record = json.loads((Path(tmp) / "out" / "audit-record.json").read_text(encoding="utf-8"))
+            self.assertEqual((record["type"], record["environment"], record["status"]), ("Release", "prod", "success"))
+            self.assertEqual((record["components_total"], record["components_by_type"]),
+                             (3, {"ApexClass": 2, "CustomLabel": 1}))
+            self.assertEqual((record["coverage_percent"], record["test_level"], record["short_sha"]),
+                             (91.5, "RunLocalTests", "01234567"))
+            self.assertIn("Audit — Release → prod", (Path(tmp) / "summary.md").read_text(encoding="utf-8"))
+
+    def test_notification_config_validation(self):
+        cfg = pipeline_config.from_dict({"environments": {"dev": {"jira_status": "In Dev"}, "prod": {}}})
+        view = pipeline_config.env_view(cfg, "dev")
+        self.assertEqual((view["jira_status"], view["chat_provider"], view["audit_branch"]), ("In Dev", "auto", "audit-log"))
+        with self.assertRaises(pipeline_config.ConfigError) as ctx:
+            pipeline_config.from_dict({"environments": {"dev": {}, "prod": {}},
+                                       "notifications": {"chat": {"provider": "carrier-pigeon"}}})
+        self.assertIn("notifications.chat.provider", str(ctx.exception))
 
 
 class BootstrapTests(unittest.TestCase):

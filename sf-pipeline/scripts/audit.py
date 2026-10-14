@@ -7,9 +7,9 @@ summary. The record is written to `.deploy/audit-record.json` (picked up as a
 build artifact) and printed as one compact JSON line on stdout so a caller can
 append it to the durable `audit-log` branch.
 
-Everything is sourced from env vars + the artifacts the deploy step already
-creates (`.deploy/report.json`, `.deploy/coverage.json`, `.sgd/package/package.xml`),
-so there is nothing extra to maintain.
+Everything is sourced from AUDIT_* env vars set by the audit action from the
+deploy action's outputs, plus the delta manifest (AUDIT_PACKAGE, default
+`.sgd/package/package.xml`), so there is nothing extra to maintain.
 """
 import json
 import os
@@ -48,8 +48,8 @@ def env(name, default=""):
 
 
 def main():
-    coverage = read_json(".deploy/coverage.json") or {}
-    total, counts = component_summary(".sgd/package/package.xml")
+    total, counts = component_summary(env("AUDIT_PACKAGE", ".sgd/package/package.xml"))
+    pct = env("AUDIT_COVERAGE")
 
     record = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -67,20 +67,22 @@ def main():
         "run_url": env("AUDIT_RUN_URL"),
         "repo": env("AUDIT_REPO"),
         "profiles_mode": env("AUDIT_PROFILES_MODE"),
+        "test_level": env("AUDIT_TEST_LEVEL"),
         "components_total": total,
         "components_by_type": counts,
-        "coverage_percent": coverage.get("percent"),
-        "coverage_threshold": coverage.get("threshold"),
+        "coverage_percent": float(pct) if pct else None,
+        "coverage_threshold": env("AUDIT_THRESHOLD") or None,
     }
 
-    os.makedirs(".deploy", exist_ok=True)
-    with open(".deploy/audit-record.json", "w", encoding="utf-8") as fh:
+    out_dir = env("AUDIT_DIR", ".deploy")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "audit-record.json"), "w", encoding="utf-8") as fh:
         json.dump(record, fh, indent=2)
 
     # One compact line for the durable append step.
     print(json.dumps(record, separators=(",", ":")))
 
-    icon = {"success": "✅", "no_changes": "⚪", "failure": "❌"}.get(record["status"], "•")
+    icon = {"success": "✅", "skipped": "⚪", "no_changes": "⚪", "failure": "❌", "failed": "❌"}.get(record["status"], "•")
     mode = "check-only" if record["check_only"] else "deploy"
     comp = ", ".join(f"{k} × {v}" for k, v in sorted(counts.items())) or "—"
     cov = ("n/a" if record["coverage_percent"] is None

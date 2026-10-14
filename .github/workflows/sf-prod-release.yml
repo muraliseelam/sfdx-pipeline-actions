@@ -350,12 +350,18 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
-          sparse-checkout: .github/actions
+          sparse-checkout: |
+            .github/actions
+            sf-pipeline
       - name: Webex
         uses: ./.github/actions/notify
         with:
-          enabled: ${{ fromJSON(needs.plan.outputs.cfg).webex_enabled }}
-          webhook-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).webex_secret] }}
+          enabled: ${{ fromJSON(needs.plan.outputs.cfg).chat_enabled }}
+          provider: ${{ fromJSON(needs.plan.outputs.cfg).chat_provider }}
+          webhook-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_webhook_secret] }}
+          api-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_api_url_secret] }}
+          api-token: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_api_token_secret] }}
+          channel-id: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_channel_secret] }}
           message: >-
             ${{ needs.validate.result == 'success' && '🧪' || '❌' }} **Release ${{ needs.plan.outputs.tag }}**:
             production validation ${{ needs.validate.outputs.status || needs.validate.result }}.
@@ -574,6 +580,48 @@ jobs:
           # A re-run sees this and finalizes without deploying again.
           python3 sf-pipeline/scripts/gh_helpers.py pr-marker --pr "$PR" --name sf-release --set "deployed=$SHA" > /dev/null
 
+      - name: Audit record
+        if: always() && (steps.quick.outcome == 'success' || steps.full.outcome == 'success' || steps.full.outcome == 'failure')
+        uses: ./.github/actions/audit
+        with:
+          enabled: ${{ fromJSON(needs.resolve.outputs.cfg).audit_enabled }}
+          branch: ${{ fromJSON(needs.resolve.outputs.cfg).audit_branch }}
+          type: Release
+          environment: ${{ needs.resolve.outputs.env }}
+          status: ${{ (steps.quick.outputs.status == 'success' || steps.full.outputs.status == 'success') && 'success' || 'failed' }}
+          sha: ${{ needs.resolve.outputs.sha }}
+          pr: ${{ needs.resolve.outputs.pr }}
+          job-id: ${{ steps.full.outputs.job-id || steps.quick.outputs.job-id }}
+          test-level: ${{ steps.full.outputs.test-level || 'quick deploy of the validated job' }}
+          coverage: ${{ steps.full.outputs.overall-coverage }}
+          threshold: ${{ fromJSON(needs.resolve.outputs.cfg).coverage_threshold }}
+          package: ${{ fromJSON(needs.resolve.outputs.cfg).delta_output_dir }}/package/package.xml
+
+      - name: Release notes text (for Jira)
+        id: notes
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.resolve.outputs.pr }}
+        run: |
+          {
+            echo "text<<__NOTES__"
+            gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title,body --jq '.title + "\n" + .body'
+            echo "__NOTES__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Jira
+        if: success()
+        uses: ./.github/actions/jira
+        with:
+          enabled: ${{ fromJSON(needs.resolve.outputs.cfg).jira_enabled }}
+          text: ${{ steps.notes.outputs.text }}
+          environment: ${{ needs.resolve.outputs.env }}
+          status: ${{ fromJSON(needs.resolve.outputs.cfg).jira_status }}
+          base-url: ${{ secrets[fromJSON(needs.resolve.outputs.cfg).jira_base_url_secret] }}
+          email: ${{ secrets[fromJSON(needs.resolve.outputs.cfg).jira_email_secret] }}
+          token: ${{ secrets[fromJSON(needs.resolve.outputs.cfg).jira_token_secret] }}
+
       - name: Mark deploy-prod failed
         if: failure()
         env:
@@ -677,7 +725,9 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
-          sparse-checkout: .github/actions
+          sparse-checkout: |
+            .github/actions
+            sf-pipeline
 
       - name: Compose message
         id: msg
@@ -715,6 +765,10 @@ jobs:
         if: needs.resolve.outputs.cfg != ''
         uses: ./.github/actions/notify
         with:
-          enabled: ${{ fromJSON(needs.resolve.outputs.cfg).webex_enabled }}
-          webhook-url: ${{ secrets[fromJSON(needs.resolve.outputs.cfg).webex_secret] }}
+          enabled: ${{ fromJSON(needs.resolve.outputs.cfg).chat_enabled }}
+          provider: ${{ fromJSON(needs.resolve.outputs.cfg).chat_provider }}
+          webhook-url: ${{ secrets[fromJSON(needs.resolve.outputs.cfg).chat_webhook_secret] }}
+          api-url: ${{ secrets[fromJSON(needs.resolve.outputs.cfg).chat_api_url_secret] }}
+          api-token: ${{ secrets[fromJSON(needs.resolve.outputs.cfg).chat_api_token_secret] }}
+          channel-id: ${{ secrets[fromJSON(needs.resolve.outputs.cfg).chat_channel_secret] }}
           message: ${{ steps.msg.outputs.message }}

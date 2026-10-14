@@ -55,6 +55,7 @@ ENV_KEYS = {
     "github_environment",
     "validation_environment",
     "sync_after_release",
+    "jira_status",
 }
 ENV_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,30}$")
 
@@ -102,7 +103,24 @@ DEFAULTS: dict[str, Any] = {
     },
     "promotion": {"enforce_order": True, "branch_prefix": "promote/"},
     "release": {"source_env": None, "branch_prefix": "release/", "tag_prefix": "v", "quick_deploy": True},
-    "notifications": {"webex": {"enabled": False, "webhook_secret": "WEBEX_WEBHOOK_URL"}},
+    "notifications": {
+        "chat": {
+            "enabled": False,
+            "provider": "auto",
+            "webhook_secret": "CHAT_WEBHOOK_URL",
+            "api_url_secret": "CHAT_API_URL",
+            "api_token_secret": "CHAT_API_TOKEN",
+            "channel_secret": "CHAT_CHANNEL_ID",
+            "deploy_success": True,
+        },
+        "jira": {
+            "enabled": False,
+            "base_url_secret": "JIRA_BASE_URL",
+            "email_secret": "JIRA_EMAIL",
+            "token_secret": "JIRA_API_TOKEN",
+        },
+    },
+    "audit": {"enabled": True, "branch": "audit-log"},
 }
 
 
@@ -188,6 +206,7 @@ def normalize(raw: dict) -> tuple[dict, list[str]]:
             "github_environment": github_env,
             "validation_environment": given.get("validation_environment", f"{github_env}-validate"),
             "sync_after_release": given.get("sync_after_release", not is_prod) and not is_prod,
+            "jira_status": given.get("jira_status", ""),
         }
     cfg["environments"] = envs
     cfg["promotion"]["chain"] = names
@@ -323,10 +342,20 @@ def validate(cfg: dict, repo_root: Path | None = None) -> list[str]:
     if labels.get("promote_prefix") == labels.get("deploy_prefix"):
         errs.append("github.labels.promote_prefix and deploy_prefix must differ")
 
-    webex = (cfg.get("notifications") or {}).get("webex") or {}
-    need_bool(webex, "enabled", "notifications.webex")
-    if webex.get("enabled"):
-        need_str(webex, "webhook_secret", "notifications.webex")
+    chat = (cfg.get("notifications") or {}).get("chat") or {}
+    need_bool(chat, "enabled", "notifications.chat")
+    need_bool(chat, "deploy_success", "notifications.chat")
+    if chat.get("provider") not in ("auto", "slack", "teams", "webex", "generic", "api"):
+        errs.append("notifications.chat.provider must be auto, slack, teams, webex, generic or api")
+    for key in ("webhook_secret", "api_url_secret", "api_token_secret", "channel_secret"):
+        need_str(chat, key, "notifications.chat")
+    jira = (cfg.get("notifications") or {}).get("jira") or {}
+    need_bool(jira, "enabled", "notifications.jira")
+    for key in ("base_url_secret", "email_secret", "token_secret"):
+        need_str(jira, key, "notifications.jira")
+    audit = cfg.get("audit") or {}
+    need_bool(audit, "enabled", "audit")
+    need_str(audit, "branch", "audit")
 
     promotion = cfg["promotion"]
     need_bool(promotion, "enforce_order", "promotion")
@@ -366,6 +395,8 @@ def validate(cfg: dict, repo_root: Path | None = None) -> list[str]:
             errs.append(f"{where}.canary_tests needs at least one test class when test_policy is canary")
         if not isinstance(env.get("sync_after_release"), bool):
             errs.append(f"{where}.sync_after_release must be true or false")
+        if not isinstance(env.get("jira_status"), str):
+            errs.append(f"{where}.jira_status must be a string (the Jira status to move stories to)")
         if env.get("production"):
             if policy not in PRODUCTION_POLICIES:
                 errs.append(f"{where}.test_policy cannot be 'none' for production")
@@ -427,7 +458,7 @@ def globals_view(cfg: dict) -> dict[str, str]:
     project, github, approvals = cfg["project"], cfg["github"], cfg["approvals"]
     labels, promotion, release = github["labels"], cfg["promotion"], cfg["release"]
     envs = cfg["environments"]
-    webex = cfg["notifications"]["webex"]
+    chat = cfg["notifications"]["chat"]
     return {
         "source_path": _s(project["source_path"]),
         "baseline_branch": _s(project["baseline_branch"]),
@@ -463,8 +494,19 @@ def globals_view(cfg: dict) -> dict[str, str]:
         "release_branch_prefix": _s(release["branch_prefix"]),
         "tag_prefix": _s(release["tag_prefix"]),
         "quick_deploy": _s(release["quick_deploy"]),
-        "webex_enabled": _s(webex["enabled"]),
-        "webex_secret": _s(webex["webhook_secret"]),
+        "chat_enabled": _s(chat["enabled"]),
+        "chat_provider": _s(chat["provider"]),
+        "chat_webhook_secret": _s(chat["webhook_secret"]),
+        "chat_api_url_secret": _s(chat["api_url_secret"]),
+        "chat_api_token_secret": _s(chat["api_token_secret"]),
+        "chat_channel_secret": _s(chat["channel_secret"]),
+        "chat_deploy_success": _s(chat["deploy_success"]),
+        "jira_enabled": _s(cfg["notifications"]["jira"]["enabled"]),
+        "jira_base_url_secret": _s(cfg["notifications"]["jira"]["base_url_secret"]),
+        "jira_email_secret": _s(cfg["notifications"]["jira"]["email_secret"]),
+        "jira_token_secret": _s(cfg["notifications"]["jira"]["token_secret"]),
+        "audit_enabled": _s(cfg["audit"]["enabled"]),
+        "audit_branch": _s(cfg["audit"]["branch"]),
     }
 
 
@@ -493,6 +535,7 @@ def env_view(cfg: dict, name: str) -> dict[str, str]:
             "is_production": _s(env["production"]),
             "is_entry": _s(idx == 0),
             "sync_after_release": _s(env["sync_after_release"]),
+            "jira_status": _s(env["jira_status"]),
             "chain_index": _s(idx),
             "previous_env": _s(chain[idx - 1] if idx > 0 else ""),
             "next_env": _s(chain[idx + 1] if idx + 1 < len(chain) else ""),

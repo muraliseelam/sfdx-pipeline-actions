@@ -210,13 +210,19 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
-          sparse-checkout: .github/actions
+          sparse-checkout: |
+            .github/actions
+            sf-pipeline
 
       - name: Webex
         uses: ./.github/actions/notify
         with:
-          enabled: ${{ fromJSON(needs.plan.outputs.cfg).webex_enabled }}
-          webhook-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).webex_secret] }}
+          enabled: ${{ fromJSON(needs.plan.outputs.cfg).chat_enabled }}
+          provider: ${{ fromJSON(needs.plan.outputs.cfg).chat_provider }}
+          webhook-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_webhook_secret] }}
+          api-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_api_url_secret] }}
+          api-token: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_api_token_secret] }}
+          channel-id: ${{ secrets[fromJSON(needs.plan.outputs.cfg).chat_channel_secret] }}
           message: >-
             ⚠️ **Env branch sync failed.** Check that branch protection was restored.
             [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

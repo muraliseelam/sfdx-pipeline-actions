@@ -701,9 +701,12 @@ def cmd_doctor(args: argparse.Namespace, cfg: dict, repo: str) -> int:
         in_env = admin in secret_names(repo, prod["validation_environment"])
         check(admin in repo_secrets or in_env, f"admin PAT secret {admin} (used by the env-branch sync)",
               f"gh secret set {admin} --repo {repo} --env {prod['validation_environment']}")
-    if cfg["notifications"]["webex"]["enabled"]:
-        hook = cfg["notifications"]["webex"]["webhook_secret"]
-        check(hook in repo_secrets, f"Webex secret {hook}", f"gh secret set {hook} --repo {repo}")
+    chat = cfg["notifications"]["chat"]
+    if chat["enabled"]:
+        api = [chat["api_url_secret"], chat["api_token_secret"], chat["channel_secret"]]
+        ok = chat["webhook_secret"] in repo_secrets or all(s in repo_secrets for s in api)
+        check(ok, f"chat secret {chat['webhook_secret']} (or {', '.join(api)})",
+              f"gh secret set {chat['webhook_secret']} --repo {repo}")
 
     print(f"\n{'All good.' if not problems else f'{problems} problem(s) found.'}")
     return 1 if problems else 0

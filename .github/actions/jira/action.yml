@@ -1,0 +1,51 @@
+name: Jira update
+description: >-
+  After a successful deploy, comment on and transition every Jira issue key
+  found in the given text (branch name, PR title, release notes) to the
+  environment's jira_status. A silent no-op when disabled or when the Jira
+  secrets are missing; API errors only warn.
+
+inputs:
+  enabled:
+    description: "'true' to update Jira (pass fromJSON(<config json>).jira_enabled)."
+    required: true
+  text:
+    description: Text to scan for issue keys such as PROJ-123.
+    required: true
+  environment:
+    description: Environment key, used in the comment.
+    required: true
+  status:
+    description: Jira status to move the issues to (blank = comment only).
+    required: false
+    default: ""
+  base-url:
+    description: Jira base URL (secret value).
+    required: false
+    default: ""
+  email:
+    description: Jira account email (secret value).
+    required: false
+    default: ""
+  token:
+    description: Jira API token (secret value).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Update Jira issues
+      if: inputs.enabled == 'true'
+      shell: bash
+      env:
+        JIRA_BASE_URL: ${{ inputs.base-url }}
+        JIRA_EMAIL: ${{ inputs.email }}
+        JIRA_API_TOKEN: ${{ inputs.token }}
+        TEXT: ${{ inputs.text }}
+        ENV_NAME: ${{ inputs.environment }}
+        STATUS: ${{ inputs.status }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        python "$GITHUB_WORKSPACE/sf-pipeline/scripts/jira.py" deploy-text "$TEXT" "$ENV_NAME" "$STATUS" "$RUN_URL" \
+          || echo "::warning title=Jira::update failed (the deploy itself succeeded)"

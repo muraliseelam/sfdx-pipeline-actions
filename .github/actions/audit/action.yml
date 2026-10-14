@@ -1,0 +1,93 @@
+name: Deployment audit record
+description: >-
+  Write one structured audit record for a real deploy (who, what, where, which
+  commit and PR, components, coverage, Salesforce job ID) to the job summary and
+  an artifact, and append it as a JSON line to the durable audit branch
+  (audit.branch, default audit-log) so the trail outlives Actions log
+  retention. Best effort: never fails the deploy that called it. The job needs
+  `contents: write` and a checkout with persisted credentials.
+
+inputs:
+  enabled:
+    description: "'true' to record (pass fromJSON(<config json>).audit_enabled)."
+    required: true
+  branch:
+    description: Durable audit branch (pass fromJSON(<config json>).audit_branch).
+    required: false
+    default: audit-log
+  type:
+    description: Deploy | Release | Rollback
+    required: false
+    default: Deploy
+  environment:
+    description: Environment key.
+    required: true
+  status:
+    description: success | failed | skipped
+    required: true
+  sha:
+    description: Deployed commit.
+    required: true
+  pr:
+    description: PR number, if any.
+    required: false
+    default: ""
+  job-id:
+    description: Salesforce deploy job ID.
+    required: false
+    default: ""
+  test-level:
+    description: Apex test level used.
+    required: false
+    default: ""
+  coverage:
+    description: Overall coverage (%) reported by the deploy.
+    required: false
+    default: ""
+  threshold:
+    description: Coverage threshold (%).
+    required: false
+    default: ""
+  package:
+    description: Delta package.xml (for the component counts).
+    required: false
+    default: .sgd/package/package.xml
+
+runs:
+  using: composite
+  steps:
+    - name: Build audit record
+      id: record
+      if: inputs.enabled == 'true'
+      shell: bash
+      env:
+        AUDIT_DIR: ${{ runner.temp }}/sf-audit
+        AUDIT_TYPE: ${{ inputs.type }}
+        AUDIT_ENVIRONMENT: ${{ inputs.environment }}
+        AUDIT_STATUS: ${{ inputs.status }}
+        AUDIT_CHECK_ONLY: "false"
+        AUDIT_ACTOR: ${{ github.actor }}
+        AUDIT_REF: ${{ github.ref_name }}
+        AUDIT_SHA: ${{ inputs.sha }}
+        AUDIT_PR: ${{ inputs.pr }}
+        AUDIT_DEPLOY_ID: ${{ inputs.job-id }}
+        AUDIT_TEST_LEVEL: ${{ inputs.test-level }}
+        AUDIT_COVERAGE: ${{ inputs.coverage }}
+        AUDIT_THRESHOLD: ${{ inputs.threshold }}
+        AUDIT_PACKAGE: ${{ inputs.package }}
+        AUDIT_RUN_ID: ${{ github.run_id }}
+        AUDIT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        AUDIT_REPO: ${{ github.repository }}
+      run: python "$GITHUB_WORKSPACE/sf-pipeline/scripts/audit.py" || echo "::warning title=Audit::could not build the audit record"
+
+    - name: Append to the audit branch
+      if: inputs.enabled == 'true' && steps.record.outcome == 'success'
+      shell: bash
+      env:
+        AUDIT_DIR: ${{ runner.temp }}/sf-audit
+        AUDIT_BRANCH: ${{ inputs.branch }}
+        AUDIT_TYPE: ${{ inputs.type }}
+        AUDIT_ENVIRONMENT: ${{ inputs.environment }}
+        AUDIT_STATUS: ${{ inputs.status }}
+        AUDIT_SHA: ${{ inputs.sha }}
+      run: bash "$GITHUB_WORKSPACE/sf-pipeline/scripts/audit-append.sh"

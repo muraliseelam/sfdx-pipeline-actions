@@ -31,6 +31,7 @@ version: 1
 #   required_approvals: approvals.required_reviews
 #   github_environment: sf-<name>  (production: production)
 #   sync_after_release: true (production: false)
+#   jira_status:        ""   Jira status to move linked stories to after a deploy
 #   production:         true on one env only if it isn't the last one listed
 #
 # Four stages? Delete a line, e.g. remove `dev:` and PRs enter at int.
@@ -101,6 +102,22 @@ tooling:
   sgd_version: "6.45.1"
 
 notifications:
-  webex:
+  chat:
+    # Deploy / release / sync outcomes to Slack, Microsoft Teams, Webex, any JSON
+    # webhook, or a token-based chat API. The provider is auto-detected from the
+    # webhook URL. Store ONE of: CHAT_WEBHOOK_URL, or CHAT_API_URL + CHAT_API_TOKEN
+    # + CHAT_CHANNEL_ID. A chat failure only warns; it never fails a deploy.
     enabled: false
-    webhook_secret: WEBEX_WEBHOOK_URL
+    provider: auto            # auto | slack | teams | webex | generic | api
+    deploy_success: true      # also announce successful env deploys (failures always are)
+  jira:
+    # Comment on + transition every Jira issue key found in the branch name, PR
+    # title or release notes to the env's `jira_status` after each deploy.
+    # Needs JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN secrets; best effort.
+    enabled: false
+
+audit:
+  # One JSON record per real deploy, appended to this branch (independent of
+  # Actions log retention).
+  enabled: true
+  branch: audit-log

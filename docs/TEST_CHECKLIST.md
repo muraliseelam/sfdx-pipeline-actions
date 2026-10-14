@@ -4,7 +4,23 @@ Working checklist for turning the pipeline into an open-source, zero-friction te
 it end to end against real Salesforce orgs (5 fresh scratch orgs from the `partner-pbo` Dev Hub) and
 real GitHub Actions runs. Items are worked top to bottom; each is ticked only after it's verified.
 
+Sections A–D and R were done in `salesforce-devops-actions`, whose history is merged into this repo.
+Section U combines it with the original `sfdx-pipeline-actions`; the E2E scenarios (C3 onward) now run here.
+
 Legend: `[x]` done and verified · `[~]` in progress · `[ ]` to do · `[!]` blocked (reason noted)
+
+## U. Unification with the original sfdx-pipeline-actions
+- [x] U0 Histories merged; single-repo pipeline is the base; reusable-workflow layer, consumer examples and personalization scripts removed; MIT license kept
+- [x] U0b Repo made public; `bootstrap.py github` applied (branches, labels, environments, protection)
+- [x] U1 Chat notifications: Slack / Teams / Webex / generic webhook / token API (from notify.sh)
+- [x] U2 Jira: comment + transition the story in the branch name on each deploy (per-env `jira_status`)
+- [x] U3 Durable audit trail: one JSON record per real deploy appended to an `audit-log` branch
+- [ ] U4 Destructive-delete dependency lint in the deploy action
+- [ ] U5 Profiles / permission sets: `full` or `incremental` deploys
+- [ ] U6 Admin bypass label for the coverage + code-analysis gates (admin/maintain verified at run time)
+- [ ] U7 Rollback runbook: revert a merged PR/commit as a PR that flows through the pipeline
+- [ ] U8 Optional dedicated integration user + least-privilege permission set in `jwt-setup`
+- [ ] U9 Self-test runs the link checker; tests cover every ported feature
 
 ## A. Open-source architecture
 - [x] A1 Convention-over-configuration: env list is the only required input; branch, alias, secret names, status check, GitHub environment, instance URL and test policy all default from the env name; last env = production — unit-tested; live config resolves 5 envs from names only
@@ -48,7 +64,7 @@ Legend: `[x]` done and verified · `[~]` in progress · `[ ]` to do · `[!]` blo
 - [x] C0 Env-branch reset (sync logic) run locally after direct pipeline pushes to main: 4 branches reset, protection restored + verified each time
 - [x] C1 Pipeline committed and pushed to `main` — 3cec2ea + follow-ups
 - [x] C2 `bootstrap.py github` applied to the live repo — branches, labels, environments, protection live
-- [!] C3 Secrets set by the repo owner (`bootstrap.py secrets`) — needs the owner
+- [!] C3 Secrets set by the repo owner (`bootstrap.py setup`) — needs the owner, now on sfdx-pipeline-actions
 - [ ] C4 Doctor workflow green for all five orgs
 
 ## D. End-to-end scenarios (5 stages: dev → int → qa → stage → prod)

@@ -1,39 +1,50 @@
-name: Pipeline notification (Webex)
+name: Pipeline notification (chat)
 description: >-
-  Post a Markdown message to a Webex space through an incoming webhook when
-  notifications.webex.enabled is true in pipeline.config.yml. Never fails the
-  job; a delivery problem is reported as a warning.
+  Post a Markdown message to a team chat when notifications.chat.enabled is
+  true: Slack, Microsoft Teams, Webex, any JSON webhook, or a token-based chat
+  API (provider auto-detected from the webhook URL). Never fails the job: a
+  delivery problem is reported as a warning.
 
 inputs:
   enabled:
-    description: "'true' to send (pass fromJSON(<config json>).webex_enabled)."
+    description: "'true' to send (pass fromJSON(<config json>).chat_enabled)."
     required: true
-  webhook-url:
-    description: Webex incoming-webhook URL (secret value).
-    required: false
-    default: ""
   message:
     description: Markdown message body.
     required: true
+  provider:
+    description: "auto | slack | teams | webex | generic | api"
+    required: false
+    default: auto
+  webhook-url:
+    description: Incoming-webhook URL (secret value).
+    required: false
+    default: ""
+  api-url:
+    description: Chat API endpoint for token-based providers (secret value).
+    required: false
+    default: ""
+  api-token:
+    description: Bot/API token for token-based providers (secret value).
+    required: false
+    default: ""
+  channel-id:
+    description: Channel or room id for token-based providers (secret value).
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
-    - name: Send Webex message
+    - name: Send chat message
       if: inputs.enabled == 'true'
       shell: bash
       env:
-        WEBHOOK_URL: ${{ inputs.webhook-url }}
+        CHAT_PROVIDER: ${{ inputs.provider }}
+        CHAT_WEBHOOK_URL: ${{ inputs.webhook-url }}
+        CHAT_API_URL: ${{ inputs.api-url }}
+        CHAT_API_TOKEN: ${{ inputs.api-token }}
+        CHAT_CHANNEL_ID: ${{ inputs.channel-id }}
         MESSAGE: ${{ inputs.message }}
-      run: |
-        if [ -z "$WEBHOOK_URL" ]; then
-          echo "::warning title=notify::Webex is enabled but the webhook secret is empty"
-          exit 0
-        fi
-        payload="$(jq -n --arg m "$MESSAGE" '{markdown: $m}')"
-        if curl -fsS --retry 3 --max-time 20 -X POST -H "Content-Type: application/json" \
-             -d "$payload" "$WEBHOOK_URL" > /dev/null; then
-          echo "Webex notification sent"
-        else
-          echo "::warning title=notify::Webex notification failed"
-        fi
+        TMPDIR: ${{ runner.temp }}
+      run: bash "$GITHUB_WORKSPACE/sf-pipeline/scripts/notify.sh" "$MESSAGE"
