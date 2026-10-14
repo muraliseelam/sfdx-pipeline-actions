@@ -20,7 +20,7 @@ Legend: `[x]` done and verified · `[~]` in progress · `[ ]` to do · `[!]` blo
 - [x] U6 Admin bypass label for the coverage + code-analysis gates (admin/maintain verified at run time)
 - [x] U7 Rollback runbook: revert a merged PR/commit as a PR that flows through the pipeline
 - [x] U8 Integration user: documented (dedicated user + profile pre-authorization via `jwt-setup --profile`); not automated: External Client Apps pre-authorize by profile, and creating users consumes org licenses
-- [ ] U9 Self-test runs the link checker; tests cover every ported feature
+- [x] U9 Self-test runs the link checker; 66 tests cover every ported feature (green on GitHub Linux runners, nothing skipped)
 
 ## A. Open-source architecture
 - [x] A1 Convention-over-configuration: env list is the only required input; branch, alias, secret names, status check, GitHub environment, instance URL and test policy all default from the env name; last env = production — unit-tested; live config resolves 5 envs from names only
