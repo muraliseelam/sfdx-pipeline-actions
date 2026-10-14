@@ -1,0 +1,3 @@
+-r scripts/requirements.txt
+actionlint-py==1.7.12.25
+shellcheck-py==0.11.0.1

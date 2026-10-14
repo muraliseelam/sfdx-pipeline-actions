@@ -1,0 +1,8 @@
+# Files the sf CLI must never deploy or retrieve.
+package.xml
+**/.gitkeep
+**/jsconfig.json
+**/.eslintrc.json
+**/__tests__/**
+**/*.dup
+**/.DS_Store

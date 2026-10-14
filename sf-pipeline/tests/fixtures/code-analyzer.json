@@ -1,0 +1,170 @@
+{
+ "violationCounts": {
+  "total": 7,
+  "sev1": 1,
+  "sev2": 0,
+  "sev3": 0,
+  "sev4": 6,
+  "sev5": 0
+ },
+ "violations": [
+  {
+   "rule": "ApexDoc",
+   "engine": "pmd",
+   "severity": 4,
+   "tags": [
+    "Recommended",
+    "Documentation",
+    "Apex"
+   ],
+   "primaryLocationIndex": 0,
+   "locations": [
+    {
+     "file": "force-app\\main\\default\\classes\\FxBroken.cls",
+     "startLine": 1,
+     "startColumn": 8,
+     "endLine": 1,
+     "endColumn": 77
+    }
+   ],
+   "message": "Missing ApexDoc comment",
+   "resources": [
+    "https://docs.pmd-code.org/pmd-doc-7.26.0/pmd_rules_apex_documentation.html#apexdoc"
+   ]
+  },
+  {
+   "rule": "ApexDoc",
+   "engine": "pmd",
+   "severity": 4,
+   "tags": [
+    "Recommended",
+    "Documentation",
+    "Apex"
+   ],
+   "primaryLocationIndex": 0,
+   "locations": [
+    {
+     "file": "force-app\\main\\default\\classes\\FxBroken.cls",
+     "startLine": 1,
+     "startColumn": 39,
+     "endLine": 1,
+     "endColumn": 75
+    }
+   ],
+   "message": "Missing ApexDoc comment",
+   "resources": [
+    "https://docs.pmd-code.org/pmd-doc-7.26.0/pmd_rules_apex_documentation.html#apexdoc"
+   ]
+  },
+  {
+   "rule": "ApexDoc",
+   "engine": "pmd",
+   "severity": 4,
+   "tags": [
+    "Recommended",
+    "Documentation",
+    "Apex"
+   ],
+   "primaryLocationIndex": 0,
+   "locations": [
+    {
+     "file": "force-app\\main\\default\\classes\\FxCalc.cls",
+     "startLine": 1,
+     "startColumn": 21,
+     "endLine": 8,
+     "endColumn": 2
+    }
+   ],
+   "message": "Missing ApexDoc comment",
+   "resources": [
+    "https://docs.pmd-code.org/pmd-doc-7.26.0/pmd_rules_apex_documentation.html#apexdoc"
+   ]
+  },
+  {
+   "rule": "ApexDoc",
+   "engine": "pmd",
+   "severity": 4,
+   "tags": [
+    "Recommended",
+    "Documentation",
+    "Apex"
+   ],
+   "primaryLocationIndex": 0,
+   "locations": [
+    {
+     "file": "force-app\\main\\default\\classes\\FxCalc.cls",
+     "startLine": 2,
+     "startColumn": 19,
+     "endLine": 2,
+     "endColumn": 70
+    }
+   ],
+   "message": "Missing ApexDoc comment",
+   "resources": [
+    "https://docs.pmd-code.org/pmd-doc-7.26.0/pmd_rules_apex_documentation.html#apexdoc"
+   ]
+  },
+  {
+   "rule": "ApexDoc",
+   "engine": "pmd",
+   "severity": 4,
+   "tags": [
+    "Recommended",
+    "Documentation",
+    "Apex"
+   ],
+   "primaryLocationIndex": 0,
+   "locations": [
+    {
+     "file": "force-app\\main\\default\\classes\\FxCalc.cls",
+     "startLine": 3,
+     "startColumn": 19,
+     "endLine": 3,
+     "endColumn": 70
+    }
+   ],
+   "message": "Missing ApexDoc comment",
+   "resources": [
+    "https://docs.pmd-code.org/pmd-doc-7.26.0/pmd_rules_apex_documentation.html#apexdoc"
+   ]
+  },
+  {
+   "rule": "ApexDoc",
+   "engine": "pmd",
+   "severity": 4,
+   "tags": [
+    "Recommended",
+    "Documentation",
+    "Apex"
+   ],
+   "primaryLocationIndex": 0,
+   "locations": [
+    {
+     "file": "force-app\\main\\default\\classes\\FxCalc.cls",
+     "startLine": 4,
+     "startColumn": 19,
+     "endLine": 7,
+     "endColumn": 6
+    }
+   ],
+   "message": "Missing ApexDoc comment",
+   "resources": [
+    "https://docs.pmd-code.org/pmd-doc-7.26.0/pmd_rules_apex_documentation.html#apexdoc"
+   ]
+  },
+  {
+   "rule": "UninstantiableEngineError",
+   "engine": "flow",
+   "severity": 1,
+   "tags": [],
+   "primaryLocationIndex": 0,
+   "locations": [
+    {
+     "comment": "Undefined Code Location"
+    }
+   ],
+   "message": "The engine with name 'flow' could not be instantiated. Error: Could not locate a Python v3.10.0+ install using any of the following: [\"python3\",\"python\"].",
+   "resources": []
+  }
+ ]
+}

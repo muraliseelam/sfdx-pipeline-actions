@@ -1,0 +1,44 @@
+{
+  "status": 1,
+  "name": "FailedValidationError",
+  "message": "Failed to validate the deployment (0Afdq00000EQ1lBCAT). Due To:\nFxFailTest.fails - System.AssertException: Assertion Failed: math is hard: Expected: 1, Actual: 2",
+  "result": {
+    "status": "Failed",
+    "success": false,
+    "checkOnly": true,
+    "done": true,
+    "numberComponentsDeployed": 3,
+    "numberComponentsTotal": 3,
+    "numberComponentErrors": 0,
+    "numberTestsCompleted": 1,
+    "numberTestsTotal": 2,
+    "numberTestErrors": 1,
+    "id": "0Af000000000001AAA",
+    "details": {
+      "componentFailures": [],
+      "runTestResult": {
+        "numTestsRun": 2,
+        "numFailures": 1,
+        "failures": [
+          {
+            "name": "FxFailTest",
+            "methodName": "fails",
+            "message": "System.AssertException: Assertion Failed: math is hard: Expected: 1, Actual: 2",
+            "stackTrace": "Class.FxFailTest.fails: line 1, column 1",
+            "type": "Class"
+          }
+        ],
+        "codeCoverage": [
+          {
+            "name": "FxCalc",
+            "namespace": null,
+            "type": "Class",
+            "numLocations": 5,
+            "numLocationsNotCovered": 0
+          }
+        ],
+        "codeCoverageWarnings": []
+      }
+    }
+  }
+}

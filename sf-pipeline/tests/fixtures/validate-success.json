@@ -1,0 +1,34 @@
+{
+  "status": 0,
+  "result": {
+    "status": "Succeeded",
+    "success": true,
+    "checkOnly": true,
+    "done": true,
+    "numberComponentsDeployed": 2,
+    "numberComponentsTotal": 2,
+    "numberComponentErrors": 0,
+    "numberTestsCompleted": 1,
+    "numberTestsTotal": 1,
+    "numberTestErrors": 0,
+    "id": "0Af000000000001AAA",
+    "details": {
+      "componentFailures": [],
+      "runTestResult": {
+        "numTestsRun": 1,
+        "numFailures": 0,
+        "failures": [],
+        "codeCoverage": [
+          {
+            "name": "FxCalc",
+            "namespace": null,
+            "type": "Class",
+            "numLocations": 5,
+            "numLocationsNotCovered": 0
+          }
+        ],
+        "codeCoverageWarnings": []
+      }
+    }
+  }
+}

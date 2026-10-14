@@ -1,89 +1,222 @@
 name: Sync Env Branches
 
-# After a production go-live, merge the production branch into each promotion-chain
-# environment branch so their delta-vs-prod sheds the just-shipped stories. Merges
-# cleanly when possible, otherwise opens a PR for manual conflict resolution.
-#
-# Fully config-driven: the environment branch list and the production branch are
-# read from sf-pipeline/pipeline.config.yml — nothing here is hardcoded.
+# Realign every non-production environment branch (sync_after_release: true in
+# pipeline.config.yml) to the production baseline after a release, so future
+# PR diffs and deltas start clean. Env branches are protected
+# (enforce_admins: true), so each one is:
+#   snapshot protection (PAT) -> lift -> force-push baseline (with lease) -> restore exactly
+# The restore step always runs and verifies the result. Commits that are about
+# to be dropped (patches not in the baseline) are listed in the job summary so
+# teams can re-promote unreleased work.
 
 on:
-  # Reusable: called by prod-release after go-live, or by a project's manual
-  # caller. The caller owns any workflow_dispatch trigger.
   workflow_call:
+    inputs:
+      dry_run:
+        description: Report only; change nothing
+        required: false
+        default: false
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report only; change nothing
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+
+concurrency:
+  group: sync-env-branches
+  cancel-in-progress: false
 
 jobs:
-  # ---- Read the config so the matrix + base branch come from one file --------
   plan:
+    name: Plan
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
-      branches: ${{ steps.cfg.outputs.env_branches }}
-      prod_branch: ${{ steps.cfg.outputs.prod_branch }}
+      cfg: ${{ steps.cfg.outputs.json }}
+      envs: ${{ steps.envs.outputs.envs }}
     steps:
-      - uses: actions/checkout@v4
-      - id: cfg
-        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
+      - name: Checkout pipeline files
+        uses: actions/checkout@v7
         with:
-          mode: outputs
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions
+            sf-pipeline
+
+      - name: Load production config
+        id: cfg
+        uses: ./.github/actions/load-config
+        with:
+          production: "true"
+
+      - name: Environments to sync
+        id: envs
+        run: |
+          envs="$(python sf-pipeline/scripts/pipeline_config.py envs --sync-only)"
+          echo "envs=$envs" >> "$GITHUB_OUTPUT"
+          echo "Syncing: $envs"
 
   sync:
+    name: Sync ${{ matrix.env }}
     needs: plan
+    if: needs.plan.outputs.envs != '[]'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Runs in the production validation environment (protected branches only), so an
+    # admin-capable token can live there instead of in repository secrets.
+    environment:
+      name: ${{ fromJSON(needs.plan.outputs.cfg).validation_environment }}
     strategy:
       fail-fast: false
       matrix:
-        branch: ${{ fromJSON(needs.plan.outputs.branches) }}
+        env: ${{ fromJSON(needs.plan.outputs.envs) }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ needs.plan.outputs.prod_branch }}
-
-      - name: Configure git
-        run: |
-          git config user.name  "sf-release-bot"
-          git config user.email "sf-release-bot@users.noreply.github.com"
-
-      - name: Merge ${{ needs.plan.outputs.prod_branch }} into ${{ matrix.branch }}
+      - name: Check PAT
         env:
-          GH_TOKEN: ${{ github.token }}
-          PROD_BRANCH: ${{ needs.plan.outputs.prod_branch }}
+          PAT: ${{ secrets[fromJSON(needs.plan.outputs.cfg).admin_pat_secret] }}
+          PAT_SECRET: ${{ fromJSON(needs.plan.outputs.cfg).admin_pat_secret }}
         run: |
-          BR="${{ matrix.branch }}"
-          git fetch origin --prune
-          if ! git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
-            echo "Branch $BR does not exist yet — creating it from $PROD_BRANCH."
-            git push origin "$PROD_BRANCH:refs/heads/$BR"
-            exit 0
+          if [ -z "$PAT" ]; then
+            echo "::error title=Sync::Secret ${PAT_SECRET} is not set (needs administration + contents + workflows write)."
+            exit 1
           fi
-          git checkout -B "$BR" "origin/$BR"
-          if git merge --no-edit "origin/$PROD_BRANCH"; then
-            if git push origin "HEAD:$BR"; then
-              echo "Merged $PROD_BRANCH into $BR."
-            else
-              # $BR is protected (e.g. the entry branch requires a PR). Fall back to a
-              # sync PR; if the org also blocks Actions from creating PRs, warn but
-              # do NOT fail the release — the delta-vs-prod auto-sheds shipped stories.
-              echo "::warning::Direct push to protected '$BR' was rejected — attempting a sync PR."
-              SYNC_BR="sync/${PROD_BRANCH}-into-${BR}-${{ github.run_id }}"
-              git push origin "HEAD:$SYNC_BR" || true
-              gh pr create --base "$BR" --head "$SYNC_BR" \
-                --title "Sync $PROD_BRANCH into $BR" \
-                --body "Automated post-release sync. '$BR' is protected — review and merge." \
-                || echo "::warning::Could not open a sync PR for '$BR' (Actions PR creation may be disabled at the org). An admin should merge $PROD_BRANCH into '$BR' manually."
-            fi
+
+      - name: Checkout baseline (PAT credentials for the push)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ fromJSON(needs.plan.outputs.cfg).baseline_branch }}
+          fetch-depth: 0
+          token: ${{ secrets[fromJSON(needs.plan.outputs.cfg).admin_pat_secret] }}
+
+      - name: Load config
+        id: cfg
+        uses: ./.github/actions/load-config
+        with:
+          environment: ${{ matrix.env }}
+
+      - name: Inspect
+        id: inspect
+        env:
+          BASELINE: ${{ fromJSON(steps.cfg.outputs.json).baseline_branch }}
+          BRANCH: ${{ fromJSON(steps.cfg.outputs.json).branch }}
+        run: |
+          set -euo pipefail
+          base_sha="$(git rev-parse "origin/${BASELINE}")"
+          if ! old_sha="$(git rev-parse --verify --quiet "origin/${BRANCH}")"; then
+            action=create; old_sha=""
+          elif [ "$old_sha" = "$base_sha" ]; then
+            action=none
           else
-            echo "::warning::Merge conflict syncing $PROD_BRANCH into $BR — opening a PR."
-            git merge --abort
-            SYNC_BR="sync/${PROD_BRANCH}-into-${BR}-${{ github.run_id }}"
-            git checkout -B "$SYNC_BR" "origin/$BR"
-            git push origin "HEAD:$SYNC_BR" || true
-            gh pr create --base "$BR" --head "$SYNC_BR" \
-              --title "Sync $PROD_BRANCH into $BR" \
-              --body "Automated post-release sync hit conflicts. Please resolve." \
-              || echo "::warning::Could not open a conflict-resolution PR for '$BR'. An admin should merge $PROD_BRANCH into '$BR' manually."
+            action=sync
           fi
+          {
+            echo "### \`${BRANCH}\` → \`${BASELINE}\` @ \`${base_sha:0:7}\`: ${action}"
+            if [ "$action" = "sync" ]; then
+              dropped="$(git cherry -v "origin/${BASELINE}" "origin/${BRANCH}" | grep '^+' || true)"
+              if [ -n "$dropped" ]; then
+                echo
+                echo "Commits on \`${BRANCH}\` whose changes are **not** in \`${BASELINE}\` (unreleased; re-promote if still wanted):"
+                echo
+                while read -r _ sha subject; do echo "- \`${sha:0:7}\` ${subject}"; done <<<"$dropped"
+              else
+                echo
+                echo "Every change on \`${BRANCH}\` is already in \`${BASELINE}\`."
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "action=$action"
+            echo "base_sha=$base_sha"
+            echo "old_sha=$old_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Snapshot branch protection
+        id: snapshot
+        if: steps.inspect.outputs.action == 'sync' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ secrets[fromJSON(needs.plan.outputs.cfg).admin_pat_secret] }}
+          BRANCH: ${{ fromJSON(steps.cfg.outputs.json).branch }}
+        run: |
+          set -euo pipefail
+          file="$RUNNER_TEMP/protection-${BRANCH//\//-}.json"
+          python sf-pipeline/scripts/branch_protection.py snapshot --branch "$BRANCH" --out "$file"
+          {
+            echo "file=$file"
+            echo "protected=$(jq -r '.protected' "$file")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Keep snapshot as artifact
+        if: always() && steps.snapshot.outputs.file != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: branch-protection-${{ matrix.env }}-${{ github.run_attempt }}
+          path: ${{ steps.snapshot.outputs.file }}
+          retention-days: 30
+
+      - name: Lift protection
+        if: steps.snapshot.outputs.protected == 'true'
+        env:
+          GH_TOKEN: ${{ secrets[fromJSON(needs.plan.outputs.cfg).admin_pat_secret] }}
+          BRANCH: ${{ fromJSON(steps.cfg.outputs.json).branch }}
+        run: python sf-pipeline/scripts/branch_protection.py lift --branch "$BRANCH"
+
+      - name: Force-push baseline (with lease)
+        if: steps.snapshot.outcome == 'success'
+        env:
+          BRANCH: ${{ fromJSON(steps.cfg.outputs.json).branch }}
+          BASE_SHA: ${{ steps.inspect.outputs.base_sha }}
+          OLD_SHA: ${{ steps.inspect.outputs.old_sha }}
+        run: |
+          set -euo pipefail
+          git push --force-with-lease="refs/heads/${BRANCH}:${OLD_SHA}" origin "${BASE_SHA}:refs/heads/${BRANCH}"
+          echo "${BRANCH}: ${OLD_SHA:0:7} -> ${BASE_SHA:0:7}"
+
+      - name: Restore branch protection (always)
+        if: always() && steps.snapshot.outputs.protected == 'true'
+        env:
+          GH_TOKEN: ${{ secrets[fromJSON(needs.plan.outputs.cfg).admin_pat_secret] }}
+          BRANCH: ${{ fromJSON(steps.cfg.outputs.json).branch }}
+          FILE: ${{ steps.snapshot.outputs.file }}
+        run: |
+          if ! python sf-pipeline/scripts/branch_protection.py restore --branch "$BRANCH" --snapshot "$FILE"; then
+            echo "::error title=Protection NOT restored on ${BRANCH}::Re-apply it from the branch-protection artifact: python sf-pipeline/scripts/branch_protection.py restore --branch ${BRANCH} --snapshot <file>"
+            exit 1
+          fi
+
+      - name: Create missing env branch
+        if: steps.inspect.outputs.action == 'create' && !inputs.dry_run
+        env:
+          ENV_NAME: ${{ matrix.env }}
+          BRANCH: ${{ fromJSON(steps.cfg.outputs.json).branch }}
+          BASE_SHA: ${{ steps.inspect.outputs.base_sha }}
+        run: |
+          git push origin "${BASE_SHA}:refs/heads/${BRANCH}"
+          echo "::notice title=Sync::Created ${BRANCH} at ${BASE_SHA:0:7}; protect it with: python sf-pipeline/scripts/branch_protection.py apply --env ${ENV_NAME}"
+
+  notify:
+    name: Notify failure
+    needs: [plan, sync]
+    if: always() && needs.sync.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout pipeline actions
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/actions
+
+      - name: Webex
+        uses: ./.github/actions/notify
+        with:
+          enabled: ${{ fromJSON(needs.plan.outputs.cfg).webex_enabled }}
+          webhook-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).webex_secret] }}
+          message: >-
+            ⚠️ **Env branch sync failed.** Check that branch protection was restored.
+            [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

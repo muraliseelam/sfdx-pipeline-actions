@@ -1,0 +1,39 @@
+name: Pipeline notification (Webex)
+description: >-
+  Post a Markdown message to a Webex space through an incoming webhook when
+  notifications.webex.enabled is true in pipeline.config.yml. Never fails the
+  job; a delivery problem is reported as a warning.
+
+inputs:
+  enabled:
+    description: "'true' to send (pass fromJSON(<config json>).webex_enabled)."
+    required: true
+  webhook-url:
+    description: Webex incoming-webhook URL (secret value).
+    required: false
+    default: ""
+  message:
+    description: Markdown message body.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Send Webex message
+      if: inputs.enabled == 'true'
+      shell: bash
+      env:
+        WEBHOOK_URL: ${{ inputs.webhook-url }}
+        MESSAGE: ${{ inputs.message }}
+      run: |
+        if [ -z "$WEBHOOK_URL" ]; then
+          echo "::warning title=notify::Webex is enabled but the webhook secret is empty"
+          exit 0
+        fi
+        payload="$(jq -n --arg m "$MESSAGE" '{markdown: $m}')"
+        if curl -fsS --retry 3 --max-time 20 -X POST -H "Content-Type: application/json" \
+             -d "$payload" "$WEBHOOK_URL" > /dev/null; then
+          echo "Webex notification sent"
+        else
+          echo "::warning title=notify::Webex notification failed"
+        fi

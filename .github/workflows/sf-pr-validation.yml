@@ -1,0 +1,356 @@
+name: SF PR Validation
+
+# Check-only validation of a PR's prod-relative delta against the org behind
+# its base branch:
+#   plan -> preflight (routing, meta pairs, branch origin, change detection)
+#        -> validate (sf project deploy validate) -> gate (deploy-<env> status)
+# Base branches are resolved from sf-pipeline/pipeline.config.yml, so the
+# trigger accepts every PR and the plan job routes it. The config, scripts and
+# composite actions always come from the default branch (trusted, and current
+# even for promotion PRs whose head predates a config change); the PR supplies
+# only the metadata being validated.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  # Title/body edits get their own group so they never cancel a running validation.
+  group: sf-pr-validation-${{ github.event.pull_request.number }}-${{ github.event.action == 'edited' && !github.event.changes.base && github.run_id || 'validate' }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.route.outputs.run }}
+      env: ${{ steps.cfg.outputs.env }}
+      cfg: ${{ steps.cfg.outputs.json }}
+    steps:
+      - name: Checkout pipeline files (default branch)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions
+            sf-pipeline
+
+      - name: Load config for the base branch
+        id: cfg
+        uses: ./.github/actions/load-config
+        with:
+          branch: ${{ github.base_ref }}
+
+      - name: Route
+        id: route
+        env:
+          FOUND: ${{ steps.cfg.outputs.found }}
+          ACTION: ${{ github.event.action }}
+          BASE_CHANGED: ${{ github.event.changes.base != null }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          IS_PROD: ${{ fromJSON(steps.cfg.outputs.json).is_production }}
+          RELEASE_PREFIX: ${{ fromJSON(steps.cfg.outputs.json).release_branch_prefix }}
+          ORG_ALIAS: ${{ fromJSON(steps.cfg.outputs.json).org_alias }}
+        run: |
+          run=true
+          reason="validate ${HEAD_REF} -> ${BASE_REF} against org '${ORG_ALIAS}'"
+          if [ "$FOUND" != "true" ]; then
+            run=false; reason="base branch '${BASE_REF}' is not an environment branch"
+          elif [ "$ACTION" = "edited" ] && [ "$BASE_CHANGED" != "true" ]; then
+            run=false; reason="PR edited without a base-branch change"
+          elif [ "$IS_PROD" = "true" ] && [[ "$HEAD_REF" == "$RELEASE_PREFIX"* ]]; then
+            run=false; reason="release PRs are validated by the SF Prod Release workflow"
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "Plan: $reason"
+          echo "**Plan:** $reason" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark gate pending
+        if: steps.route.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          CONTEXT: ${{ fromJSON(steps.cfg.outputs.json).status_check }}
+          ORG_ALIAS: ${{ fromJSON(steps.cfg.outputs.json).org_alias }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 sf-pipeline/scripts/gh_helpers.py set-status --sha "$SHA" --context "$CONTEXT" \
+            --state pending --description "Validating against ${ORG_ALIAS}" --target-url "$RUN_URL"
+
+  preflight:
+    name: Preflight
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      has_sf_changes: ${{ steps.changes.outputs.has_sf_changes }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use pipeline files from the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: git checkout "origin/${DEFAULT_BRANCH}" -- .github/actions sf-pipeline
+
+      - name: Load config
+        id: cfg
+        uses: ./.github/actions/load-config
+        with:
+          environment: ${{ needs.plan.outputs.env }}
+
+      - name: PR routing rules
+        env:
+          BASE_ENV: ${{ needs.plan.outputs.env }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: python sf-pipeline/scripts/preflight.py pr-route --base-env "$BASE_ENV" --head-ref "$HEAD_REF"
+
+      - name: Meta-pair check (.cls/.trigger/.page/.component <-> -meta.xml)
+        if: ${{ !cancelled() }}
+        run: python sf-pipeline/scripts/preflight.py meta-pairs
+
+      - name: Branch cut from the production baseline
+        if: ${{ !cancelled() }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python sf-pipeline/scripts/preflight.py branch-origin --head HEAD --target-branch "$BASE_REF"
+
+      - name: Detect Salesforce changes
+        id: changes
+        if: ${{ !cancelled() }}
+        env:
+          BASELINE: ${{ fromJSON(steps.cfg.outputs.json).baseline_branch }}
+          SOURCE_PATH: ${{ fromJSON(steps.cfg.outputs.json).source_path }}
+        run: |
+          set -euo pipefail
+          base="$(git merge-base "origin/${BASELINE}" HEAD)"
+          if git diff --quiet "$base" HEAD -- "$SOURCE_PATH"; then
+            echo "has_sf_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No changes under ${SOURCE_PATH} since ${base:0:7}"
+          else
+            echo "has_sf_changes=true" >> "$GITHUB_OUTPUT"
+            git diff --stat "$base" HEAD -- "$SOURCE_PATH" | tail -n 25
+          fi
+
+  validate:
+    name: Validate (check-only)
+    needs: [plan, preflight]
+    if: needs.plan.outputs.run == 'true' && needs.preflight.outputs.has_sf_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Use pipeline files from the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: git checkout "origin/${DEFAULT_BRANCH}" -- .github/actions sf-pipeline
+
+      - name: sf CLI + JWT auth
+        uses: ./.github/actions/sf-setup
+        with:
+          environment: ${{ needs.plan.outputs.env }}
+          auth-url: ${{ secrets[fromJSON(needs.plan.outputs.cfg).auth_url_secret] }}
+          username: ${{ secrets[fromJSON(needs.plan.outputs.cfg).username_secret] }}
+          consumer-key: ${{ secrets[fromJSON(needs.plan.outputs.cfg).consumer_key_secret] }}
+          jwt-key: ${{ secrets[fromJSON(needs.plan.outputs.cfg).jwt_key_secret] }}
+
+      - name: Delta validate
+        id: validate
+        uses: ./.github/actions/deploy
+        with:
+          environment: ${{ needs.plan.outputs.env }}
+          mode: validate
+          pr-number: ${{ github.event.pull_request.number }}
+
+      - name: Report a failed org login on the PR
+        if: failure() && steps.validate.outcome == 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ENV_NAME: ${{ needs.plan.outputs.env }}
+          AUTH: ${{ fromJSON(needs.plan.outputs.cfg).auth_method }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          marker="<!-- sf-pipeline-report:${ENV_NAME}:validate -->"
+          {
+            echo "$marker"
+            echo "## 🚀 Salesforce Pipeline Report"
+            echo
+            echo "❌ **Couldn't log in to the \`${ENV_NAME}\` org** (${AUTH}), so nothing was validated. The [workflow run](${RUN_URL}) names the missing or rejected secret."
+            echo
+            echo "Usually a secret is missing or expired: run \`python sf-pipeline/scripts/bootstrap.py secrets --env ${ENV_NAME}\`, then the *SF Pipeline Doctor* workflow, then re-run this check."
+          } > "$RUNNER_TEMP/login.md"
+          python3 sf-pipeline/scripts/gh_helpers.py upsert-comment --pr "$PR_NUMBER" --marker "$marker" --body-file "$RUNNER_TEMP/login.md"
+
+  analyze:
+    name: Code analysis
+    needs: [plan, preflight]
+    if: >-
+      needs.plan.outputs.run == 'true' && needs.preflight.outputs.has_sf_changes == 'true' &&
+      fromJSON(needs.plan.outputs.cfg).code_analyzer_enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use pipeline files from the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: git checkout "origin/${DEFAULT_BRANCH}" -- .github/actions sf-pipeline
+
+      - name: sf CLI + Code Analyzer (no org login)
+        uses: ./.github/actions/sf-setup
+        with:
+          environment: ${{ needs.plan.outputs.env }}
+          login: "false"
+          code-analyzer: "true"
+
+      - name: Analyze changed files
+        id: run
+        env:
+          BASELINE: ${{ fromJSON(needs.plan.outputs.cfg).baseline_branch }}
+          SOURCE_PATH: ${{ fromJSON(needs.plan.outputs.cfg).source_path }}
+          RULES: ${{ fromJSON(needs.plan.outputs.cfg).code_analyzer_rules }}
+        run: |
+          set -euo pipefail
+          base="$(git merge-base "origin/${BASELINE}" HEAD)"
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$base" HEAD -- "$SOURCE_PATH")
+          echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+          if [ "${#files[@]}" -eq 0 ]; then echo "No changed files to analyze"; exit 0; fi
+          args=()
+          for f in "${files[@]}"; do args+=(--target "$f"); done
+          printf 'Analyzing %s file(s)\n' "${#files[@]}"
+          # Without --severity-threshold the command only fails on real errors; the gate is applied below.
+          sf code-analyzer run --workspace "$SOURCE_PATH" "${args[@]}" --rule-selector "$RULES" \
+            --output-file "$RUNNER_TEMP/code-analyzer.json" --view table
+
+      - name: Report
+        id: report
+        if: always() && steps.run.outputs.count != '0' && steps.run.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ENV_NAME: ${{ needs.plan.outputs.env }}
+          THRESHOLD: ${{ fromJSON(needs.plan.outputs.cfg).code_analyzer_threshold }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python sf-pipeline/scripts/code_analysis.py --results "$RUNNER_TEMP/code-analyzer.json" --env "$ENV_NAME" \
+            --threshold "$THRESHOLD" --output "$RUNNER_TEMP/analysis.md" --run-url "$RUN_URL" --annotate --github-output
+          cat "$RUNNER_TEMP/analysis.md" >> "$GITHUB_STEP_SUMMARY"
+          python3 sf-pipeline/scripts/gh_helpers.py upsert-comment --pr "$PR_NUMBER" \
+            --marker "<!-- sf-pipeline-analysis:${ENV_NAME} -->" --body-file "$RUNNER_TEMP/analysis.md"
+
+      - name: Fail on blocking violations
+        if: steps.report.outputs.passed == 'false'
+        env:
+          BLOCKING: ${{ steps.report.outputs.blocking }}
+        run: |
+          echo "::error title=Code analysis::${BLOCKING} blocking violation(s); see the Code Analysis comment."
+          exit 1
+
+  gate:
+    name: Gate
+    needs: [plan, preflight, validate, analyze]
+    if: ${{ !cancelled() && needs.plan.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout pipeline scripts (default branch)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: sf-pipeline
+
+      - name: Verdict
+        id: verdict
+        env:
+          PREFLIGHT: ${{ needs.preflight.result }}
+          VALIDATE: ${{ needs.validate.result }}
+          ANALYZE: ${{ needs.analyze.result }}
+          HAS_CHANGES: ${{ needs.preflight.outputs.has_sf_changes }}
+          ORG_ALIAS: ${{ fromJSON(needs.plan.outputs.cfg).org_alias }}
+        run: |
+          comment=none
+          if [ "$PREFLIGHT" != "success" ]; then
+            state=failure; desc="Preflight failed (routing, meta pairs or branch origin)"; comment=create
+          elif [ "$HAS_CHANGES" != "true" ]; then
+            state=success; desc="No Salesforce metadata changes"; comment=update
+          elif [ "$VALIDATE" != "success" ]; then
+            state=failure; desc="Check-only validation against ${ORG_ALIAS} did not pass (${VALIDATE})"
+          elif [ "$ANALYZE" = "failure" ] || [ "$ANALYZE" = "cancelled" ]; then
+            state=failure; desc="Validation passed on ${ORG_ALIAS}, but code analysis found blocking violations"
+          else
+            state=success; desc="Check-only validation passed on ${ORG_ALIAS}"
+            [ "$ANALYZE" = "success" ] && desc="${desc}; code analysis clean"
+          fi
+          {
+            echo "state=$state"
+            echo "description=$desc"
+            echo "comment=$comment"
+          } >> "$GITHUB_OUTPUT"
+          echo "Gate: $state ($desc)"
+
+      - name: Post deploy-<env> status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          CONTEXT: ${{ fromJSON(needs.plan.outputs.cfg).status_check }}
+          STATE: ${{ steps.verdict.outputs.state }}
+          DESC: ${{ steps.verdict.outputs.description }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 sf-pipeline/scripts/gh_helpers.py set-status --sha "$SHA" --context "$CONTEXT" \
+            --state "$STATE" --description "$DESC" --target-url "$RUN_URL"
+
+      - name: Report when validation did not run
+        if: steps.verdict.outputs.comment != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ENV_NAME: ${{ needs.plan.outputs.env }}
+          MODE: ${{ steps.verdict.outputs.comment }}
+          DESC: ${{ steps.verdict.outputs.description }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Same marker deploy_report.py uses, so this replaces any stale report.
+          marker="<!-- sf-pipeline-report:${ENV_NAME}:validate -->"
+          icon="⏭️"; [ "$MODE" = "create" ] && icon="❌"
+          printf '%s\n## 🚀 Salesforce Pipeline Report\n\n%s **%s**. Details are in the [workflow run](%s).\n' \
+            "$marker" "$icon" "$DESC" "$RUN_URL" > "$RUNNER_TEMP/gate.md"
+          only_update=()
+          [ "$MODE" = "update" ] && only_update=(--only-update)
+          python3 sf-pipeline/scripts/gh_helpers.py upsert-comment --pr "$PR_NUMBER" \
+            --marker "$marker" --body-file "$RUNNER_TEMP/gate.md" "${only_update[@]}"
+
+      - name: Fail on a red gate
+        if: steps.verdict.outputs.state != 'success'
+        env:
+          DESC: ${{ steps.verdict.outputs.description }}
+        run: |
+          echo "::error title=SF PR gate::$DESC"
+          exit 1

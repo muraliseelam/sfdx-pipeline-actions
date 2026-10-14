@@ -1,0 +1,44 @@
+name: Pipeline Self-Test
+
+# Tests the pipeline itself (not your Salesforce metadata): config validation,
+# the Python helpers' unit tests, and actionlint/shellcheck on every workflow
+# and composite action. Runs when pipeline files change.
+
+on:
+  pull_request:
+    paths:
+      - ".github/**"
+      - "sf-pipeline/**"
+      - "sfdx-project.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: Self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dev requirements
+        run: python -m pip install --disable-pip-version-check --quiet -r sf-pipeline/requirements-dev.txt
+
+      - name: Validate pipeline config
+        run: python sf-pipeline/scripts/pipeline_config.py validate
+
+      - name: Unit tests
+        run: python -m unittest discover -s sf-pipeline/tests -v
+
+      - name: Lint workflows + composite actions
+        run: python sf-pipeline/scripts/lint.py

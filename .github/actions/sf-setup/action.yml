@@ -1,0 +1,213 @@
+name: Salesforce CLI setup + org login
+description: >-
+  Install the sf CLI and the sfdx-git-delta plugin (versions from
+  pipeline.config.yml, cached between runs), then log in to the environment's
+  org with its configured auth method: an SFDX auth URL (sfdx_url) or the
+  OAuth 2.0 JWT bearer flow (jwt). Composite actions cannot read secrets, so
+  the caller passes the secret values the config names for this environment;
+  only the ones the auth method needs have to be set.
+
+inputs:
+  environment:
+    description: Environment key from pipeline.config.yml (e.g. int).
+    required: true
+  auth-url:
+    description: SFDX auth URL, force://... (secret value; auth_method sfdx_url).
+    required: false
+    default: ""
+  username:
+    description: Salesforce username of the integration user (secret value; auth_method jwt).
+    required: false
+    default: ""
+  consumer-key:
+    description: Connected App / External Client App consumer key (secret value; auth_method jwt).
+    required: false
+    default: ""
+  jwt-key:
+    description: PEM private key (server.key), raw or base64-encoded (secret value; auth_method jwt).
+    required: false
+    default: ""
+  login:
+    description: "'false' to install the tooling without logging in to an org."
+    required: false
+    default: "true"
+  code-analyzer:
+    description: "'true' to also install the Salesforce Code Analyzer plugin (tooling.code_analyzer_version)."
+    required: false
+    default: "false"
+
+outputs:
+  org-alias:
+    description: Alias the org was authenticated under.
+    value: ${{ steps.login.outputs.alias }}
+  org-id:
+    description: 18-character org ID.
+    value: ${{ steps.login.outputs.org_id }}
+  username:
+    description: Username the pipeline is logged in as.
+    value: ${{ steps.login.outputs.username }}
+  instance-url:
+    description: Org instance URL.
+    value: ${{ steps.login.outputs.instance_url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Load config
+      id: cfg
+      uses: ./.github/actions/load-config
+      with:
+        environment: ${{ inputs.environment }}
+
+    - name: Check environment
+      if: steps.cfg.outputs.found != 'true'
+      shell: bash
+      env:
+        ENV_NAME: ${{ inputs.environment }}
+      run: |
+        echo "::error title=sf-setup::Environment '$ENV_NAME' is not defined in sf-pipeline/pipeline.config.yml"
+        exit 1
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: ${{ fromJSON(steps.cfg.outputs.json).node_version }}
+
+    - name: Configure sf CLI environment
+      id: tooling
+      shell: bash
+      env:
+        NODE_MAJOR: ${{ fromJSON(steps.cfg.outputs.json).node_version }}
+        SF_VERSION: ${{ fromJSON(steps.cfg.outputs.json).sf_cli_version }}
+        SGD_VERSION: ${{ fromJSON(steps.cfg.outputs.json).sgd_version }}
+        CA: ${{ inputs.code-analyzer }}
+        CA_VERSION: ${{ fromJSON(steps.cfg.outputs.json).code_analyzer_version }}
+      run: |
+        set -euo pipefail
+        {
+          echo "SF_AUTOUPDATE_DISABLE=true"
+          echo "SF_DISABLE_TELEMETRY=true"
+          echo "SF_SKIP_NEW_VERSION_CHECK=true"
+          echo "SF_USE_GENERIC_UNIX_KEYCHAIN=true"
+        } >> "$GITHUB_ENV"
+        echo "$HOME/.sf-cli/node_modules/.bin" >> "$GITHUB_PATH"
+        # Floating versions ("latest", "2") get a weekly cache bust so they still move.
+        stamp=""
+        if ! [[ "$SF_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! [[ "$SGD_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          stamp="-$(date -u +%G-%V)"
+        fi
+        extra=""
+        if [ "$CA" = "true" ]; then extra="-ca${CA_VERSION}"; fi
+        echo "key=sf-cli-${RUNNER_OS}-node${NODE_MAJOR}-sf${SF_VERSION}-sgd${SGD_VERSION}${extra}${stamp}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore sf CLI cache
+      id: cache
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.sf-cli
+          ~/.local/share/sf
+        key: ${{ steps.tooling.outputs.key }}
+
+    - name: Install sf CLI + sfdx-git-delta
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        SF_VERSION: ${{ fromJSON(steps.cfg.outputs.json).sf_cli_version }}
+        SGD_VERSION: ${{ fromJSON(steps.cfg.outputs.json).sgd_version }}
+        CA: ${{ inputs.code-analyzer }}
+        CA_VERSION: ${{ fromJSON(steps.cfg.outputs.json).code_analyzer_version }}
+      run: |
+        set -euo pipefail
+        npm install --prefix "$HOME/.sf-cli" --no-audit --no-fund --loglevel=error "@salesforce/cli@${SF_VERSION}"
+        export PATH="$HOME/.sf-cli/node_modules/.bin:$PATH"
+        # sfdx-git-delta is unsigned; allowlist it instead of answering the install prompt.
+        mkdir -p "$HOME/.config/sf"
+        echo '["sfdx-git-delta"]' > "$HOME/.config/sf/unsignedPluginAllowList.json"
+        sf plugins install "sfdx-git-delta@${SGD_VERSION}"
+        if [ "$CA" = "true" ]; then sf plugins install "code-analyzer@${CA_VERSION}"; fi
+
+    - name: Verify tooling
+      shell: bash
+      run: |
+        set -euo pipefail
+        sf --version
+        sf plugins | grep -i "sfdx-git-delta" || { echo "::error title=sf-setup::sfdx-git-delta plugin is not installed"; exit 1; }
+
+    - name: Log in (${{ fromJSON(steps.cfg.outputs.json).auth_method }})
+      id: login
+      if: inputs.login == 'true'
+      shell: bash
+      env:
+        SF_AUTH_URL: ${{ inputs.auth-url }}
+        SF_USERNAME: ${{ inputs.username }}
+        SF_CONSUMER_KEY: ${{ inputs.consumer-key }}
+        SF_JWT_KEY: ${{ inputs.jwt-key }}
+        ENV_NAME: ${{ inputs.environment }}
+        AUTH_METHOD: ${{ fromJSON(steps.cfg.outputs.json).auth_method }}
+        ORG_ALIAS: ${{ fromJSON(steps.cfg.outputs.json).org_alias }}
+        INSTANCE_URL: ${{ fromJSON(steps.cfg.outputs.json).instance_url }}
+        AUTH_URL_SECRET: ${{ fromJSON(steps.cfg.outputs.json).auth_url_secret }}
+        USERNAME_SECRET: ${{ fromJSON(steps.cfg.outputs.json).username_secret }}
+        CONSUMER_KEY_SECRET: ${{ fromJSON(steps.cfg.outputs.json).consumer_key_secret }}
+        JWT_KEY_SECRET: ${{ fromJSON(steps.cfg.outputs.json).jwt_key_secret }}
+      run: |
+        set -euo pipefail
+        login_json="$(mktemp "$RUNNER_TEMP/sf-login-XXXXXX.json")"
+        key_file=""
+        trap 'rm -f "$login_json" ${key_file:+"$key_file"}' EXIT   # both may hold credentials
+
+        missing=()
+        if [ "$AUTH_METHOD" = "sfdx_url" ]; then
+          [ -n "$SF_AUTH_URL" ] || missing+=("$AUTH_URL_SECRET")
+          how="python sf-pipeline/scripts/bootstrap.py secrets --env ${ENV_NAME} (after: sf org login web --alias ${ORG_ALIAS})"
+        else
+          [ -n "$SF_USERNAME" ] || missing+=("$USERNAME_SECRET")
+          [ -n "$SF_CONSUMER_KEY" ] || missing+=("$CONSUMER_KEY_SECRET")
+          [ -n "$SF_JWT_KEY" ] || missing+=("$JWT_KEY_SECRET")
+          how="python sf-pipeline/scripts/bootstrap.py secrets --env ${ENV_NAME} --jwt-key server.key --consumer-key <key>"
+        fi
+        if [ "${#missing[@]}" -gt 0 ]; then
+          echo "::error title=Missing secret(s) for ${ENV_NAME}::${missing[*]} (auth_method ${AUTH_METHOD}). Create with: ${how}. Org secrets must be repository secrets (production: environment secrets)."
+          exit 1
+        fi
+
+        if [ "$AUTH_METHOD" = "sfdx_url" ]; then
+          if [[ "$SF_AUTH_URL" != force://* ]]; then
+            echo "::error title=sf-setup::${AUTH_URL_SECRET} must start with force:// (from sf org auth show-sfdx-auth-url)"
+            exit 1
+          fi
+          ok=true
+          # "-" is required: without a value the flag swallows the next argument.
+          printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --sfdx-url-stdin - --alias "$ORG_ALIAS" \
+            --set-default --json > "$login_json" || ok=false
+        else
+          key_file="$(mktemp "$RUNNER_TEMP/sf-jwt-XXXXXX")"
+          chmod 600 "$key_file"
+          if [[ "$SF_JWT_KEY" == *"-----BEGIN"* ]]; then
+            # %b also turns literal "\n" sequences (keys pasted as one line) into newlines.
+            printf '%b\n' "$SF_JWT_KEY" > "$key_file"
+          elif ! printf '%s' "$SF_JWT_KEY" | base64 --decode > "$key_file" 2>/dev/null; then
+            echo "::error title=sf-setup::${JWT_KEY_SECRET} is neither a PEM key nor base64-encoded PEM"
+            exit 1
+          fi
+          ok=true
+          sf org login jwt --client-id "$SF_CONSUMER_KEY" --jwt-key-file "$key_file" --username "$SF_USERNAME" \
+            --instance-url "$INSTANCE_URL" --alias "$ORG_ALIAS" --set-default --json > "$login_json" || ok=false
+        fi
+
+        if [ "$ok" != "true" ]; then
+          msg="$(jq -r '.message // .name // "unknown error"' "$login_json" 2>/dev/null || echo "unknown error")"
+          echo "::error title=Login failed for ${ENV_NAME} (${AUTH_METHOD})::${msg}"
+          exit 1
+        fi
+        org_id="$(jq -r '.result.orgId // empty' "$login_json")"
+        user="$(jq -r '.result.username // empty' "$login_json")"
+        url="$(jq -r '.result.instanceUrl // empty' "$login_json")"
+        echo "Logged in to '${ORG_ALIAS}' as ${user:-?} (${url:-$INSTANCE_URL}, org ${org_id:-unknown}) via ${AUTH_METHOD}"
+        {
+          echo "alias=$ORG_ALIAS"
+          echo "org_id=$org_id"
+          echo "username=$user"
+          echo "instance_url=$url"
+        } >> "$GITHUB_OUTPUT"
