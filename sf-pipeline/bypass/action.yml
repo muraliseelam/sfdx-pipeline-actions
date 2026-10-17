@@ -1,0 +1,72 @@
+name: "Resolve admin bypass label"
+description: >-
+  Report whether the admin `bypass` label is present on the PR AND was applied
+  by a repo admin/maintainer. A bypass added by a non-admin is ignored.
+
+inputs:
+  pr_number:
+    description: "PR number (blank = no PR context, bypass=false)."
+    required: false
+    default: ""
+  bypass_label:
+    description: "Label name that activates the bypass."
+    required: true
+  github_token:
+    description: "Token for label + timeline + permission lookups."
+    required: true
+
+outputs:
+  active:
+    description: "true when a valid admin bypass is in effect."
+    value: ${{ steps.check.outputs.active }}
+
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ inputs.pr_number }}
+        LABEL: ${{ inputs.bypass_label }}
+      run: |
+        set -uo pipefail
+        if [ -z "${PR:-}" ]; then
+          echo "active=false" >> "$GITHUB_OUTPUT"; echo "No PR context — bypass=false"; exit 0
+        fi
+        python3 - <<'PY'
+        import json, os, subprocess
+        repo, pr, label = os.environ["REPO"], os.environ["PR"], os.environ["LABEL"]
+        def api(path, paginate=False):
+            cmd = ["gh", "api"] + (["--paginate"] if paginate else []) + [path]
+            return json.loads(subprocess.check_output(cmd))
+        active = "false"
+        try:
+            labels = [l["name"] for l in api(f"repos/{repo}/issues/{pr}/labels")]
+        except Exception:
+            labels = []
+        if label in labels:
+            try:
+                tl = api(f"repos/{repo}/issues/{pr}/timeline", paginate=True)
+            except Exception:
+                tl = []
+            who = None
+            for e in tl:
+                if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == label and e.get("actor"):
+                    who = e["actor"]["login"]
+            if who:
+                try:
+                    perm = api(f"repos/{repo}/collaborators/{who}/permission").get("permission")
+                except Exception:
+                    perm = None
+                if perm in ("admin", "maintain"):
+                    active = "true"
+                else:
+                    print(f"::warning::Bypass label present but @{who} lacks admin permission ({perm}) — ignoring bypass.")
+            else:
+                print("::warning::Bypass label present but could not determine who added it — ignoring bypass.")
+        with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+            fh.write(f"active={active}\n")
+        print("Bypass active:", active)
+        PY

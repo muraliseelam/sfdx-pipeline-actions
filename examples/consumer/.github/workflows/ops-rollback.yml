@@ -1,0 +1,36 @@
+name: Ops — Rollback
+
+# Thin caller (REQ-005.2 / REQ-016). Reverts a merged PR or commit and sends the
+# revert through the SAME gated pipeline (validation → approval → deploy → merge).
+# All logic lives in the central reusable.
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Merged PR number to revert (leave blank to use ref)"
+        required: false
+        type: string
+        default: ""
+      ref:
+        description: "Commit SHA to revert (used when pr_number is blank)"
+        required: false
+        type: string
+        default: ""
+      base:
+        description: "Branch to revert on (blank = pipeline entry branch)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  rollback:
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/sf-ops-rollback.yml@v1
+    secrets: inherit
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      ref: ${{ inputs.ref }}
+      base: ${{ inputs.base }}

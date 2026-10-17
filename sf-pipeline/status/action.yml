@@ -1,0 +1,62 @@
+name: "Publish commit status"
+description: >-
+  Post a commit status on a SHA. Two uses:
+    * the durable `pr-validation` signal the approval gate keys off (pending while
+      validating, success/failure at the end), and
+    * the `deploy-<env>` merge/ordering gate after a real deploy — the durable
+      commit status the downstream ordering guard keys on (qa needs int, stage
+      needs qa for the SAME commit). Pass `environment` to ALSO record a GitHub
+      deployment marker for the Environments UI timeline.
+
+inputs:
+  sha:
+    required: true
+  context:
+    required: true
+  state:
+    description: "pending | success | failure | error"
+    required: true
+  description:
+    required: false
+    default: ""
+  environment:
+    description: >-
+      When set (and state=success), also record a GitHub deployment marker for
+      this environment (Environments UI timeline). The ordering guard keys on the
+      `deploy-<env>` commit status, not this marker.
+    required: false
+    default: ""
+  github_token:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ inputs.sha }}
+        CONTEXT: ${{ inputs.context }}
+        STATE: ${{ inputs.state }}
+        DESC: ${{ inputs.description }}
+        ENVN: ${{ inputs.environment }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -uo pipefail
+
+        # Optional deployment marker (read by the ordering guard) — only on a
+        # successful deploy of a named environment.
+        if [ -n "$ENVN" ] && [ "$STATE" = "success" ]; then
+          body=$(printf '{"ref":"%s","environment":"%s","auto_merge":false,"required_contexts":[],"transient_environment":false,"production_environment":false,"description":"Deploy of %s to %s"}' "$SHA" "$ENVN" "${SHA:0:8}" "$ENVN")
+          dep=$(printf '%s' "$body" | gh api -X POST "repos/$REPO/deployments" --input - --jq '.id' 2>/dev/null || echo "")
+          [ -n "$dep" ] && gh api -X POST "repos/$REPO/deployments/$dep/statuses" -f state=success -f description="Deployed ${SHA:0:8} to ${ENVN}." >/dev/null || true
+        fi
+
+        gh api -X POST "repos/$REPO/statuses/$SHA" \
+          -f context="$CONTEXT" \
+          -f state="$STATE" \
+          -f target_url="$RUN_URL" \
+          -f description="$DESC" >/dev/null \
+          && echo "$CONTEXT → $STATE for $SHA" \
+          || echo "::warning::Could not set $CONTEXT=$STATE status for $SHA."

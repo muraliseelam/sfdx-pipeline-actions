@@ -1,44 +1,102 @@
 # Contributing
 
-Thanks for helping. The pipeline is plain GitHub Actions YAML plus small, dependency-light Python
-scripts, so it's easy to work on locally.
+Thanks for considering a contribution.
 
-## Setup
+This project is a **central GitHub Actions pipeline for Salesforce delivery**.
+It is consumed by other repositories, which means almost every change here is a
+change to somebody else's production deployment path. That shapes how we work.
 
-```bash
-python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
-python -m pip install -r sf-pipeline/requirements-dev.txt   # PyYAML, actionlint, shellcheck
+## The one rule that matters
+
+**A reusable workflow in this repository runs inside the *consumer's* checkout.**
+
+`$GITHUB_WORKSPACE` is the calling project, not this repository. So a reusable
+workflow can never run `sf-pipeline/scripts/…` directly — that path does not
+exist at runtime. It must call a **composite action** in this repo, and that
+action reaches its sibling scripts through `$GITHUB_ACTION_PATH`:
+
+```yaml
+# .github/workflows/deploy.yml  (reusable — runs in the consumer's checkout)
+- uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main   # ✅
+
+- run: bash sf-pipeline/scripts/delta.sh                         # ❌ not there
 ```
 
-## Before opening a PR
-
-```bash
-python sf-pipeline/scripts/pipeline_config.py validate
-python -m unittest discover -s sf-pipeline/tests -v
-python sf-pipeline/scripts/lint.py                # actionlint + shellcheck (incl. composite actions)
+```yaml
+# sf-pipeline/deploy/action.yml  (composite — knows where it lives)
+- run: bash "$GITHUB_ACTION_PATH/../scripts/delta.sh"            # ✅
 ```
 
-The **Pipeline Self-Test** workflow runs the same three steps on every PR that touches pipeline files,
-and on pushes of pipeline files to `main`.
+Breaking this is the single most common mistake, and it fails only at runtime,
+in someone else's repository.
 
-The unit tests run against a fixed five-stage config, `sf-pipeline/tests/fixtures/pipeline.config.yml`
-(they set `SF_PIPELINE_CONFIG` to it), so a team's own environments never break them. Your
-`sf-pipeline/pipeline.config.yml` is only checked for validity. When you add a setting, add it to the
-fixture too if a test needs it.
+## Getting set up
 
-## Guidelines
+```bash
+git clone https://github.com/muraliseelam/sfdx-pipeline-actions
+cd sfdx-pipeline-actions
+./scripts/set-repo-owner.sh your-fork/sfdx-pipeline-actions   # repoint internal refs
+```
 
-- **Nothing environment-specific outside `pipeline.config.yml`.** New settings get a default in
-  `pipeline_config.DEFAULTS`, validation in `validate()`, a flat key in `globals_view`/`env_view`
-  when workflows need it, and a row in `docs/configuration.md`.
-- **Workflows stay thin.** Logic that can be unit-tested belongs in `sf-pipeline/scripts/`.
-- **Salesforce CLI behaviour is verified against a real org.** Parsers are tested with real
-  `--json` output in `sf-pipeline/tests/fixtures/` (trimmed; no IDs or usernames).
-- **Fail loudly with a fix.** Every error should name what's missing and the command that fixes it.
-- **Run bash under GitHub's `-eo pipefail`.** Scripts must behave correctly with it.
+You will need `bash`, `python3`, `node`, and the
+[Salesforce CLI](https://developer.salesforce.com/tools/salesforcecli) for
+anything that touches an org.
 
-## Changing pipeline files on a live repo
+## Before you open a pull request
 
-Pipeline files normally reach `main` through a release. If you change them directly on `main` (as a
-maintainer), run **Sync Env Branches** afterwards, so open PRs into env branches don't conflict with
-older copies.
+```bash
+./scripts/validate.sh        # YAML parse, shell syntax, python compile, ref integrity
+```
+
+CI runs the same checks. Please also:
+
+- Keep behaviour driven by `pipeline.config.yml`. Project-specific values do not
+  belong in workflow or action files.
+- Update `docs/Product_Documentation.md` when you change behaviour, and
+  `docs/Pipeline_User_Guide.md` when you change what a user has to *do*.
+- Use `@main` for internal references on `main`. Release tooling rewrites them
+  at tag time — see below.
+
+## Testing a change for real
+
+There is no mock Salesforce. A meaningful change should be exercised end to end
+against real sandboxes:
+
+1. Push your branch to a fork.
+2. In a test consumer repository, point one caller at your branch
+   (`@your-branch`) and open a pull request.
+3. Because `pull_request` runs the merge commit's workflows, that pull request
+   validates your change without merging anything.
+4. Report what you ran in your pull request description.
+
+## Releasing (maintainers)
+
+> [!IMPORTANT]
+> **Never tag `main` directly.**
+
+The reusable workflows reference this repository's own composite actions dozens
+of times, and on `main` every one of those reads `@main`. `uses:` does not
+accept expressions, so a tag cut straight from `main` would freeze the
+entry-point workflow while every action it invokes still resolved to the moving
+branch — a consumer pinning `@v1` would be pinned in name only.
+
+Each release tag therefore carries a commit, off `main`, that rewrites every
+internal reference to point at that tag:
+
+```bash
+./scripts/cut-release.sh v1.2.0     # creates the ref-rewrite commit and tags it
+./scripts/verify-tag.sh v1.2.0      # proves no @main survives in the tag
+```
+
+`main` keeps `@main`. Only tags are self-referential.
+
+Publishing a fork or a fresh copy under a different owner has extra steps —
+see [PUBLISHING.md](PUBLISHING.md).
+
+## Code of conduct
+
+By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Licence
+
+Contributions are accepted under the [MIT Licence](LICENSE).

@@ -1,28 +1,81 @@
-# Security
+# Security Policy
 
 ## Reporting a vulnerability
 
-Please use GitHub's **private vulnerability reporting** (Security → Report a vulnerability) rather
-than a public issue. Include steps to reproduce and the impact. We aim to respond within a week.
+**Please do not open a public issue for a security problem.**
 
-## How the pipeline handles credentials
+Report it privately through
+[GitHub Security Advisories](https://github.com/muraliseelam/sfdx-pipeline-actions/security/advisories/new).
+That is the only reporting channel, and it is monitored — the maintainer's
+public address is a `noreply` one and cannot receive mail.
 
-- **Org credentials** are GitHub secrets that only the pipeline's jobs read.
-  - `bootstrap.py` copies them from your local Salesforce CLI and never prints them.
-  - JWT keys are generated outside the repository (`~/.sf-pipeline/`); `.gitignore` blocks `*.key`
-    and `*.pem`.
-- **Production credentials** live in the `production` and `production-validate` GitHub
-  Environments, which only protected branches can use. No pull request or feature-branch workflow
-  can read them.
-- **Pull requests can't change the rules they're checked against.** The config, scripts and
-  composite actions always come from the default branch; a PR only supplies Salesforce metadata.
-- **The pipeline token** opens PRs and enables auto-merge. A separate admin-capable token
-  (`github.admin_pat_secret`) can be confined to `production-validate` for the env-branch sync.
+Please include:
 
-## Trust model
+- what the issue is and where in the pipeline it occurs,
+- how to reproduce it,
+- what an attacker could achieve.
 
-Branch protection, approvals and the release gates prevent *mistakes*: unreviewed merges, untested
-Apex, deploying the wrong artifact, merging a release that never reached production. They don't stop
-a malicious collaborator with write access, who can change workflow files on a branch. Grant write
-access accordingly, and add required reviewers to the `production` environment
-(`bootstrap.py github --reviewer <login>`) when several people can approve releases.
+We aim to acknowledge a report within three working days.
+
+## Supported versions
+
+| Version | Supported |
+|---|---|
+| `v1.x` (the `v1` moving tag) | ✅ |
+| `main` | ⚠️ development branch, no guarantees |
+| anything older | ❌ |
+
+## Security model you should understand before using this
+
+This project is a set of **reusable GitHub Actions workflows that deploy to
+Salesforce orgs**. That makes it part of your supply chain. A few properties
+are worth being explicit about.
+
+### Pin a tag, never a branch
+
+Consumers must reference a released tag:
+
+```yaml
+uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/deploy.yml@v1
+```
+
+Referencing `@main` means you execute whatever is on our development branch at
+the moment your workflow runs. For maximum strictness, pin a full commit SHA.
+
+Every release tag in this repository also **rewrites its own internal action
+references to itself**, so pinning `@v1` pins the whole dependency tree, not
+just the entry-point file. You can verify any tag:
+
+```bash
+git show v1:.github/workflows/deploy.yml \
+  | grep -oE 'sfdx-pipeline-actions/[^@]+@[A-Za-z0-9.]+' | sed 's|.*@||' | sort -u
+# expect: v1   (never: main)
+```
+
+### Secrets never leave your repository
+
+The workflows read credentials only through `${{ secrets.* }}` supplied by the
+calling repository's GitHub Environments. This project contains no credentials,
+no org identifiers and no endpoints of its own. Nothing is transmitted anywhere
+except to Salesforce, your Git host, and the optional integrations you
+explicitly configure (chat webhook, issue tracker).
+
+### Authentication
+
+Org authentication uses the **JWT bearer flow** with a Connected App. The
+private key lives in a GitHub Environment secret, scoped per environment, and
+is written to a temporary file that is removed when the runner is torn down.
+Prefer one Connected App and one integration user per org.
+
+### Protect the production environment
+
+The production stage is deliberately split into two GitHub Environments —
+`prod-validate` (unattended check-only) and `prod` (required reviewers,
+quick-deploy). The human gate is only as strong as the reviewer list you
+configure on the `prod` environment. Configure it.
+
+### Notifications are not a gate
+
+Chat notifications are best-effort telemetry. A failing or misconfigured chat
+integration emits a warning annotation and never fails a deployment. Do not
+build an approval control on top of them.

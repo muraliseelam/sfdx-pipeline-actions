@@ -1,39 +1,17 @@
-# Salesforce CLI state
-.sf/
-.sfdx/
-.localdevserver/
-
-# Pipeline working output (delta packages, deploy results, coverage)
-.sgd/
-coverage/
-deploy-results/
-
-# Never commit JWT private keys
-*.key
-*.pem
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-
-# Editors / OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-node_modules/
-
-# --- from the original sfdx-pipeline-actions ---
 # OS / editor cruft
+.DS_Store
 *.swp
 *~
 
+# Python
+__pycache__/
 *.py[cod]
 
 # Never commit credentials. The pipeline reads everything from
 # GitHub Environment secrets at run time.
 .secrets/
+*.key
+*.pem
 *.p12
 *.jks
 *.crt

@@ -1,0 +1,30 @@
+name: Prod Release
+
+# Thin caller — ONE production workflow. Logic lives in the central repo.
+#   action: assemble → build/refresh release/<version> from the story branches.
+#   action: release  → validate + deploy the release to production, then merge.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "assemble | release"
+        type: choice
+        options: [release, assemble]
+        default: release
+      version:
+        description: "Release version (e.g. 2026.31). Assemble: blank = ISO year.week."
+        required: false
+        default: ""
+      stories:
+        description: "Assemble only: explicit space/comma-separated story branches (else auto-gather)."
+        required: false
+        default: ""
+
+jobs:
+  prod:
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/prod-release.yml@v1
+    secrets: inherit
+    with:
+      action: ${{ github.event.inputs.action }}
+      version: ${{ github.event.inputs.version }}
+      stories: ${{ github.event.inputs.stories }}

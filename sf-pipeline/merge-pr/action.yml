@@ -1,0 +1,34 @@
+name: "Squash-merge the PR"
+description: >-
+  Squash-merge the PR into its env branch after a successful deploy. The
+  `deploy-<env>` required status was just set green, so a normal merge is
+  allowed; retry briefly to absorb status propagation. The feature branch is
+  NEVER deleted — the SAME branch feeds the int, qa and stage PRs and is later
+  reused by the weekly release train.
+
+inputs:
+  pr_number:
+    required: true
+  base_ref:
+    required: true
+  github_token:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ inputs.pr_number }}
+        BASE: ${{ inputs.base_ref }}
+      run: |
+        set -uo pipefail
+        echo "Deploy to '$BASE' succeeded — merging PR #$PR."
+        merged=""
+        for i in 1 2 3 4 5 6; do
+          if gh pr merge "$PR" --repo "$REPO" --squash; then merged="yes"; break; fi
+          echo "Merge attempt $i not ready (status propagating) — waiting..."; sleep 10
+        done
+        [ -n "$merged" ] || echo "::notice::Could not complete the merge yet (already merged, or deploy-<env> status still propagating)."

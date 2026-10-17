@@ -20,9 +20,6 @@ Subcommands:
     transition <key> "<status>"    -> moves the issue to the named status
     deploy <key> <env> <status> [url]
                                    -> comment ("Deployed to <env>") + transition
-    deploy-text "<text>" <env> <status> [url]
-                                   -> the same for EVERY issue key found in <text>
-                                      (branch name, PR title, release notes)
 """
 import base64
 import json
@@ -159,8 +156,6 @@ def keys_for_fixversion(base, email, token, version, extra_jql=""):
 
 
 def main():
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     argv = sys.argv[1:]
     if not argv:
         print(__doc__)
@@ -206,20 +201,6 @@ def main():
             body += f" Run: {run_url}"
         add_comment(base, email, token, key, body)
         do_transition(base, email, token, key, status_name)
-
-    elif cmd == "deploy-text":
-        text = argv[1] if len(argv) > 1 else ""
-        env = argv[2] if len(argv) > 2 else ""
-        status_name = argv[3] if len(argv) > 3 else ""
-        run_url = argv[4] if len(argv) > 4 else ""
-        keys = sorted(set(KEY_RE.findall(text or "")))
-        if not keys:
-            print("[jira] no issue keys found — skipping Jira update.")
-            return
-        body = f"✅ Deployed to *{env}* via GitHub Actions." + (f" Run: {run_url}" if run_url else "")
-        for key in keys:
-            add_comment(base, email, token, key, body)
-            do_transition(base, email, token, key, status_name)
 
     elif cmd == "keys-for-fixversion":
         version = argv[1] if len(argv) > 1 else ""

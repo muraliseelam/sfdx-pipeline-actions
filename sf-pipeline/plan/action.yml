@@ -1,0 +1,76 @@
+name: "SF Pipeline Plan"
+description: >-
+  Read the consuming project's sf-pipeline/pipeline.config.yml and expose every
+  pipeline setting (or a branch/promotion resolution) as step outputs. This is a
+  thin wrapper around plan.py so reusable workflows never have to check out the
+  central actions repo just to read the config — the config file is read from the
+  caller's workspace, the script ships with this action.
+
+inputs:
+  mode:
+    description: "outputs | resolve | promote | prdeploy"
+    required: false
+    default: "outputs"
+  arg:
+    description: "Branch (resolve) or environment name (promote / prdeploy). Ignored for outputs."
+    required: false
+    default: ""
+  config:
+    description: "Path (in the caller repo) to pipeline.config.yml"
+    required: false
+    default: "sf-pipeline/pipeline.config.yml"
+
+outputs:
+  # --- outputs mode ---
+  source_path: { description: "Metadata root", value: "${{ steps.run.outputs.source_path }}" }
+  api_version: { description: "SF API version", value: "${{ steps.run.outputs.api_version }}" }
+  node_version: { description: "Node version", value: "${{ steps.run.outputs.node_version }}" }
+  baseline_branch: { description: "Baseline branch", value: "${{ steps.run.outputs.baseline_branch }}" }
+  delta_baseline: { description: "Delta baseline mode: target | prod", value: "${{ steps.run.outputs.delta_baseline }}" }
+  entry_branch: { description: "Entry (first env) branch", value: "${{ steps.run.outputs.entry_branch }}" }
+  auto_json: { description: "Ordered env list (deploy matrix)", value: "${{ steps.run.outputs.auto_json }}" }
+  env_branches: { description: "Promotion-chain branches (JSON list)", value: "${{ steps.run.outputs.env_branches }}" }
+  env_count: { description: "Number of environments", value: "${{ steps.run.outputs.env_count }}" }
+  prod_branch: { description: "Production branch", value: "${{ steps.run.outputs.prod_branch }}" }
+  prod_deploy_env: { description: "Prod deploy GH environment", value: "${{ steps.run.outputs.prod_deploy_env }}" }
+  prod_validate_env: { description: "Prod validate GH environment", value: "${{ steps.run.outputs.prod_validate_env }}" }
+  prod_test_level: { description: "Prod test level", value: "${{ steps.run.outputs.prod_test_level }}" }
+  prod_destructive_tests: { description: "Prod destructive canary tests", value: "${{ steps.run.outputs.prod_destructive_tests }}" }
+  release_prefix: { description: "Release branch prefix", value: "${{ steps.run.outputs.release_prefix }}" }
+  last_env: { description: "Name of the last environment in the promotion chain", value: "${{ steps.run.outputs.last_env }}" }
+  release_label: { description: "PR label the release train gathers on (deployed:<last env>)", value: "${{ steps.run.outputs.release_label }}" }
+  q_apex_coverage: { description: "Coverage gate enabled", value: "${{ steps.run.outputs.q_apex_coverage }}" }
+  coverage_threshold: { description: "Coverage threshold", value: "${{ steps.run.outputs.coverage_threshold }}" }
+  profiles_mode: { description: "Profiles/PS mode", value: "${{ steps.run.outputs.profiles_mode }}" }
+  bypass_label: { description: "Admin bypass label", value: "${{ steps.run.outputs.bypass_label }}" }
+  require_pr_approval: { description: "Require a human PR approval before entry deploy+merge", value: "${{ steps.run.outputs.require_pr_approval }}" }
+  chat: { description: "Chat notifications enabled", value: "${{ steps.run.outputs.chat }}" }
+  jira: { description: "Jira integration enabled", value: "${{ steps.run.outputs.jira }}" }
+  # --- resolve / promote mode ---
+  r_name: { description: "Resolved env name", value: "${{ steps.run.outputs.r_name }}" }
+  r_gh_environment: { description: "Resolved GH environment", value: "${{ steps.run.outputs.r_gh_environment }}" }
+  r_test_level: { description: "Resolved test level", value: "${{ steps.run.outputs.r_test_level }}" }
+  r_gate: { description: "Resolved gate mode (auto | approval | on_demand | none)", value: "${{ steps.run.outputs.r_gate }}" }
+  r_is_stage: { description: "True when the branch is a PR-driven stage (gate auto/approval or release/*)", value: "${{ steps.run.outputs.r_is_stage }}" }
+  r_branch: { description: "Promotion target branch", value: "${{ steps.run.outputs.r_branch }}" }
+  r_source_branch: { description: "Promote-from branch", value: "${{ steps.run.outputs.r_source_branch }}" }
+  r_jira_status: { description: "Jira status to transition the story to for this env", value: "${{ steps.run.outputs.r_jira_status }}" }
+  r_require_env: { description: "Predecessor env that must be deployed before this promote (ordering guard)", value: "${{ steps.run.outputs.r_require_env }}" }
+  r_is_entry: { description: "True when this env is the entry (first) stage (prdeploy mode)", value: "${{ steps.run.outputs.r_is_entry }}" }
+  r_next_name: { description: "Next env name in the promotion chain (prdeploy mode)", value: "${{ steps.run.outputs.r_next_name }}" }
+  r_next_branch: { description: "Next env branch in the promotion chain (prdeploy mode)", value: "${{ steps.run.outputs.r_next_branch }}" }
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        PLAN_MODE: ${{ inputs.mode }}
+        PLAN_ARG: ${{ inputs.arg }}
+        PLAN_CONFIG: ${{ inputs.config }}
+      run: |
+        set -euo pipefail
+        CMD=( python3 "$GITHUB_ACTION_PATH/../scripts/plan.py" --config "$PLAN_CONFIG" "$PLAN_MODE" )
+        if [ -n "$PLAN_ARG" ]; then CMD+=( "$PLAN_ARG" ); fi
+        "${CMD[@]}"

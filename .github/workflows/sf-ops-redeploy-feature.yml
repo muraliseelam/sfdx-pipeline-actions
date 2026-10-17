@@ -1,0 +1,120 @@
+name: Ops — Redeploy Feature Branch
+
+# REQ-005.3 — Idempotently (re)deploy a feature branch's delta to a chosen
+# environment. Useful to retry a flaky deploy or to re-validate a branch after an
+# org change, WITHOUT moving any environment branch (this is not a promotion).
+#
+# Defaults to dry_run=true (check-only) so it is safe to run any time. Set
+# dry_run=false to perform a real deploy. Higher environments are protected by
+# their GitHub Environment reviewers, so a real deploy there still needs approval.
+
+on:
+  workflow_call:
+    inputs:
+      feature_ref:
+        description: "Feature branch (or SHA) to deploy"
+        required: true
+        type: string
+      environment:
+        description: "Target environment — one of the `name:` values in pipeline.config.yml"
+        required: true
+        type: string
+      dry_run:
+        description: "Validate only (check-only). Uncheck for a REAL deploy."
+        required: false
+        type: boolean
+        default: true
+      profiles_mode:
+        description: "Override Profile/PS mode (blank = use pipeline.config.yml; full | incremental)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: redeploy-${{ inputs.environment }}-${{ inputs.feature_ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.env.outputs.name }}
+      gh_environment: ${{ steps.env.outputs.gh_environment }}
+      test_level: ${{ steps.env.outputs.test_level }}
+      baseline_branch: ${{ steps.cfg.outputs.baseline_branch }}
+      source_path: ${{ steps.cfg.outputs.source_path }}
+      api_version: ${{ steps.cfg.outputs.api_version }}
+      node_version: ${{ steps.cfg.outputs.node_version }}
+      q_apex_coverage: ${{ steps.cfg.outputs.q_apex_coverage }}
+      coverage_threshold: ${{ steps.cfg.outputs.coverage_threshold }}
+      profiles_mode: ${{ steps.cfg.outputs.profiles_mode }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with:
+          mode: outputs
+      - name: Resolve target environment
+        id: env
+        env:
+          AUTO_JSON: ${{ steps.cfg.outputs.auto_json }}
+          TARGET: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          ROW="$(printf '%s' "$AUTO_JSON" | jq -c --arg t "$TARGET" '.[] | select(.name==$t)')"
+          if [ -z "$ROW" ]; then
+            VALID="$(printf '%s' "$AUTO_JSON" | jq -r '[.[].name] | join(", ")')"
+            echo "::error::'$TARGET' is not a configured environment. Valid: $VALID"; exit 1
+          fi
+          {
+            echo "name=$(printf '%s' "$ROW" | jq -r '.name')"
+            echo "gh_environment=$(printf '%s' "$ROW" | jq -r '.gh_environment')"
+            echo "test_level=$(printf '%s' "$ROW" | jq -r '.test_level')"
+          } >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: ${{ needs.plan.outputs.gh_environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.feature_ref }}
+          fetch-depth: 0
+      - name: Resolve commit
+        id: ref
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy ${{ inputs.feature_ref }} to ${{ needs.plan.outputs.name }}
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
+        with:
+          environment: ${{ needs.plan.outputs.name }}
+          ref: ${{ steps.ref.outputs.sha }}
+          check_only: ${{ inputs.dry_run }}
+          test_level: ${{ needs.plan.outputs.test_level }}
+          manifest_title: "Redeploy ${{ inputs.feature_ref }}"
+          baseline_branch: ${{ needs.plan.outputs.baseline_branch }}
+          source_path: ${{ needs.plan.outputs.source_path }}
+          api_version: ${{ needs.plan.outputs.api_version }}
+          node_version: ${{ needs.plan.outputs.node_version }}
+          coverage_gate: ${{ needs.plan.outputs.q_apex_coverage }}
+          coverage_threshold: ${{ needs.plan.outputs.coverage_threshold }}
+          profiles_mode: ${{ inputs.profiles_mode != '' && inputs.profiles_mode || needs.plan.outputs.profiles_mode }}
+          sf_consumer_key: ${{ secrets.SF_CONSUMER_KEY }}
+          sf_username: ${{ secrets.SF_USERNAME }}
+          sf_instance_url: ${{ secrets.SF_INSTANCE_URL }}
+          sf_jwt_key: ${{ secrets.SF_JWT_KEY }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### 🔁 Redeploy ${{ needs.plan.outputs.name }}"
+            echo ""
+            echo "- Ref: \`${{ inputs.feature_ref }}\` @ \`${{ steps.ref.outputs.sha }}\`"
+            echo "- Mode: ${{ inputs.dry_run == true && 'check-only (dry run)' || 'REAL deploy' }}"
+            echo "- Result: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

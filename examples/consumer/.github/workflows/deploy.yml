@@ -1,0 +1,31 @@
+name: Deploy (on approval → int / qa / stage)
+
+# Approval-driven, diff-vs-target, deploy-then-merge. A developer raises ONE PR
+# per environment (feature → int, feature → qa, feature → stage). When that PR is
+# APPROVED — a native Approve review, or the `approved` label (admin-only on int;
+# the developer's own label on qa/stage) — the change is deployed to that env's
+# org and — only after the deploy succeeds — the PR is merged into the env branch. qa requires a successful int deploy of the
+# same commit; stage requires qa. All behavior is driven by the target branch's
+# gate in sf-pipeline/pipeline.config.yml, so this caller lists no branches: the
+# central workflow resolves the PR's base branch and no-ops for anything that
+# isn't a PR-driven stage (feature/main/release bases are ignored here).
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  deployments: write
+  statuses: write
+  issues: write
+
+jobs:
+  deploy:
+    if: >-
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved') ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'approved')
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/deploy.yml@v1
+    secrets: inherit

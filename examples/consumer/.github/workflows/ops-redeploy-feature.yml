@@ -1,0 +1,43 @@
+name: Ops — Redeploy Feature
+
+# Thin caller (REQ-005.3 / REQ-017.1). Idempotently (re)deploys a feature delta to
+# any environment. dry_run defaults to true (check-only). Uncheck dry_run for a REAL
+# manual deploy to a higher org. Does NOT move any env branch.
+on:
+  workflow_dispatch:
+    inputs:
+      feature_ref:
+        description: "Feature branch (or SHA) to deploy"
+        required: true
+        type: string
+      environment:
+        # Free-form on purpose: a dropdown would hardcode environment names in
+        # this caller, so renaming one in pipeline.config.yml would silently
+        # break it. An unknown name fails fast with the list of valid ones.
+        description: "Target environment (a `name:` from sf-pipeline/pipeline.config.yml)"
+        required: true
+        type: string
+      dry_run:
+        description: "Validate only (check-only). Uncheck for a REAL deploy."
+        required: false
+        default: true
+        type: boolean
+      profiles_mode:
+        description: "Profile/PS mode override (blank = use config)"
+        required: false
+        default: ""
+        type: choice
+        options: ["", "full", "incremental"]
+
+permissions:
+  contents: read
+
+jobs:
+  redeploy:
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/sf-ops-redeploy-feature.yml@v1
+    secrets: inherit
+    with:
+      feature_ref: ${{ inputs.feature_ref }}
+      environment: ${{ inputs.environment }}
+      dry_run: ${{ inputs.dry_run }}
+      profiles_mode: ${{ inputs.profiles_mode }}

@@ -1,0 +1,65 @@
+name: Org Bootstrap
+
+# Reusable workflow to onboard a Salesforce org end-to-end from CI, with no local
+# machine required. Call it from a consuming repo (or run it in the central repo
+# for testing). Auth uses an admin SFDX auth URL secret so it's fully hands-off.
+#
+# Prerequisites in the CALLER:
+#   secrets:
+#     SFDX_AUTH_URL   - `sf org display --verbose` "Sfdx Auth Url" for an ADMIN
+#                       of the target org (one-time; used only to deploy the app)
+#     BOOTSTRAP_TOKEN  - a PAT with `repo` scope to write Environment secrets
+#                        (GITHUB_TOKEN cannot create environment secrets)
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment to populate (must match a gh_environment in pipeline.config.yml)
+        required: true
+        type: string
+      instance_url:
+        description: Login URL for the org
+        required: true
+        type: string
+      integration_username:
+        description: Integration user to create/authenticate as
+        required: true
+        type: string
+      contact_email:
+        description: Contact email for the Connected App + integration user
+        required: true
+        type: string
+      target_repo:
+        description: owner/repo whose Environment secrets get written
+        required: true
+        type: string
+    secrets:
+      SFDX_AUTH_URL:
+        required: true
+      BOOTSTRAP_TOKEN:
+        required: true
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out central actions repo (for sf-setup)
+        uses: actions/checkout@v4
+
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+
+      - name: Run org bootstrap
+        env:
+          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
+          GH_TOKEN: ${{ secrets.BOOTSTRAP_TOKEN }}
+        run: |
+          chmod +x sf-setup/scripts/*.sh
+          sf-setup/scripts/bootstrap-org.sh \
+            --org-alias bootstrap-target \
+            --instance-url "${{ inputs.instance_url }}" \
+            --repo "${{ inputs.target_repo }}" \
+            --env "${{ inputs.environment }}" \
+            --int-username "${{ inputs.integration_username }}" \
+            --contact-email "${{ inputs.contact_email }}" \
+            --login jwt

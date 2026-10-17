@@ -1,0 +1,23 @@
+name: Sync Environment Branches
+
+# Replays the production baseline onto every environment branch so the chain
+# never drifts behind production. The production release train already does this
+# automatically after go-live; this caller exists so you can also run it on a
+# schedule, or by hand after a hotfix that landed straight on the baseline.
+#
+# Branch names come from pipeline.config.yml — nothing to configure here.
+
+on:
+  workflow_dispatch:
+  # Uncomment to keep the branches in step automatically.
+  # schedule:
+  #   - cron: "0 6 * * 1"   # Mondays, 06:00 UTC
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/sync-env-branches.yml@v1
+    secrets: inherit

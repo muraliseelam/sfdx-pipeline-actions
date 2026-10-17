@@ -1,0 +1,43 @@
+name: "SF Pipeline Notify"
+description: >-
+  Post a Markdown message to a team chat channel. Supports Slack, Microsoft
+  Teams, any generic JSON webhook, and token-based chat APIs. A no-op when no
+  credentials are supplied, so pipelines work before chat is wired up, and
+  never fails the job that calls it — notifications are telemetry, not a gate.
+
+inputs:
+  message:
+    description: "Markdown message text"
+    required: true
+  webhook_url:
+    description: "Incoming webhook URL (Slack, Teams, or any JSON endpoint)"
+    required: false
+    default: ""
+  api_url:
+    description: "Chat API endpoint, for token-based providers"
+    required: false
+    default: ""
+  api_token:
+    description: "Bot/API token, for token-based providers"
+    required: false
+    default: ""
+  channel_id:
+    description: "Target channel or room id, for token-based providers"
+    required: false
+    default: ""
+  provider:
+    description: "Force a provider: slack | teams | generic | api. Defaults to auto-detect."
+    required: false
+    default: "auto"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        CHAT_WEBHOOK_URL: ${{ inputs.webhook_url }}
+        CHAT_API_URL: ${{ inputs.api_url }}
+        CHAT_API_TOKEN: ${{ inputs.api_token }}
+        CHAT_CHANNEL_ID: ${{ inputs.channel_id }}
+        CHAT_PROVIDER: ${{ inputs.provider }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/notify.sh" "${{ inputs.message }}"

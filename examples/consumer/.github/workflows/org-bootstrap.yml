@@ -1,0 +1,46 @@
+name: Org Bootstrap
+
+# Stands up ONE Salesforce org's connection: creates the connected app and
+# certificate, creates and configures the integration user, and writes the four
+# SF_* secrets into the matching GitHub Environment.
+#
+# Run this once per environment during setup (User Guide, Part 1, Step 6).
+# After the last org is bootstrapped you never need it again.
+#
+# Two secrets are required before the first run:
+#   SFDX_AUTH_URL   — an sfdx auth URL for an admin of the TARGET org
+#   BOOTSTRAP_TOKEN — a PAT with repo admin, so it can write Environment secrets
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "GitHub Environment to populate (must match a gh_environment in pipeline.config.yml)"
+        required: true
+        type: string
+      instance_url:
+        description: "Login URL for the org (e.g. https://acme--dev.sandbox.my.salesforce.com)"
+        required: true
+        type: string
+      integration_username:
+        description: "Integration user to create / authenticate as"
+        required: true
+        type: string
+      contact_email:
+        description: "Contact email for the connected app and integration user"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/org-bootstrap.yml@v1
+    with:
+      environment: ${{ inputs.environment }}
+      instance_url: ${{ inputs.instance_url }}
+      integration_username: ${{ inputs.integration_username }}
+      contact_email: ${{ inputs.contact_email }}
+      target_repo: ${{ github.repository }}
+    secrets: inherit

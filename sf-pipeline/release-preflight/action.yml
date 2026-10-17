@@ -1,0 +1,65 @@
+name: "Release preflight"
+description: >-
+  Verify the release is safe to ship to production. There must be an OPEN release
+  PR (release/<version> → prod) that is authorized (a formal Approve review OR the
+  `prod-approved` label — a solo maintainer can't approve their own PR) and whose
+  latest checks are all green. Outputs the PR number for the post-deploy merge.
+
+inputs:
+  head_branch:
+    description: "release/<version> branch."
+    required: true
+  base_branch:
+    description: "Production branch."
+    required: true
+  version:
+    required: true
+  github_token:
+    required: true
+
+outputs:
+  pr_number:
+    value: ${{ steps.check.outputs.pr_number }}
+
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        HEAD_BRANCH: ${{ inputs.head_branch }}
+        BASE_BRANCH: ${{ inputs.base_branch }}
+        VERSION: ${{ inputs.version }}
+        APPROVAL_LABEL: prod-approved
+      run: |
+        set -euo pipefail
+        PR_JSON="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$HEAD_BRANCH" --base "$BASE_BRANCH" --state open --json number,reviewDecision,labels --jq '.[0] // empty')"
+        if [ -z "$PR_JSON" ]; then
+          echo "::error::No open release PR ($HEAD_BRANCH -> $BASE_BRANCH). Run the Assemble action for v$VERSION first."
+          exit 1
+        fi
+        NUM="$(echo "$PR_JSON"  | python3 -c "import sys,json;print(json.load(sys.stdin)['number'])")"
+        DEC="$(echo "$PR_JSON"  | python3 -c "import sys,json;print(json.load(sys.stdin).get('reviewDecision') or '')")"
+        HAS_LABEL="$(echo "$PR_JSON" | python3 -c "import sys,json;print('yes' if '$APPROVAL_LABEL' in [l['name'] for l in json.load(sys.stdin).get('labels',[])] else 'no')")"
+        echo "Release PR #$NUM — reviewDecision='$DEC', '$APPROVAL_LABEL' label=$HAS_LABEL"
+        if [ "$DEC" != "APPROVED" ] && [ "$HAS_LABEL" != "yes" ]; then
+          echo "::error::Release PR #$NUM is not authorized. Approve the PR (a different user) or add the '$APPROVAL_LABEL' label, then re-run."
+          exit 1
+        fi
+        # All checks green — count only the LATEST run per check-run name / status
+        # context (a shared head SHA carries superseded historical runs).
+        SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUM" --jq '.head.sha')"
+        CHECK_BAD="$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs" --paginate \
+          --jq '[ .check_runs[] ] | group_by(.name) | map(sort_by(.started_at) | last)
+                 | [ .[] | select(.status != "completed" or (((.conclusion // "") | ascii_upcase) as $c | $c != "SUCCESS" and $c != "NEUTRAL" and $c != "SKIPPED")) ] | length')"
+        STATUS_BAD="$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/status" \
+          --jq '[ .statuses[]? ] | group_by(.context) | map(sort_by(.updated_at) | last)
+                 | [ .[] | select((.state // "" | ascii_upcase) != "SUCCESS") ] | length')"
+        BAD=$(( ${CHECK_BAD:-0} + ${STATUS_BAD:-0} ))
+        if [ "$BAD" != "0" ]; then
+          echo "::error::Release PR #$NUM has $BAD non-passing/pending check(s) on ${SHA:0:8}."
+          exit 1
+        fi
+        echo "pr_number=$NUM" >> "$GITHUB_OUTPUT"
+        echo "✅ Release PR #$NUM approved and green — proceeding to prod deploy."

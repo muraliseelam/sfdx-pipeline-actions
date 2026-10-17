@@ -1,0 +1,27 @@
+name: Approval guard
+
+# When the `approved` label is added to a feature PR, hold it until PR
+# Validation + coverage have passed for the head commit. If validation isn't
+# green yet, the central guard removes the label and comments why; re-add it once
+# the green report lands. GitHub blocks PR authors from approving their own PR,
+# so on qa/stage a developer self-approves by adding this label. Every approval-
+# gated stage (int/qa/stage) is guarded; non-approval stages are left untouched.
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: read
+
+jobs:
+  guard:
+    if: ${{ github.event.label.name == 'approved' }}
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/approve-guard.yml@v1
+    secrets: inherit
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
+      head_sha: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.event.pull_request.base.ref }}
+      label_name: ${{ github.event.label.name }}

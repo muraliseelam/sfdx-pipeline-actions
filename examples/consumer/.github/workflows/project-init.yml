@@ -1,0 +1,28 @@
+name: Project Init
+
+# Thin caller — run this ONCE when setting up the repo, from the Actions tab.
+#
+# It reads sf-pipeline/pipeline.config.yml and creates the environment
+# branches, the pipeline labels and the GitHub Environments for you.
+#
+# Run it with apply unchecked first to preview, then re-run with apply checked.
+# It is safe to re-run any time you add or rename an environment.
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Create things for real (leave unchecked to preview)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  init:
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/project-init.yml@v1
+    secrets: inherit
+    with:
+      apply: ${{ inputs.apply }}

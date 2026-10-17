@@ -1,0 +1,82 @@
+<mxfile host="app.diagrams.net" modified="2026-09-16T00:00:00.000Z" version="24.0.0" type="device">
+  <diagram id="prodrelease" name="Production release train">
+    <mxGraphModel dx="1400" dy="1000" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1420" pageHeight="960" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Production release train" style="text;html=1;align=left;verticalAlign=middle;fontSize=22;fontStyle=1;fontColor=#0D274D;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="900" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="prod-release.yml. The validate / deploy split exists so the slow work runs unattended and the human approval sits immediately before a fast, already-validated deploy." style="text;html=1;align=left;verticalAlign=middle;fontSize=13;fontColor=#5B7186;" vertex="1" parent="1">
+          <mxGeometry x="40" y="52" width="1200" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p1box" value="PHASE 1 — ASSEMBLE&#10;no org contact" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fcfcfd;strokeColor=#6c8ebf;strokeWidth=2;arcSize=4;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontStyle=1;fontSize=12;fontColor=#1c4587;" vertex="1" parent="1">
+          <mxGeometry x="40" y="100" width="640" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="a1" value="&lt;b&gt;release-gather&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;find every int PR carrying &lt;b&gt;deployed:stage&lt;/b&gt;&lt;br/&gt;that is not yet released&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;arcSize=12;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="70" y="160" width="290" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" value="&lt;b&gt;cut release/YYYY.WW&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;from &lt;b&gt;main&lt;/b&gt;, then replay each&lt;br/&gt;gathered change onto it&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;arcSize=12;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="70" y="255" width="290" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" value="&lt;b&gt;release-preflight&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;does the assembled branch&lt;br/&gt;actually build a delta?&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;arcSize=12;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="205" width="250" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ae1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#6c8ebf;strokeWidth=2;" edge="1" parent="1" source="a1" target="a2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ae2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#6c8ebf;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a2" target="a3"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="p2box" value="PHASE 2 — VALIDATE&#10;environment: prod-validate · NO reviewers" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fcfcfd;strokeColor=#d6b656;strokeWidth=2;arcSize=4;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontStyle=1;fontSize=12;fontColor=#7a5c00;" vertex="1" parent="1">
+          <mxGeometry x="740" y="100" width="640" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="b1" value="&lt;b&gt;destructive canary&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;destructive changes are validated&lt;br/&gt;&lt;i&gt;separately and first&lt;/i&gt; — a delete that&lt;br/&gt;production will refuse must not&lt;br/&gt;surface after the approval&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;arcSize=12;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="770" y="155" width="290" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="b2" value="&lt;b&gt;check-only deploy&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;RunSpecifiedTests against production&lt;br/&gt;slow, unattended, no org change&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;arcSize=12;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="155" width="250" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="b3" value="&lt;b&gt;keep the validated job id&lt;/b&gt; — this is what makes the later deploy a quick-deploy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;strokeWidth=2;arcSize=12;fontSize=12;dashed=1;fontColor=#7a5c00;" vertex="1" parent="1">
+          <mxGeometry x="770" y="280" width="580" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="be1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#b85450;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="b1" target="b2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="be2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#d6b656;strokeWidth=2;dashed=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="b2" target="b3"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="cross" value="assembled release branch" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#d6b656;strokeWidth=3;fontSize=11;fontColor=#7a5c00;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a3" target="b1"><mxGeometry relative="1" as="geometry"><mxPoint as="offset" x="0" y="-16" /></mxGeometry></mxCell>
+
+        <mxCell id="gate" value="&lt;b&gt;HUMAN APPROVAL&lt;/b&gt;&amp;nbsp; — environment: &lt;b&gt;prod&lt;/b&gt; · required reviewers&lt;br/&gt;&lt;font color=&quot;#7a2e2a&quot;&gt;The first and only point a person is asked to decide. By now every test has already run.&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=3;arcSize=8;shadow=1;fontSize=14;fontColor=#7a2e2a;" vertex="1" parent="1">
+          <mxGeometry x="380" y="400" width="660" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ge1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#b85450;strokeWidth=3;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b3" target="gate"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="p3box" value="PHASE 3 — DEPLOY&#10;environment: prod" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fcfcfd;strokeColor=#82b366;strokeWidth=2;arcSize=4;verticalAlign=top;align=left;spacingLeft=14;spacingTop=8;fontStyle=1;fontSize=12;fontColor=#3d6b2e;" vertex="1" parent="1">
+          <mxGeometry x="40" y="530" width="1340" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="c1" value="&lt;b&gt;quick-deploy&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;replay the validated job id&lt;br/&gt;&lt;i&gt;no tests re-run — minutes, not hours&lt;/i&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=3;arcSize=12;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="80" y="590" width="280" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" value="&lt;b&gt;tag the release&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;immutable record of what shipped&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;arcSize=12;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="410" y="590" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="c3" value="&lt;b&gt;merge release → main&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;main now matches production&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;arcSize=12;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="700" y="590" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="c4" value="&lt;b&gt;sync-env-branches&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;replay main onto int / qa / stage so the&lt;br/&gt;next delta starts from what is live&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F7FD;strokeColor=#00BCEB;strokeWidth=2;arcSize=12;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="990" y="590" width="310" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="ce1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#82b366;strokeWidth=3;" edge="1" parent="1" source="c1" target="c2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#82b366;strokeWidth=3;" edge="1" parent="1" source="c2" target="c3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#82b366;strokeWidth=3;" edge="1" parent="1" source="c3" target="c4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ge2" value="approve" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#82b366;strokeWidth=3;fontSize=12;fontColor=#3d6b2e;labelBackgroundColor=#ffffff;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="gate" target="c1"><mxGeometry relative="1" as="geometry"><mxPoint as="offset" x="0" y="-16" /></mxGeometry></mxCell>
+
+        <mxCell id="note1" value="&lt;b&gt;Why validate and deploy sit in different GitHub Environments.&lt;/b&gt; If one environment carried both, the required reviewer would be asked to approve &lt;i&gt;before&lt;/i&gt; the hours-long validation began — approving something nobody had tested yet. Splitting them means prod-validate runs unattended, and the reviewer is only paged once the release is provably deployable." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F7FD;strokeColor=#00BCEB;strokeWidth=1;arcSize=8;fontSize=12;align=left;spacingLeft=14;fontColor=#0D274D;" vertex="1" parent="1">
+          <mxGeometry x="40" y="755" width="1340" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="note2" value="&lt;b&gt;Ops runbooks&lt;/b&gt; sit alongside this train, not inside it — sf-ops-recreate-feature (rebuild a lost feature branch), sf-ops-redeploy-feature (re-run a deploy without a new PR), sf-ops-rollback (put a previous state back). They are manual, dispatch-triggered, and deliberately outside the promotion chain." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;strokeWidth=1;arcSize=8;fontSize=12;align=left;spacingLeft=14;fontColor=#3a3a3a;" vertex="1" parent="1">
+          <mxGeometry x="40" y="835" width="1340" height="65" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

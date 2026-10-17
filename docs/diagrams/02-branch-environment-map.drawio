@@ -1,0 +1,127 @@
+<mxfile host="app.diagrams.net" modified="2026-09-16T00:00:00.000Z" version="24.0.0" type="device">
+  <diagram id="branches" name="Branches, environments and orgs">
+    <mxGraphModel dx="1600" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1960" pageHeight="760" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Branches, environments and orgs" style="text;html=1;align=left;verticalAlign=middle;fontSize=22;fontStyle=1;fontColor=#0D274D;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="900" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Environment branches are long-lived. Each GitHub Environment holds exactly one org's JWT secrets, so the same workflow file can target any org." style="text;html=1;align=left;verticalAlign=middle;fontSize=13;fontColor=#5B7186;" vertex="1" parent="1">
+          <mxGeometry x="40" y="52" width="1100" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane1" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d0d7de;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="110" width="1880" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="lane1t" value="GIT BRANCHES" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontStyle=1;fontColor=#8b949e;" vertex="1" parent="1">
+          <mxGeometry x="50" y="116" width="200" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane2" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fcfcfd;strokeColor=#d0d7de;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="285" width="1880" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="lane2t" value="GITHUB ENVIRONMENTS&#10;(JWT secrets + reviewers)" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontStyle=1;fontColor=#8b949e;" vertex="1" parent="1">
+          <mxGeometry x="50" y="291" width="240" height="26" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane3" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d0d7de;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="440" width="1880" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="lane3t" value="SALESFORCE ORGS" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontStyle=1;fontColor=#8b949e;" vertex="1" parent="1">
+          <mxGeometry x="50" y="446" width="200" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bF" value="&lt;b&gt;feature/PROJ-###&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;&lt;i&gt;short-lived&lt;/i&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#5B7186;strokeWidth=2;arcSize=14;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="50" y="150" width="185" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="bI" value="&lt;b&gt;int&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#0D274D&quot;&gt;entry stage&lt;br/&gt;gate: approval&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F7FD;strokeColor=#00BCEB;strokeWidth=2;arcSize=14;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="380" y="150" width="185" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="bQ" value="&lt;b&gt;qa&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#0D274D&quot;&gt;gate: approval&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F7FD;strokeColor=#00BCEB;strokeWidth=2;arcSize=14;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="710" y="150" width="185" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="bS" value="&lt;b&gt;stage&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#0D274D&quot;&gt;gate: approval&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F7FD;strokeColor=#00BCEB;strokeWidth=2;arcSize=14;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="150" width="185" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="bR" value="&lt;b&gt;release/YYYY.WW&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#7a5c00&quot;&gt;cut from main&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;arcSize=14;shadow=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1370" y="150" width="185" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="bM" value="&lt;b&gt;main&lt;/b&gt;&lt;br/&gt;production baseline" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0D274D;strokeColor=#0D274D;strokeWidth=2;arcSize=14;shadow=1;fontSize=12;fontColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="1700" y="150" width="185" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="eI" value="&lt;b&gt;int&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;no reviewers&lt;br/&gt;RunSpecifiedTests&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;arcSize=14;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="380" y="310" width="185" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="eQ" value="&lt;b&gt;qa&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;optional reviewers&lt;br/&gt;NoTestRun&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;arcSize=14;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="710" y="310" width="185" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="eS" value="&lt;b&gt;stage&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;optional reviewers&lt;br/&gt;NoTestRun&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;arcSize=14;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="310" width="185" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ePV" value="&lt;b&gt;prod-validate&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#5B7186&quot;&gt;&lt;b&gt;no&lt;/b&gt; reviewers&lt;br/&gt;check-only, unattended&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;arcSize=14;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1370" y="310" width="185" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ePD" value="&lt;b&gt;prod&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#b85450&quot;&gt;&lt;b&gt;reviewers required&lt;/b&gt;&lt;br/&gt;quick-deploy&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;arcSize=14;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1700" y="310" width="185" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="oI" value="int sandbox" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="412" y="465" width="120" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="oQ" value="qa sandbox" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="742" y="465" width="120" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="oS" value="stage sandbox" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1072" y="465" width="120" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="oP" value="production&#10;(acmeprod)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1560" y="465" width="150" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="x1" value="PR + validate&#10;approve → deploy" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#00BCEB;strokeWidth=3;fontSize=11;fontColor=#0D274D;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="bF" target="bI">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x2" value="deploy:qa label&#10;on the int PR" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;strokeColor=#00BCEB;strokeWidth=2;fontSize=11;fontColor=#0D274D;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="bI" target="bQ">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x3" value="deploy:stage label&#10;on the int PR" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;strokeColor=#00BCEB;strokeWidth=2;fontSize=11;fontColor=#0D274D;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="bQ" target="bS">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x4" value="release-gather&#10;(deployed:stage)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#d6b656;strokeWidth=3;fontSize=11;fontColor=#7a5c00;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="bS" target="bR">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x5" value="validate → approve&#10;→ quick-deploy" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#b85450;strokeWidth=3;fontSize=11;fontColor=#b85450;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="bR" target="bM">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x6" value="sync-env-branches after go-live — main is replayed back onto int / qa / stage" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;strokeColor=#5B7186;strokeWidth=2;fontSize=11;fontColor=#5B7186;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="bM" target="bI">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1792" y="118" />
+              <mxPoint x="472" y="118" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="v1" style="edgeStyle=none;html=1;dashed=1;strokeColor=#b1b1b1;strokeWidth=1;endArrow=none;" edge="1" parent="1" source="bI" target="eI"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="v2" style="edgeStyle=none;html=1;dashed=1;strokeColor=#b1b1b1;strokeWidth=1;endArrow=none;" edge="1" parent="1" source="bQ" target="eQ"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="v3" style="edgeStyle=none;html=1;dashed=1;strokeColor=#b1b1b1;strokeWidth=1;endArrow=none;" edge="1" parent="1" source="bS" target="eS"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="v4" style="edgeStyle=none;html=1;dashed=1;strokeColor=#b1b1b1;strokeWidth=1;endArrow=none;" edge="1" parent="1" source="bR" target="ePV"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="v5" style="edgeStyle=none;html=1;dashed=1;strokeColor=#b1b1b1;strokeWidth=1;endArrow=none;" edge="1" parent="1" source="bM" target="ePD"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="w1" value="JWT deploy" style="edgeStyle=none;html=1;strokeColor=#82b366;strokeWidth=2;fontSize=10;fontColor=#5B7186;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="eI" target="oI"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="w2" value="JWT deploy" style="edgeStyle=none;html=1;strokeColor=#82b366;strokeWidth=2;fontSize=10;fontColor=#5B7186;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="eQ" target="oQ"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="w3" value="JWT deploy" style="edgeStyle=none;html=1;strokeColor=#82b366;strokeWidth=2;fontSize=10;fontColor=#5B7186;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="eS" target="oS"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="w4" value="check-only" style="edgeStyle=none;html=1;dashed=1;strokeColor=#d6b656;strokeWidth=2;fontSize=10;fontColor=#7a5c00;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="ePV" target="oP"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="w5" value="quick-deploy" style="edgeStyle=none;html=1;strokeColor=#b85450;strokeWidth=2;fontSize=10;fontColor=#b85450;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="ePD" target="oP"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="note" value="&lt;b&gt;Note the dotted qa / stage arrows.&lt;/b&gt; There is no promotion branch — the feature branch is deployed &lt;i&gt;directly&lt;/i&gt; to each org. The label on the int PR only orchestrates; the delta deployed is always the feature's own.&lt;br/&gt;&lt;b&gt;prod is split across two GitHub Environments&lt;/b&gt; so the long check-only validation can run unattended and the human approval sits immediately before the fast quick-deploy." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6F7FD;strokeColor=#00BCEB;strokeWidth=1;arcSize=8;fontSize=12;align=left;spacingLeft=12;fontColor=#0D274D;" vertex="1" parent="1">
+          <mxGeometry x="40" y="600" width="1880" height="62" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

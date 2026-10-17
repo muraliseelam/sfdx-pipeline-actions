@@ -12,7 +12,7 @@
 #   AUDIT_FILE     path within that branch (default: audit/audit-log.jsonl)
 set -uo pipefail
 
-RECORD="${AUDIT_DIR:-.deploy}/audit-record.json"
+RECORD=".deploy/audit-record.json"
 BRANCH="${AUDIT_BRANCH:-audit-log}"
 FILE="${AUDIT_FILE:-audit/audit-log.jsonl}"
 
@@ -22,8 +22,8 @@ fi
 
 LINE="$(python3 -c "import json,sys; print(json.dumps(json.load(open('$RECORD')),separators=(',',':')))")"
 
-git config user.name  "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+git config user.name  "sf-release-bot"
+git config user.email "sf-release-bot@users.noreply.github.com"
 
 WT="$(mktemp -d)"
 cleanup() { git worktree remove --force "$WT" >/dev/null 2>&1 || true; rm -rf "$WT"; }

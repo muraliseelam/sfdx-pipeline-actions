@@ -1,0 +1,34 @@
+name: Ops — Recreate Feature
+
+# Thin caller (REQ-005.1 / REQ-003). Cuts a clean feature/<name> branch from the
+# pipeline baseline. If the branch already exists, confirm_reset must be checked to
+# reset it (DESTRUCTIVE).
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Feature name or Jira key (branch becomes feature/<name>)"
+        required: true
+        type: string
+      base:
+        description: "Base branch to cut from (blank = pipeline baseline)"
+        required: false
+        default: ""
+        type: string
+      confirm_reset:
+        description: "If the branch already exists, reset it (DESTRUCTIVE)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  recreate:
+    uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/sf-ops-recreate-feature.yml@v1
+    secrets: inherit
+    with:
+      name: ${{ inputs.name }}
+      base: ${{ inputs.base }}
+      confirm_reset: ${{ inputs.confirm_reset }}

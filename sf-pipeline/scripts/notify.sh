@@ -2,16 +2,14 @@
 #
 # notify.sh — post a short Markdown message to a team chat channel.
 #
-# Supports five providers, auto-detected from whichever credentials are present:
+# Supports four providers, auto-detected from whichever credentials are present:
 #
 #   slack    incoming webhook        CHAT_WEBHOOK_URL=https://hooks.slack.com/...
 #   teams    incoming webhook        CHAT_WEBHOOK_URL=https://....webhook.office.com/...
-#   webex    incoming webhook        CHAT_WEBHOOK_URL=https://webexapis.com/v1/webhooks/incoming/...
 #   generic  any JSON webhook        CHAT_WEBHOOK_URL=https://example.com/hook
 #   api      bot token + channel     CHAT_API_URL + CHAT_API_TOKEN + CHAT_CHANNEL_ID
-#                                    (e.g. https://webexapis.com/v1/messages + a bot token + room id)
 #
-# Set CHAT_PROVIDER to force one of: slack | teams | webex | generic | api.
+# Set CHAT_PROVIDER to force one of: slack | teams | generic | api.
 #
 # Contract: notifications are best-effort telemetry, never a deployment gate.
 # This script ALWAYS exits 0. Every failure is surfaced as a GitHub Actions
@@ -49,8 +47,6 @@ if [[ "$PROVIDER" == "auto" ]]; then
     PROVIDER="slack"
   elif [[ "$WEBHOOK_URL" == *"webhook.office.com"* || "$WEBHOOK_URL" == *"logic.azure.com"* ]]; then
     PROVIDER="teams"
-  elif [[ "$WEBHOOK_URL" == *"webexapis.com"* || "$WEBHOOK_URL" == *"api.ciscospark.com"* ]]; then
-    PROVIDER="webex"
   elif [[ -n "$WEBHOOK_URL" ]]; then
     PROVIDER="generic"
   else
@@ -69,8 +65,7 @@ declare -a HEADERS=()
 PAYLOAD=""
 
 json_escape() {
-  # printf, not <<<: a here-string would append a newline to every message.
-  printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
+  python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' <<<"$1"
 }
 
 ESCAPED="$(json_escape "$MESSAGE")"
@@ -85,11 +80,6 @@ case "$PROVIDER" in
     [[ -z "$WEBHOOK_URL" ]] && { warn "CHAT_PROVIDER=teams but CHAT_WEBHOOK_URL is empty"; exit 0; }
     TARGET="$WEBHOOK_URL"
     PAYLOAD="{\"@type\": \"MessageCard\", \"@context\": \"https://schema.org/extensions\", \"text\": ${ESCAPED}}"
-    ;;
-  webex)
-    [[ -z "$WEBHOOK_URL" ]] && { warn "CHAT_PROVIDER=webex but CHAT_WEBHOOK_URL is empty"; exit 0; }
-    TARGET="$WEBHOOK_URL"
-    PAYLOAD="{\"markdown\": ${ESCAPED}}"
     ;;
   generic)
     [[ -z "$WEBHOOK_URL" ]] && { warn "CHAT_PROVIDER=generic but CHAT_WEBHOOK_URL is empty"; exit 0; }
@@ -106,7 +96,7 @@ case "$PROVIDER" in
     PAYLOAD="{\"roomId\": \"${CHANNEL_ID}\", \"channel\": \"${CHANNEL_ID}\", \"markdown\": ${ESCAPED}, \"text\": ${ESCAPED}}"
     ;;
   *)
-    warn "unknown CHAT_PROVIDER '${PROVIDER}' (expected slack, teams, webex, generic or api)"
+    warn "unknown CHAT_PROVIDER '${PROVIDER}' (expected slack, teams, generic or api)"
     exit 0
     ;;
 esac
@@ -115,22 +105,22 @@ esac
 # Send. --max-time caps the damage from a hung endpoint.
 # ---------------------------------------------------------------------------
 CODE="$(
-  curl -sS -o "${TMPDIR:-/tmp}/chat-notify-response.txt" -w '%{http_code}' \
+  curl -sS -o /tmp/chat-notify-response.txt -w '%{http_code}' \
     --max-time 30 \
     -X POST "$TARGET" \
     -H "Content-Type: application/json" \
     ${HEADERS[@]+"${HEADERS[@]}"} \
-    -d "$PAYLOAD" 2>"${TMPDIR:-/tmp}/chat-notify-error.txt"
+    -d "$PAYLOAD" 2>/tmp/chat-notify-error.txt
 )" || CODE="000"
 
-BODY="$(head -c 500 "${TMPDIR:-/tmp}/chat-notify-response.txt" 2>/dev/null || true)"
+BODY="$(head -c 500 /tmp/chat-notify-response.txt 2>/dev/null || true)"
 
 case "$CODE" in
   2*)
     echo "Chat notification sent via ${PROVIDER} (HTTP ${CODE})."
     ;;
   000)
-    warn "could not reach the ${PROVIDER} endpoint: $(head -c 200 "${TMPDIR:-/tmp}/chat-notify-error.txt" 2>/dev/null)"
+    warn "could not reach the ${PROVIDER} endpoint: $(head -c 200 /tmp/chat-notify-error.txt 2>/dev/null)"
     ;;
   401|403)
     warn "${PROVIDER} rejected the credentials (HTTP ${CODE}). The token is likely expired or revoked. ${BODY}"
