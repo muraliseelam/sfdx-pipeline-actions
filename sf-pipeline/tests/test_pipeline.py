@@ -21,6 +21,7 @@ import threading
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -495,6 +496,19 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(preflight.pr_route_problems(CFG, "prod", "feature/abc"))
         self.assertEqual(preflight.pr_route_problems(CFG, "prod", "release/2026.10.12.1"), [])
         self.assertTrue(preflight.pr_route_problems(CFG, "dev", "int"))
+
+    def test_problems_are_written_to_the_report_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "preflight.md"
+            with mock.patch.dict(os.environ, {"PREFLIGHT_REPORT": str(report)}), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                preflight.report("PR routing", "feature PRs must target 'dev'")
+                preflight.report("Meta-pair check", "A.cls has no A.cls-meta.xml", file="classes/A.cls")
+            self.assertEqual(report.read_text(encoding="utf-8").splitlines(), [
+                "- **PR routing**: feature PRs must target 'dev'",
+                "- **Meta-pair check**: A.cls has no A.cls-meta.xml",
+            ])
+            self.assertIn("::error file=classes/A.cls,title=Meta-pair check::", out.getvalue())
 
     def test_branch_origin(self):
         with tempfile.TemporaryDirectory() as tmp:

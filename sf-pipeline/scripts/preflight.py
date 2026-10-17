@@ -14,11 +14,14 @@ Commands
       accept promotion PRs (promote/<env>/...); production only accepts
       release branches; environment branches are never merged into each other.
 
-Each command prints ::error:: annotations and exits 1 on any violation.
+Each command prints ::error:: annotations and exits 1 on any violation. With
+PREFLIGHT_REPORT set, each problem is also appended to that file as a Markdown
+bullet, so the PR comment can say what failed.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -135,6 +138,15 @@ def pr_route_problems(cfg: dict, base_env: str, head_ref: str) -> list[str]:
 # ----------------------------------------------------------------------------- cli
 
 
+def report(title: str, msg: str, file: str | None = None) -> None:
+    where = f"file={file}," if file else ""
+    print(f"::error {where}title={title}::{msg}")
+    target = os.environ.get("PREFLIGHT_REPORT")
+    if target:
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write(f"- **{title}**: {msg}\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", help="path to pipeline.config.yml")
@@ -160,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         source = args.source_path or cfg["project"]["source_path"]
         problems = meta_pair_problems(source)
         for path, msg in problems:
-            print(f"::error file={path},title=Meta-pair check::{msg}")
+            report("Meta-pair check", msg, file=path)
         print(f"meta-pairs: {len(problems)} problem(s) under {source}")
         return 1 if problems else 0
 
@@ -168,17 +180,17 @@ def main(argv: list[str] | None = None) -> int:
         try:
             problems = branch_origin_problems(cfg, args.head, args.remote, args.target_branch)
         except RuntimeError as exc:
-            print(f"::error title=Branch origin check::{exc}")
+            report("Branch origin check", str(exc))
             return 1
         for msg in problems:
-            print(f"::error title=Branch origin check::{msg}")
+            report("Branch origin check", msg)
         print(f"branch-origin: {len(problems)} problem(s)")
         return 1 if problems else 0
 
     if args.command == "pr-route":
         problems = pr_route_problems(cfg, args.base_env, args.head_ref)
         for msg in problems:
-            print(f"::error title=PR routing::{msg}")
+            report("PR routing", msg)
         print(f"pr-route: {len(problems)} problem(s) for {args.head_ref} -> {args.base_env}")
         return 1 if problems else 0
     return 1

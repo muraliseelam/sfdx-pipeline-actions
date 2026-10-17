@@ -109,6 +109,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       has_sf_changes: ${{ steps.changes.outputs.has_sf_changes }}
+      problems: ${{ steps.problems.outputs.problems }}
     steps:
       - name: Checkout PR head
         uses: actions/checkout@v7
@@ -132,17 +133,35 @@ jobs:
         env:
           BASE_ENV: ${{ needs.plan.outputs.env }}
           HEAD_REF: ${{ github.head_ref }}
+          PREFLIGHT_REPORT: ${{ runner.temp }}/preflight-problems.md
         run: python sf-pipeline/scripts/preflight.py pr-route --base-env "$BASE_ENV" --head-ref "$HEAD_REF"
 
       - name: Meta-pair check (.cls/.trigger/.page/.component <-> -meta.xml)
         if: ${{ !cancelled() }}
+        env:
+          PREFLIGHT_REPORT: ${{ runner.temp }}/preflight-problems.md
         run: python sf-pipeline/scripts/preflight.py meta-pairs
 
       - name: Branch cut from the production baseline
         if: ${{ !cancelled() }}
         env:
           BASE_REF: ${{ github.base_ref }}
+          PREFLIGHT_REPORT: ${{ runner.temp }}/preflight-problems.md
         run: python sf-pipeline/scripts/preflight.py branch-origin --head HEAD --target-branch "$BASE_REF"
+
+      # The gate quotes these in the PR comment, so nobody has to open the run log.
+      - name: Collect preflight problems
+        id: problems
+        if: failure()
+        env:
+          FILE: ${{ runner.temp }}/preflight-problems.md
+        run: |
+          [ -s "$FILE" ] || exit 0
+          {
+            echo "problems<<SF_PREFLIGHT_EOF"
+            head -c 60000 "$FILE"
+            echo "SF_PREFLIGHT_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Detect Salesforce changes
         id: changes
@@ -353,6 +372,7 @@ jobs:
           ENV_NAME: ${{ needs.plan.outputs.env }}
           MODE: ${{ steps.verdict.outputs.comment }}
           DESC: ${{ steps.verdict.outputs.description }}
+          PROBLEMS: ${{ needs.preflight.outputs.problems }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # Same marker deploy_report.py uses, so this replaces any stale report.
@@ -360,6 +380,7 @@ jobs:
           icon="⏭️"; [ "$MODE" = "create" ] && icon="❌"
           printf '%s\n## 🚀 Salesforce Pipeline Report\n\n%s **%s**. Details are in the [workflow run](%s).\n' \
             "$marker" "$icon" "$DESC" "$RUN_URL" > "$RUNNER_TEMP/gate.md"
+          if [ -n "$PROBLEMS" ]; then printf '\n%s\n' "$PROBLEMS" >> "$RUNNER_TEMP/gate.md"; fi
           only_update=()
           [ "$MODE" = "update" ] && only_update=(--only-update)
           python3 sf-pipeline/scripts/gh_helpers.py upsert-comment --pr "$PR_NUMBER" \

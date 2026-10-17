@@ -70,6 +70,8 @@ jobs:
           ENV_BRANCH: ${{ fromJSON(steps.cfg.outputs.json).branch }}
           PROMOTE_PREFIX: ${{ fromJSON(steps.cfg.outputs.json).promote_branch_prefix }}
           APPROVAL_LABEL: ${{ fromJSON(steps.cfg.outputs.json).approval_label }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
         run: |
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::error title=SF Rollback::Secret ${PAT_SECRET} is not set (the revert PR must trigger validation)"; exit 1; }
@@ -98,8 +100,10 @@ jobs:
             base="$ENV_BRANCH"; pr_base="$ENV_BRANCH"; branch="${PROMOTE_PREFIX}${TARGET}/rollback-${short}"
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The revert is the change of whoever ran the rollback, so it carries their name.
+          name="$(gh api "users/${ACTOR}" --jq '.name // .login' 2>/dev/null)" || name=""
+          git config user.name "${name:-$ACTOR}"
+          git config user.email "${ACTOR_ID}+${ACTOR}@users.noreply.github.com"
           git checkout -q -B "$branch" "origin/${base}"
           mflag=()
           if [ "$(git rev-list --parents -n 1 "$sha" | wc -w)" -ge 3 ]; then mflag=(-m 1); fi
