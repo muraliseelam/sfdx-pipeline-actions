@@ -37,6 +37,7 @@ version: 1
 # Four stages? Delete a line, e.g. remove `dev:` and PRs enter at int.
 # ----------------------------------------------------------------------------
 environments:
+  dev: {}
   int: {}
   qa: {}
   stage: {}
