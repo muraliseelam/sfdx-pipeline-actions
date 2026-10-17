@@ -24,7 +24,11 @@ from pathlib import Path
 from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 sys.path.insert(0, str(SCRIPTS))
+# A fixed 5-stage config, so the tests don't depend on the environments a team
+# configures. Scripts run as subprocesses inherit it too.
+os.environ["SF_PIPELINE_CONFIG"] = str(FIXTURES / "pipeline.config.yml")
 
 import bootstrap  # noqa: E402
 import branch_protection  # noqa: E402
@@ -39,7 +43,6 @@ import specified_tests  # noqa: E402
 
 CFG = pipeline_config.load()
 NS = "http://soap.sforce.com/2006/04/metadata"
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def write(path: Path, text: str = "") -> Path:
@@ -61,6 +64,12 @@ def package_xml(path: Path, types: dict[str, list[str]]) -> Path:
 
 class PipelineConfigTests(unittest.TestCase):
     def test_repo_config_is_valid(self):
+        # The team's own config, whatever environments it lists.
+        live = pipeline_config.load(pipeline_config.DEFAULT_CONFIG)
+        self.assertEqual(pipeline_config.validate(live), [])
+        self.assertGreaterEqual(len(live["promotion"]["chain"]), 2)
+
+    def test_fixture_config_is_the_five_stage_reference(self):
         self.assertEqual(pipeline_config.validate(CFG), [])
         self.assertEqual(CFG["promotion"]["chain"], ["dev", "int", "qa", "stage", "prod"])
 
