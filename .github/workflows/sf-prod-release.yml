@@ -593,7 +593,7 @@ jobs:
           sha: ${{ needs.resolve.outputs.sha }}
           pr: ${{ needs.resolve.outputs.pr }}
           job-id: ${{ steps.full.outputs.job-id || steps.quick.outputs.job-id }}
-          test-level: ${{ steps.full.outputs.test-level || 'quick deploy of the validated job' }}
+          test-level: ${{ steps.full.outputs.test-level || (steps.full.outcome == 'success' && 'none (nothing left to deploy)') || 'quick deploy of the validated job' }}
           coverage: ${{ steps.full.outputs.overall-coverage }}
           threshold: ${{ fromJSON(needs.resolve.outputs.cfg).coverage_threshold }}
           package: ${{ fromJSON(needs.resolve.outputs.cfg).delta_output_dir }}/package/package.xml

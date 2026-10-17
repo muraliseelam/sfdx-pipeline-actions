@@ -10,6 +10,12 @@ on:
       - ".github/**"
       - "sf-pipeline/**"
       - "sfdx-project.json"
+  push:
+    branches: [main]
+    paths:
+      - ".github/**"
+      - "sf-pipeline/**"
+      - "sfdx-project.json"
   workflow_dispatch:
 
 permissions:
