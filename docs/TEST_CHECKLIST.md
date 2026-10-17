@@ -86,13 +86,18 @@ Legend: `[x]` done and verified · `[~]` partly verified (what's left is noted) 
 - [x] D16 Release: validate → `approved` → quick deploy → merge (SHAs kept) → tag → GitHub Release — v1.1.0: RunLocalTests validation, quick deploy, merge commit with both parents, tag + Release
 - [x] D17 Post-release sync: env branches reset, protection restored exactly, unreleased commits listed — all four branches at the release commit; the two unreleased dev commits (#12, #13) were the ones listed
 - [x] D18 Quick-deploy fallback to full deploy — v1.1.1: the validated job was used outside the pipeline → CannotQuickDeployError → full deploy (found and fixed: deletions already gone; see X3)
-- [x] D19 Concurrent merges to one env don't collide — PRs #12 + #13 approved together: both deployed (found and fixed: X1)
+- [x] D19 Concurrent merges to one env don't collide — PRs #12 + #13 approved together: both deployed (found and fixed: X1); retest with #34 + #35: both auto-merged within a second
 - [x] D20 Re-runs are idempotent (promote, release with same version) — re-labeling `promote:qa` kept one promotion PR; deploy re-run on a released PR: "already released; nothing to do"; prepare with a used version: "Tag v1.1.1 already exists"
 - [x] D21 Cleanup release removes the test metadata from production (destructive in prod) — v1.1.1 (SF Rollback of v1.1.0) and v1.2.1 (rollback of v1.2.0); production has none of the test classes
 
 ## E. 4-stage variant (int → qa → stage → prod)
 - [x] E1 Switch config to 4 envs, re-bootstrap, PR → int → promote → release — `bootstrap.py github` had nothing to change; PR #23 entered at int → #24 → #25 → v1.2.0 in production; the sync skipped `dev`; rolled back through #27–#30 (v1.2.1)
 - [x] E2 Restore the 5-stage config — sync realigned all four env branches
+
+## G. Rollback of an unreleased change (`target: <env>`)
+- [x] G1 Rollback PRs open into the env branch from `promote/<env>/rollback-<sha>` — #36, #37 (two at once), #39, #41
+- [x] G2 The rollback PR validates the deletion — #41: "0 to deploy, 2 to delete" against the dev org (found and fixed: X12, X13)
+- [x] G3 The merge deletes what the reverted change added from the env org — #36 (with other changes on the branch) and #41 (branch back to matching `main`); dev org clean afterwards (found and fixed: X11)
 
 ## X. Fixed during the end-to-end run
 - [x] X1 Auto-merge raced a concurrent merge ("Base branch was modified") and gave up → retried
@@ -105,11 +110,15 @@ Legend: `[x]` done and verified · `[~]` partly verified (what's left is noted) 
 - [x] X8 Rollback commits were authored by a bot → they carry the name of whoever ran the rollback
 - [x] X9 Windows: scripts crashed printing ✅ on a cp1252 console, couldn't run `sf.cmd`, and a missing PyYAML gave a stack trace → UTF-8 output, `shutil.which`, and a message with the exact install command
 - [x] X10 Coverage gate said "no Apex tests ran" on a deletion-only release that ran 7 tests → "no changed Apex to gate"; the audit record no longer calls an empty fallback a quick deploy
+- [x] X11 An env rollback left what it reverted in the env org (deltas start at `main`, which never had it) → a change built on the env branch also deletes what it removed since the branch's previous head
+- [x] X12 A merge that removed metadata and left the branch equal to `main` was skipped as "nothing to deploy" → the push's own changes count too
+- [x] X13 A PR that only removes metadata from the env branch was reported as "No Salesforce metadata changes" → it's validated against the env branch's head
+- [x] X14 A config copied from the template named the template's repo, so `bootstrap.py` could act on someone else's repo → `project.repository` ships blank (the current clone), and a different name stops the script
 
 ## F. Documentation & open-source polish (after testing)
 - [x] F1 README quick start (env names → bootstrap → secrets → first PR)
 - [x] F2 Docs: getting started, configuration reference, authentication, approvals, workflows, troubleshooting — updated with everything the end-to-end run showed
 - [x] F3 CONTRIBUTING, SECURITY, CHANGELOG, issue + PR templates
-- [ ] F4 Repo marked as a template, description + topics
-- [ ] F5 Publish the documentation
-- [ ] F6 Final cleanup (test branches/PRs closed, scratch orgs listed for the owner)
+- [x] F4 Repo marked as a template, description + topics
+- [x] F5 Publish the documentation — in the public repo, linked from the README
+- [x] F6 Final cleanup — no open PRs; test branches deleted (only `main`, the four env branches and `audit-log` remain); no test metadata left in any of the five orgs

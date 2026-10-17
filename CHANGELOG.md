@@ -30,13 +30,16 @@ The single-repo pipeline: one config file, everything else derived from your env
   weekly SF Pipeline Doctor run.
 - **Safety nets.** Dependency lint for deleted metadata still in use, incremental profile and
   permission-set deploys, and deletions the target org no longer has are skipped and listed
-  instead of failing the deploy.
+  instead of failing the deploy. Changes built on an env branch (merges, env rollbacks) also
+  delete what they removed from it, so rolling back an unreleased change removes it from that
+  env's org.
 
 ### Fixed during the end-to-end run
 See section X of [the test checklist](docs/TEST_CHECKLIST.md): concurrent auto-merges, release
 branch lookup, deletions already done, the self-test depending on a team's own environments,
 clearer PR feedback for preflight failures and rejected promotion labels, deploy reports on merged
-PRs, rollback attribution, and Windows support in the setup scripts.
+PRs, rollback attribution, env rollbacks that delete what they added, a template-safe repo
+setting, and Windows support in the setup scripts.
 
 ## 1.0.0 (2026-10-13)
 
