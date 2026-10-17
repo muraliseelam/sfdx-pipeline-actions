@@ -49,6 +49,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Callable
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -96,11 +97,23 @@ def api_optional(path: str) -> dict | list | None:
     raise GhError(f"GET {path}: {proc.stderr.strip()}")
 
 
-def resolve_repo(explicit: str | None, cfg: dict) -> str:
-    repo = explicit or cfg["project"].get("repository") or ""
+def current_gh_repo() -> str:
+    proc = run([tool("gh"), "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def resolve_repo(explicit: str | None, cfg: dict, current: Callable[[], str] = current_gh_repo) -> str:
+    configured = cfg["project"].get("repository") or ""
+    repo = explicit or ""
     if not repo:
-        proc = run([tool("gh"), "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
-        repo = proc.stdout.strip()
+        here = current()
+        # A config copied from a template still names the template's repo; never act on it by accident.
+        if configured and here and configured.lower() != here.lower():
+            raise SetupError(
+                f"project.repository is {configured}, but this clone is {here}. Leave project.repository "
+                "blank in sf-pipeline/pipeline.config.yml (or set it to this repo), or pass --repo OWNER/NAME."
+            )
+        repo = configured or here
     if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
         raise SetupError("can't tell which GitHub repo to use: pass --repo OWNER/NAME or set project.repository")
     return repo

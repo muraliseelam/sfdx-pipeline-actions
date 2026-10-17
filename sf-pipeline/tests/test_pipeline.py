@@ -911,6 +911,21 @@ class DependencyLintAndProfilesTests(unittest.TestCase):
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_repo_comes_from_the_clone_and_a_copied_repo_name_is_refused(self):
+        def cfg(repository: str) -> dict:
+            return pipeline_config.from_dict({"environments": {"dev": {}, "prod": {}},
+                                              "project": {"repository": repository}})
+
+        here = lambda: "acme/salesforce"  # noqa: E731
+        self.assertEqual(bootstrap.resolve_repo(None, cfg(""), here), "acme/salesforce")
+        self.assertEqual(bootstrap.resolve_repo(None, cfg("ACME/Salesforce"), here), "ACME/Salesforce")
+        self.assertEqual(bootstrap.resolve_repo("other/repo", cfg("upstream/template"), here), "other/repo")
+        with self.assertRaises(bootstrap.SetupError) as ctx:
+            bootstrap.resolve_repo(None, cfg("upstream/template"), here)
+        self.assertIn("this clone is acme/salesforce", str(ctx.exception))
+        # Outside a GitHub clone, the configured repo is used as is.
+        self.assertEqual(bootstrap.resolve_repo(None, cfg("upstream/template"), lambda: ""), "upstream/template")
+
     def test_labels_for_five_and_four_stages(self):
         five = bootstrap.wanted_labels(CFG)
         self.assertEqual(

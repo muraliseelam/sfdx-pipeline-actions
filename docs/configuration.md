@@ -75,7 +75,7 @@ In every policy except `none`, a changed class without a resolvable test class f
 |---|---|---|
 | `source_path` | `force-app` | Package directory; must be listed in `sfdx-project.json` |
 | `baseline_branch` | `main` | Production branch. Every delta is computed from `merge-base(origin/main, HEAD)` |
-| `repository` | (current gh repo) | `owner/name`, used by `bootstrap.py` |
+| `repository` | blank: the repo of the clone you run `bootstrap.py` in | `owner/name` for `bootstrap.py`. Leave it blank; if it names another repo than your clone, `bootstrap.py` stops instead of acting on it |
 
 ### `auth`
 | Key | Default | Meaning |

@@ -44,7 +44,7 @@ environments:
   prod: {}
 
 project:
-  repository: muraliseelam/sfdx-pipeline-actions
+  repository: ""             # blank = the GitHub repo of this clone (what `gh repo view` shows)
   source_path: force-app      # must match a packageDirectories path in sfdx-project.json
   baseline_branch: main       # production branch; every delta starts at merge-base(origin/main, HEAD)
 
