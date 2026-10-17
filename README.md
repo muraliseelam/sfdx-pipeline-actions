@@ -44,7 +44,7 @@ feature/* ──PR──▶ dev ──promote:int──▶ int ──promote:qa�
 ## Quick start
 
 ```bash
-pip install -r sf-pipeline/scripts/requirements.txt
+python -m pip install -r sf-pipeline/scripts/requirements.txt          # PyYAML, for the Python you'll use
 python sf-pipeline/scripts/bootstrap.py init --envs dev,int,qa,stage,prod   # your names, in order
 git commit -am "Configure pipeline" && git push
 
@@ -74,6 +74,7 @@ Then open a PR into your first env and add the `approved` label.
 | [How it works](docs/how-it-works.md) | Workflows, checks, approvals, releases, trust model |
 | [Troubleshooting](docs/troubleshooting.md) | Every message and its fix |
 | [Test report](docs/TEST_CHECKLIST.md) | The end-to-end scenarios this pipeline was verified with |
+| [Changelog](CHANGELOG.md) | What changed in the pipeline |
 
 ## License
 

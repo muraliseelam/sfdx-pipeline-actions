@@ -98,6 +98,11 @@ scoped to all your repositories.
 environment (`gh secret set SF_PIPELINE_ADMIN_PAT --env production-validate`), and give
 `SF_PIPELINE_PAT` only *Contents*, *Pull requests* and *Workflows*.
 
+**Whose name is on the merges.** Merges made with the token (squash merges into env branches, the
+release merge into `main`) are authored by the token's owner, with that account's commit email. In a
+public repository, turn on *Keep my email addresses private* in the owner's GitHub email settings,
+so those commits use the `users.noreply.github.com` address instead of a personal one.
+
 ## Checking it all
 
 ```bash

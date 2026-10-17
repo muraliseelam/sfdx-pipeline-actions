@@ -7,7 +7,7 @@ scripts, so it's easy to work on locally.
 
 ```bash
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r sf-pipeline/requirements-dev.txt   # PyYAML, actionlint, shellcheck
+python -m pip install -r sf-pipeline/requirements-dev.txt   # PyYAML, actionlint, shellcheck
 ```
 
 ## Before opening a PR
@@ -18,7 +18,13 @@ python -m unittest discover -s sf-pipeline/tests -v
 python sf-pipeline/scripts/lint.py                # actionlint + shellcheck (incl. composite actions)
 ```
 
-The **Pipeline Self-Test** workflow runs the same three steps on every PR that touches pipeline files.
+The **Pipeline Self-Test** workflow runs the same three steps on every PR that touches pipeline files,
+and on pushes of pipeline files to `main`.
+
+The unit tests run against a fixed five-stage config, `sf-pipeline/tests/fixtures/pipeline.config.yml`
+(they set `SF_PIPELINE_CONFIG` to it), so a team's own environments never break them. Your
+`sf-pipeline/pipeline.config.yml` is only checked for validity. When you add a setting, add it to the
+fixture too if a test needs it.
 
 ## Guidelines
 

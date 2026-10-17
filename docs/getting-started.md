@@ -8,7 +8,12 @@ You'll go from an empty repo to a green PR in about 15 minutes. You need:
   everything with scratch orgs.
 - Locally: [Salesforce CLI](https://developer.salesforce.com/tools/salesforcecli), the
   [GitHub CLI](https://cli.github.com) (`gh auth login`), git, and Python 3.10+ with
-  `pip install -r sf-pipeline/scripts/requirements.txt`.
+  `python -m pip install -r sf-pipeline/scripts/requirements.txt`. Use the same `python` for that
+  install and for the `bootstrap.py` commands below.
+
+> **Windows (PowerShell).** If `npm` stops with *running scripts is disabled on this system*, call
+> its `.cmd` wrapper: `npm.cmd install --global @salesforce/cli`. The setup scripts find `sf.cmd` on
+> their own, and every command below works unchanged.
 
 ## 1. Name your environments
 

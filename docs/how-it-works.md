@@ -50,6 +50,9 @@ additionally needs the release workflow's own `deploy-prod`.
    - **Meta pairs:** every `.cls/.trigger/.page/.component` has its `-meta.xml`, and vice versa.
    - **Cut from main:** the PR carries no commits that exist only on another env branch.
    - **Change detection.**
+
+   When a check fails, the PR comment quotes each problem and its fix, so nobody has to open the run
+   log.
 3. **Validate** logs in, computes the delta and resolves tests:
    - Each changed class/trigger maps to its companion test. A missing test fails fast and nothing is
      sent to the org.
@@ -76,13 +79,16 @@ Each PR gets a **🚀 Salesforce Pipeline Report** comment, which is updated in 
 
 Validation failures that the CLI reports as a bare error (only a job ID) are expanded with
 `sf project deploy report`, so the details always appear. A separate **🔍 Code Analysis** comment
-lists the findings.
+lists the findings. After the merge, the deploy's own report is added to the same PR, so one page
+shows what was validated and what reached the org.
 
 ### SF PR Approval, on labels, reviews and pushes
 - Posts `sf-approval` for open PRs into env branches.
 - New commits remove the `approved` label (`dismiss_label_on_push`).
 - Once a non-production PR is approved, it enables **auto-merge (squash)** with the pipeline token, so
   the PR merges itself as soon as validation is green. The merge's push then triggers the deploy.
+  When two approved PRs merge into the same branch at once, GitHub refuses the second ("Base branch
+  was modified"); the pipeline retries it.
 
 ### SF Env Deploy, on merge into a non-production env branch
 - **Approval guard:** the PR behind the commit must be approved (label or reviews).
@@ -99,6 +105,8 @@ lists the findings.
 - Opens `promote/<env>/pr-<n>`: the exact merged content plus an empty commit, so every promotion PR
   has its own head and statuses. The PR is opened with the pipeline token, so its validation runs.
 - Re-running is safe: an open promotion PR, and any conflict resolution on it, is left untouched.
+- A label that can't be applied (out of order, production, an unknown env) is removed, with a PR
+  comment that says why.
 
 ### SF Prod Release, two phases
 1. **Prepare** (run from `main`):
@@ -114,7 +122,7 @@ lists the findings.
    - Quick-deploys the validated job. It falls back to a full deploy only when Salesforce refuses the
      quick deploy.
    - Then sets `deploy-prod` green, merges the PR with a merge commit, tags, publishes a GitHub
-     Release, syncs the env branches, and sends a Webex notification.
+     Release, syncs the env branches, and sends the chat notification.
 
 Every step can be resumed. If a run stops after production was deployed, the next run finishes the
 merge and tag **without deploying again**.
@@ -136,12 +144,19 @@ rollback is validated, approved, deployed and audited.
 - `target: production`: the change is already in `main`. The revert is cut from `main` and enters
   at the first env, then is promoted and released.
 - `target: <env>`: an unreleased change on that env branch is reverted there.
+- The revert commit carries the name of whoever ran the rollback.
 
 ### Deploy safety nets (inside every validation and deploy)
 - **Dependency lint:** deleting a component that other source still references (a class, field,
   picklist value…) fails before anything reaches the org.
 - **Profiles / permission sets:** `deploy.profiles_mode: incremental` deploys only the permission
   entries added or changed since the production baseline.
+- **Deletions already done:** deleting a component the target org doesn't have would fail with
+  "No ApexClass named X found". That happens when env orgs lag behind each other, a component was
+  removed by hand, or a validated release was already applied. The pipeline checks each deleted
+  member against the org (`sf org list metadata`), skips the ones that are already gone, and lists
+  them in the report. Folder-based types (reports, dashboards, documents, email templates) are always
+  sent as they are.
 - **Admin bypass:** the `bypass-quality-gates` label, added by an admin or maintainer, waives only
   the coverage and code-analysis gates.
 
