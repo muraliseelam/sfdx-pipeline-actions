@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Drop deletions the target org no longer has from destructiveChanges.xml.
+"""Finish destructiveChanges.xml against the target org before a deploy.
+
+With --merge-from, deletions from a second destructiveChanges.xml are added
+first. The deploy action uses it for changes built on top of an environment
+branch (a merge, or a rollback cut from that branch): what the change removed
+from the branch is deleted from the org too, even when it never reached main.
+
+Then every deletion the org no longer has is dropped.
 
 Deleting a component that isn't in the org fails a deploy with "No ApexClass
 named: X found" (a warning, which fails unless --ignore-warnings). That is
@@ -13,7 +20,7 @@ need a folder to list), keeps all its members: only deletions proven to be
 absent are dropped.
 
 Usage
-  destructive_prune.py --destructive FILE --org ALIAS [--notes FILE]
+  destructive_prune.py --destructive FILE --org ALIAS [--merge-from FILE] [--notes FILE]
 Exit 0; prints how many members were dropped. The file is rewritten in place.
 """
 from __future__ import annotations
@@ -78,6 +85,23 @@ def write_package(path: Path, types: dict[str, list[str]], version: str | None) 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def merge(path: Path, extra: Path) -> list[tuple[str, str]]:
+    """Add the members of `extra` to `path` (created if missing); return the (type, member) pairs added."""
+    extra_types, extra_version = read_package(extra)
+    types, version = read_package(path) if path.is_file() else ({}, None)
+    added: list[tuple[str, str]] = []
+    for md_type, members in extra_types.items():
+        have = types.setdefault(md_type, [])
+        for m in members:
+            if m not in have:
+                have.append(m)
+                added.append((md_type, m))
+    if added or not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_package(path, {t: ms for t, ms in types.items() if ms}, version or extra_version)
+    return added
+
+
 def prune(path: Path, list_members: Lister) -> list[tuple[str, str]]:
     """Rewrite `path` without members the org doesn't have; return the dropped (type, member) pairs."""
     types, version = read_package(path)
@@ -104,10 +128,20 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--destructive", required=True)
     ap.add_argument("--org", required=True)
-    ap.add_argument("--notes", help="append a Markdown note about dropped deletions here")
+    ap.add_argument("--merge-from", help="another destructiveChanges.xml whose deletions are added first")
+    ap.add_argument("--notes", help="append a Markdown note about added and dropped deletions here")
     args = ap.parse_args(argv)
 
     path = Path(args.destructive)
+    if args.merge_from and Path(args.merge_from).is_file():
+        added = merge(path, Path(args.merge_from))
+        for md_type, member in added:
+            print(f"::notice title=Also deleted::{md_type} {member} was removed by this change; deleting it from {args.org}")
+        if added and args.notes:
+            with open(args.notes, "a", encoding="utf-8") as fh:
+                fh.write("### Also deleted (removed by this change from the environment branch)\n\n")
+                fh.writelines(f"- **{t}**: `{m}`\n" for t, m in added)
+                fh.write("\n")
     if not path.is_file():
         return 0
     dropped = prune(path, sf_lister(args.org))

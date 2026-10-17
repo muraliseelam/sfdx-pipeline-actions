@@ -856,6 +856,18 @@ class DependencyLintAndProfilesTests(unittest.TestCase):
             self.assertNotIn("<members>Here</members>", path.read_text(encoding="utf-8"))
             self.assertIn("<members>Folder/R</members>", path.read_text(encoding="utf-8"))
 
+    def test_deletions_from_the_env_branch_are_merged_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            extra = package_xml(Path(tmp) / "since.xml", {"ApexClass": ["Gamma", "GammaTest"]})
+            target = package_xml(Path(tmp) / "destructiveChanges.xml", {"ApexClass": ["Gamma"], "CustomLabel": ["L"]})
+            self.assertEqual(destructive_prune.merge(target, extra), [("ApexClass", "GammaTest")])
+            types, version = destructive_prune.read_package(target)
+            self.assertEqual(types, {"ApexClass": ["Gamma", "GammaTest"], "CustomLabel": ["L"]})
+            self.assertEqual(version, "64.0")
+            missing = Path(tmp) / "new" / "destructiveChanges.xml"  # sgd wrote no destructive file
+            self.assertEqual(len(destructive_prune.merge(missing, extra)), 2)
+            self.assertEqual(destructive_prune.read_package(missing)[0], {"ApexClass": ["Gamma", "GammaTest"]})
+
     def test_nothing_left_to_delete_writes_an_empty_package(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = package_xml(Path(tmp) / "destructiveChanges.xml", {"ApexClass": ["Gone"]})

@@ -10,9 +10,9 @@ name: SF Rollback
 #   target = <env>: revert a change that is only in that environment branch (not
 #     released yet). The PR goes straight into that branch.
 #
-# Note: a revert removes metadata from the branch. Components the reverted change
-# ADDED are deleted from orgs only when the revert reaches production (the release
-# delta then contains the deletion); cumulative env deploys don't delete them.
+# Components the reverted change ADDED are deleted from each org the revert is
+# deployed to: the deploy also deletes what a change removed from the env branch
+# it was built on, and production gets the deletion from the release delta.
 
 on:
   workflow_dispatch:

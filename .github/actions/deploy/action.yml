@@ -116,6 +116,10 @@ runs:
         DELTA_FROM: ${{ inputs.delta-from }}
         DELTA_TO: ${{ inputs.delta-to }}
         ORG_ALIAS: ${{ fromJSON(steps.cfg.outputs.json).org_alias }}
+        # The env branch's previous head: a merge's push, or the base of a PR into an env branch.
+        SINCE: >-
+          ${{ inputs.mode != 'quick' && (github.event_name == 'push' && github.event.before ||
+              github.event_name == 'pull_request' && github.event.pull_request.base.sha) || '' }}
         WORK: ${{ steps.prep.outputs.work }}
       run: |
         set -euo pipefail
@@ -149,11 +153,29 @@ runs:
 
         pkg="$OUT_DIR/package/package.xml"
         destructive="$OUT_DIR/destructiveChanges/destructiveChanges.xml"
+        # A change built on top of the env branch (a merge, or a rollback cut from it) also
+        # deletes what it removed from that branch, even if it never reached the baseline.
+        # Changes cut from the baseline don't have the env head as an ancestor, so this
+        # never deletes other work that's only on the env branch.
+        extra=""
+        if [ -n "$SINCE" ] && since="$(git rev-parse --verify --quiet "${SINCE}^{commit}")" \
+            && [ "$since" != "$from_sha" ] && git merge-base --is-ancestor "$since" "$to_sha"; then
+          if sf sgd source delta --from "$since" --to "$to_sha" --source-dir "$SOURCE_PATH" \
+                --output-dir "$WORK/since" --ignore-whitespace --json > "$WORK/sgd-since.json"; then
+            extra="$WORK/since/destructiveChanges/destructiveChanges.xml"
+            [ -f "$extra" ] && grep -q "<types>" "$extra" || extra=""
+          else
+            echo "::warning title=sfdx-git-delta::Couldn't list what ${since:0:7}..${to_sha:0:7} removed; only deletions relative to ${BASELINE} are deployed"
+          fi
+        fi
+
         # Deleting something the org doesn't have fails the deploy ("No ApexClass named X
         # found"); the delete's intent is already met, so drop those members and say so.
-        if [ -f "$destructive" ] && grep -q "<types>" "$destructive"; then
+        if [ -n "$extra" ] || { [ -f "$destructive" ] && grep -q "<types>" "$destructive"; }; then
+          merge=()
+          if [ -n "$extra" ]; then merge=(--merge-from "$extra"); fi
           python "$GITHUB_WORKSPACE/sf-pipeline/scripts/destructive_prune.py" \
-            --destructive "$destructive" --org "$ORG_ALIAS" --notes "$WORK/pruned.md"
+            --destructive "$destructive" --org "$ORG_ALIAS" --notes "$WORK/pruned.md" "${merge[@]}"
         fi
         has_pkg=false
         has_destructive=false

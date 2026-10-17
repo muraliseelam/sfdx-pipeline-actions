@@ -143,7 +143,8 @@ Reverts a merged PR or commit as a **new PR** that flows through the pipeline li
 rollback is validated, approved, deployed and audited.
 - `target: production`: the change is already in `main`. The revert is cut from `main` and enters
   at the first env, then is promoted and released.
-- `target: <env>`: an unreleased change on that env branch is reverted there.
+- `target: <env>`: an unreleased change on that env branch is reverted there, and what it added is
+  deleted from that env's org.
 - The revert commit carries the name of whoever ran the rollback.
 
 ### Deploy safety nets (inside every validation and deploy)
@@ -157,6 +158,14 @@ rollback is validated, approved, deployed and audited.
   member against the org (`sf org list metadata`), skips the ones that are already gone, and lists
   them in the report. Folder-based types (reports, dashboards, documents, email templates) are always
   sent as they are.
+- **Deletions on an env branch:** deltas start at `main`, so a component that was added and then
+  removed on an env branch, without ever reaching `main` (an env rollback, for example), isn't a
+  deletion relative to `main`. When a change is built on top of the env branch (the merge itself, or
+  a rollback PR cut from that branch), the deploy also deletes what the change removed since the
+  branch's previous head. Changes cut from `main` never have that head as an ancestor, so this can't
+  delete other work that's only on the env branch. One limit: when three merges land in an env
+  within one deploy, GitHub replaces the middle deploy, and a removal made only by that middle merge
+  stays in the org.
 - **Admin bypass:** the `bypass-quality-gates` label, added by an admin or maintainer, waives only
   the coverage and code-analysis gates.
 
