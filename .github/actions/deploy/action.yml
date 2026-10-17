@@ -160,11 +160,13 @@ runs:
         extra=""
         if [ -n "$SINCE" ] && since="$(git rev-parse --verify --quiet "${SINCE}^{commit}")" \
             && [ "$since" != "$from_sha" ] && git merge-base --is-ancestor "$since" "$to_sha"; then
+          mkdir -p "$WORK/since"   # sgd needs an existing output dir
           if sf sgd source delta --from "$since" --to "$to_sha" --source-dir "$SOURCE_PATH" \
                 --output-dir "$WORK/since" --ignore-whitespace --json > "$WORK/sgd-since.json"; then
             extra="$WORK/since/destructiveChanges/destructiveChanges.xml"
             [ -f "$extra" ] && grep -q "<types>" "$extra" || extra=""
           else
+            cat "$WORK/sgd-since.json" || true
             echo "::warning title=sfdx-git-delta::Couldn't list what ${since:0:7}..${to_sha:0:7} removed; only deletions relative to ${BASELINE} are deployed"
           fi
         fi
