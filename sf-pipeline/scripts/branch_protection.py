@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -204,6 +205,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error title=pipeline.config.yml::{exc}")
         return 2
     repo = args.repo or cfg["project"].get("repository", "")
+    if not repo:
+        # Run locally: the repo of the current clone, as bootstrap.py does.
+        gh = shutil.which("gh") or "gh"
+        proc = subprocess.run([gh, "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+                              capture_output=True, text=True, encoding="utf-8")
+        repo = proc.stdout.strip() if proc.returncode == 0 else ""
     if not repo:
         print("::error::--repo, GITHUB_REPOSITORY or project.repository is required")
         return 2
