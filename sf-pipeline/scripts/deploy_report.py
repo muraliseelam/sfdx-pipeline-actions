@@ -250,6 +250,8 @@ def build(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
         gate = f"✅ all changed Apex ≥ {threshold:g}%"
     elif args.mode == "quick":
         gate = "➖ enforced at validation"
+    elif tests_run and not changed:
+        gate = "➖ not evaluated (no changed Apex to gate)"
     else:
         gate = "➖ not evaluated (no Apex tests ran)"
     summary_rows.append(("Coverage gate", gate))

@@ -30,6 +30,7 @@ import bootstrap  # noqa: E402
 import branch_protection  # noqa: E402
 import code_analysis  # noqa: E402
 import deploy_report  # noqa: E402
+import destructive_prune  # noqa: E402
 import gh_helpers  # noqa: E402
 import jira  # noqa: E402
 import pipeline_config  # noqa: E402
@@ -323,6 +324,15 @@ class DeployReportTests(unittest.TestCase):
                 },
             },
         }
+
+    def test_deletion_only_release_says_why_coverage_is_not_gated(self):
+        self.plan.write_text(json.dumps({"test_level": "RunLocalTests", "tests": [], "apex_changed": [],
+                                         "untested": []}), encoding="utf-8")
+        result = self.sf_result(True, 90)
+        result["result"]["details"]["runTestResult"]["codeCoverage"] = []
+        text, _ = self.run_report(result)
+        self.assertIn("3 run, 0 failed", text)
+        self.assertIn("not evaluated (no changed Apex to gate)", text)
 
     def test_success_with_coverage(self):
         text, out = self.run_report(self.sf_result(True, 90))
@@ -809,6 +819,40 @@ class JiraAndAuditTests(unittest.TestCase):
 
 
 class DependencyLintAndProfilesTests(unittest.TestCase):
+    def test_deletions_already_gone_from_the_org_are_dropped(self):
+        listed = {"ApexClass": {"Here"}, "CustomLabel": None}  # None: the org can't list the type
+        calls: list[str] = []
+
+        def lister(md_type: str):
+            calls.append(md_type)
+            return listed.get(md_type)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = package_xml(Path(tmp) / "destructiveChanges.xml", {
+                "ApexClass": ["Gone", "Here"], "CustomLabel": ["L"], "Report": ["Folder/R"],
+                "CustomField": ["A__c.B&amp;C__c"]})
+            listed["CustomField"] = {"A__c.B&C__c"}
+            dropped = destructive_prune.prune(path, lister)
+            self.assertEqual(dropped, [("ApexClass", "Gone")])
+            self.assertNotIn("Report", calls)  # folder types are never listed, so never pruned
+            types, version = destructive_prune.read_package(path)
+            self.assertEqual(types, {"ApexClass": ["Here"], "CustomField": ["A__c.B&C__c"], "CustomLabel": ["L"],
+                                     "Report": ["Folder/R"]})
+            self.assertEqual(version, "64.0")
+
+            listed["ApexClass"] = set()
+            listed["CustomLabel"] = set()
+            listed["Report"] = set()
+            destructive_prune.prune(path, lister)
+            self.assertNotIn("<members>Here</members>", path.read_text(encoding="utf-8"))
+            self.assertIn("<members>Folder/R</members>", path.read_text(encoding="utf-8"))
+
+    def test_nothing_left_to_delete_writes_an_empty_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = package_xml(Path(tmp) / "destructiveChanges.xml", {"ApexClass": ["Gone"]})
+            self.assertEqual(destructive_prune.prune(path, lambda _t: set()), [("ApexClass", "Gone")])
+            self.assertNotIn("<types>", path.read_text(encoding="utf-8"))
+
     def test_deleting_a_referenced_class_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

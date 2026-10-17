@@ -589,7 +589,7 @@ jobs:
           branch: ${{ fromJSON(needs.resolve.outputs.cfg).audit_branch }}
           type: Release
           environment: ${{ needs.resolve.outputs.env }}
-          status: ${{ (steps.quick.outputs.status == 'success' || steps.full.outputs.status == 'success') && 'success' || 'failed' }}
+          status: ${{ (steps.quick.outputs.status == 'success' || steps.full.outputs.status == 'success' || steps.full.outputs.status == 'skipped') && 'success' || 'failed' }}
           sha: ${{ needs.resolve.outputs.sha }}
           pr: ${{ needs.resolve.outputs.pr }}
           job-id: ${{ steps.full.outputs.job-id || steps.quick.outputs.job-id }}

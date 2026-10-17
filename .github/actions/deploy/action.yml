@@ -115,6 +115,7 @@ runs:
         OUT_DIR: ${{ fromJSON(steps.cfg.outputs.json).delta_output_dir }}
         DELTA_FROM: ${{ inputs.delta-from }}
         DELTA_TO: ${{ inputs.delta-to }}
+        ORG_ALIAS: ${{ fromJSON(steps.cfg.outputs.json).org_alias }}
         WORK: ${{ steps.prep.outputs.work }}
       run: |
         set -euo pipefail
@@ -148,6 +149,12 @@ runs:
 
         pkg="$OUT_DIR/package/package.xml"
         destructive="$OUT_DIR/destructiveChanges/destructiveChanges.xml"
+        # Deleting something the org doesn't have fails the deploy ("No ApexClass named X
+        # found"); the delete's intent is already met, so drop those members and say so.
+        if [ -f "$destructive" ] && grep -q "<types>" "$destructive"; then
+          python "$GITHUB_WORKSPACE/sf-pipeline/scripts/destructive_prune.py" \
+            --destructive "$destructive" --org "$ORG_ALIAS" --notes "$WORK/pruned.md"
+        fi
         has_pkg=false
         has_destructive=false
         if [ -f "$pkg" ] && grep -q "<types>" "$pkg"; then has_pkg=true; fi
@@ -341,7 +348,9 @@ runs:
         if [ -d "$WORK/results" ]; then args+=(--coverage-dir "$WORK/results"); fi
         # --annotate puts compile errors and failing test lines on the PR's changed files.
         python "$GITHUB_WORKSPACE/sf-pipeline/scripts/deploy_report.py" "${args[@]}" --quiet --annotate "$SOURCE_PATH"
-        if [ -f "$WORK/profiles.md" ]; then printf '\n%s\n' "$(cat "$WORK/profiles.md")" >> "$WORK/report.md"; fi
+        for extra in pruned profiles; do
+          if [ -f "$WORK/$extra.md" ]; then printf '\n%s\n' "$(cat "$WORK/$extra.md")" >> "$WORK/report.md"; fi
+        done
         cat "$WORK/report.md" >> "$GITHUB_STEP_SUMMARY"
 
     - name: Comment report on PR
