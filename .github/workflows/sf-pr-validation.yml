@@ -169,9 +169,16 @@ jobs:
         env:
           BASELINE: ${{ fromJSON(steps.cfg.outputs.json).baseline_branch }}
           SOURCE_PATH: ${{ fromJSON(steps.cfg.outputs.json).source_path }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           base="$(git merge-base "origin/${BASELINE}" HEAD)"
+          # A PR built on the env branch (e.g. an env rollback) can match the baseline and still
+          # remove metadata from the branch; that removal needs validating too.
+          if git diff --quiet "$base" HEAD -- "$SOURCE_PATH" && git merge-base --is-ancestor "$PR_BASE_SHA" HEAD 2>/dev/null \
+              && ! git diff --quiet "$PR_BASE_SHA" HEAD -- "$SOURCE_PATH"; then
+            base="$PR_BASE_SHA"
+          fi
           if git diff --quiet "$base" HEAD -- "$SOURCE_PATH"; then
             echo "has_sf_changes=false" >> "$GITHUB_OUTPUT"
             echo "No changes under ${SOURCE_PATH} since ${base:0:7}"
