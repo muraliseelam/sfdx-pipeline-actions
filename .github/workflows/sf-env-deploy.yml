@@ -71,6 +71,7 @@ jobs:
           SOURCE_PATH: ${{ fromJSON(steps.cfg.outputs.json).source_path }}
           PUSH_SHA: ${{ github.sha }}
           PUSH_DELETED: ${{ github.event.deleted }}
+          PUSH_BEFORE: ${{ github.event.before }}
           PR_STATE: ${{ github.event.pull_request.state }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -109,6 +110,13 @@ jobs:
                 counts="300 1"
               fi
               read -r total metadata <<<"$counts"
+              # A merge that removes metadata from the branch (e.g. an env rollback) can leave it
+              # identical to the baseline; the deploy still has to delete what was removed.
+              if [ "${metadata:-0}" -eq 0 ] && [ "$EVENT" = push ] && [ -n "$PUSH_BEFORE" ] \
+                  && [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]; then
+                metadata="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${PUSH_BEFORE}...${sha}" \
+                  --jq "[.files[].filename | select(startswith(\"${SOURCE_PATH%/}/\"))] | length" 2>/dev/null)" || metadata=0
+              fi
               if [ "${metadata:-0}" -eq 0 ] && [ "${total:-0}" -lt 300 ]; then
                 run=false; reason="no changes under ${SOURCE_PATH} relative to ${BASELINE}; nothing to deploy"
               fi
