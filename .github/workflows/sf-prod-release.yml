@@ -189,7 +189,8 @@ jobs:
             exit 1
           fi
 
-          existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${RELEASE_BRANCH}" --jq .object.sha 2>/dev/null || true)"
+          # On a 404 gh still prints the error body on stdout, so trust only a successful call.
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${RELEASE_BRANCH}" --jq .object.sha 2>/dev/null)" || existing=""
           open_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$RELEASE_BRANCH" --base "$BASELINE" \
             --state open --json number --jq '.[0].number // empty')"
           if [ -z "$existing" ]; then
