@@ -159,6 +159,8 @@ def keys_for_fixversion(base, email, token, version, extra_jql=""):
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     argv = sys.argv[1:]
     if not argv:
         print(__doc__)

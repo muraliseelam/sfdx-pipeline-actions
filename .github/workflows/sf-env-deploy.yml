@@ -174,7 +174,7 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: write       # append to the audit branch
-      pull-requests: write  # report comment on label deploys
+      pull-requests: write  # deploy report comment on the PR
     environment:
       name: ${{ fromJSON(needs.plan.outputs.cfg).github_environment }}
     # GitHub keeps one pending job per group and a newer one replaces it. Branch
@@ -213,7 +213,8 @@ jobs:
         with:
           environment: ${{ needs.plan.outputs.env }}
           mode: deploy
-          pr-number: ${{ github.event_name == 'pull_request' && needs.plan.outputs.pr || '' }}
+          # Post-merge deploys report on the merged PR too, next to its validation report.
+          pr-number: ${{ needs.plan.outputs.pr }}
           bypass: ${{ needs.plan.outputs.bypass }}
 
       - name: Audit record

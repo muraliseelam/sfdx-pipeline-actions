@@ -92,8 +92,19 @@ jobs:
             echo "::warning title=Auto-merge::${PAT_SECRET} isn't set; merge PR #${PR} manually (squash) once checks pass."
             exit 0
           fi
-          if gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --auto --squash; then
-            echo "Auto-merge (squash) enabled for PR #${PR}"
-          else
-            echo "::warning title=Auto-merge::Couldn't enable auto-merge on PR #${PR}; merge it manually once checks pass."
-          fi
+          # With checks already green, --auto merges at once, and GitHub refuses it with
+          # "Base branch was modified" when another PR merged into the same branch a
+          # moment earlier. Retry a few times before giving up.
+          for attempt in 1 2 3 4 5; do
+            if gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --auto --squash; then
+              echo "Auto-merge (squash) enabled for PR #${PR}"
+              exit 0
+            fi
+            state="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json state --jq .state || echo unknown)"
+            if [ "$state" != "OPEN" ]; then
+              echo "PR #${PR} is ${state}; nothing to merge"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::warning title=Auto-merge::Couldn't enable auto-merge on PR #${PR}; merge it manually once checks pass."

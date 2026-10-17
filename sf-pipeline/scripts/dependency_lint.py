@@ -247,6 +247,8 @@ def check_picklist_values(pkg_xml, source_root, baseline):
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=".sgd", help="sfdx-git-delta output dir")
     ap.add_argument("--source-root", required=True)

@@ -33,7 +33,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:
+    sys.exit(
+        f"PyYAML is not installed for this Python ({sys.executable}). Install it with:\n"
+        f'  "{sys.executable}" -m pip install --user pyyaml\n'
+        "then run the same command again with this same Python."
+    )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = SCRIPT_DIR.parent / "pipeline.config.yml"

@@ -36,6 +36,9 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write  # explain a rejected promotion label on the PR
     outputs:
       cfg: ${{ steps.cfg.outputs.json }}
       targets: ${{ steps.targets.outputs.targets }}
@@ -96,6 +99,21 @@ jobs:
           else args+=(--labels "$ALL_LABELS")
           fi
           python sf-pipeline/scripts/pipeline_config.py promote-plan "${args[@]}" --github-output --fail-on-error
+
+      # Whoever added the label sees why on the PR, not only in the Actions log.
+      - name: Explain a rejected promotion label
+        if: failure() && steps.targets.outcome == 'failure' && github.event.action == 'labeled'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.pr.outputs.number }}
+          LABEL: ${{ github.event.label.name }}
+          ERRORS: ${{ steps.targets.outputs.errors }}
+        run: |
+          reasons="$(jq -r '.[] | "- " + .' <<<"${ERRORS:-[]}" 2>/dev/null || true)"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "⛔ \`${LABEL}\` was not applied, so the label has been removed:
+
+          ${reasons:-- see the SF Promote run for details}" || true
+          python3 sf-pipeline/scripts/gh_helpers.py remove-label --pr "$PR" --label "$LABEL" || true
 
   promote:
     name: Promote to ${{ matrix.target.env }}
