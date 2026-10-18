@@ -203,6 +203,12 @@ bash /tmp/sfdx-pipeline/sf-pipeline/scripts/init-project.sh --repo OWNER/REPO
 bash /tmp/sfdx-pipeline/sf-pipeline/scripts/init-project.sh --repo OWNER/REPO --apply
 ```
 
+> **New repositories: let Actions open pull requests.** `deploy:<env>` opens the
+> feature→`<env>` PR with the workflow token. GitHub turns that off by default, so
+> without a `PIPELINE_PAT` (Step 9) every promotion stops with *GitHub Actions is not
+> permitted to create or approve pull requests*. Turn on **Settings → Actions → General →
+> Workflow permissions → Allow GitHub Actions to create and approve pull requests**.
+
 ---
 
 ### Step 6 — Connect your Salesforce orgs
@@ -258,11 +264,24 @@ REPO=OWNER/REPO ENFORCE_ADMINS=true bash .../setup-branch-protection.sh
 
 | Branch | What it gets |
 |---|---|
-| Entry | PR-only, required approval, required `validate` check, no force-push |
-| Later stages + prod | No force-push, no deletion, required `deploy-<env>` status |
+| Entry | PR-only, required approval, required `pr-validation` status, no force-push |
+| Later stages + prod | No force-push, no deletion |
 
 `ENFORCE_ADMINS` defaults to **false** so a solo admin keeps an escape hatch —
 GitHub will not let you approve your own PR.
+
+**Working alone?** That also means the entry branch's required review can never be
+met, and the pipeline's merge after a successful deploy is refused. Approve with the
+`approved` label instead and drop the review requirement:
+
+```bash
+REPO=OWNER/REPO REQUIRED_REVIEWS=0 bash .../setup-branch-protection.sh
+```
+
+**Protection and the post-release sync.** After a release the pipeline force-pushes
+`main` onto every env branch, which protected branches allow only for an admin token.
+Add `PIPELINE_PAT` (Step 9); without it the release still succeeds, but each branch
+warns *Could not realign `<branch>`* and has to be synced by hand.
 
 ---
 
@@ -274,7 +293,7 @@ All of these are **silent no-ops if you skip them**. None can ever fail a deploy
 |---|---|
 | Chat notifications | `CHAT_WEBHOOK_URL` (Slack, Teams or any webhook — the provider is auto-detected) *or* `CHAT_API_URL` + `CHAT_API_TOKEN` + `CHAT_CHANNEL_ID` |
 | Jira story updates | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` |
-| Label-driven promotion across forks | `PIPELINE_PAT` (a PAT with repo write) |
+| Post-release branch sync on protected branches; promotion and rollback PRs that validate without a manual *Approve and run*; promotion across forks | `PIPELINE_PAT` (a PAT with repo **admin**) |
 
 ---
 
@@ -570,6 +589,15 @@ validated, reviewed and audited. Nothing is force-deployed.
 A conflicting revert stops with manual `git revert` instructions rather than
 guessing.
 
+Without a `PIPELINE_PAT` the revert PR is opened by the workflow token, and GitHub
+doesn't start workflows for it on its own: its PR Validation waits as *Action
+required* until a maintainer clicks **Approve and run**.
+
+With `delta_baseline: prod`, reverting a change that never reached production
+removes it from the branch but **not** from the env org: relative to production
+there is nothing to delete. Delete such components in the org by hand, or use
+`delta_baseline: target`.
+
 ### Sync env branches
 
 Merges `main` into every env branch. Normally invoked automatically at the end of
@@ -589,6 +617,18 @@ commit. Get validation passing, then approve again.
 The ordering guard. The commit you are promoting was never really deployed to the
 previous environment. Deploy it there first — a merged PR is not enough, the
 `deploy-<previous-env>` **commit status** must exist for that exact SHA.
+
+### "GitHub Actions is not permitted to create or approve pull requests"
+
+A `deploy:<env>` label couldn't open the feature→`<env>` PR. Turn on **Settings →
+Actions → General → Allow GitHub Actions to create and approve pull requests**, or add
+a `PIPELINE_PAT`, then re-add the label. Nothing was deployed and no branch moved.
+
+### "Could not realign `<branch>` — sync it manually" after a release
+
+The release went out; only the follow-up sync of the env branches failed, because
+branch protection refuses the workflow token's force-push. Add an admin
+`PIPELINE_PAT` and run **Sync Environment Branches**.
 
 ### A promotion failed before deploying, and re-adding the label does nothing
 

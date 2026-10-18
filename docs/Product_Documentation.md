@@ -246,8 +246,8 @@ branch names from the config):
 
 | Branch | Protection |
 |---|---|
-| **entry** (`environments[0].branch`) | PR-only · required approvals · required checks `quality` + `validate` · stale reviews dismissed · conversation resolution · no force-push · no deletion |
-| **downstream + prod** (`qa`, `stage`, `main`) | Guard-rails: no force-push, no deletion, plus the `deploy-<env>` status required before a promotion PR can merge |
+| **entry** (`environments[0].branch`) | PR-only · required approvals · required `pr-validation` status · stale reviews dismissed · conversation resolution · no force-push · no deletion |
+| **downstream + prod** (`qa`, `stage`, `main`) | Guard-rails: no force-push, no deletion. The deploy guard, not branch protection, requires `deploy-<previous env>` before a promotion deploys |
 
 `enforce_admins` defaults to **false** so an admin keeps an escape hatch — GitHub
 forbids approving your own PR, and the post-approval auto-merge still has to
