@@ -43,9 +43,13 @@ jobs:
   revert:
     runs-on: ubuntu-latest
     steps:
+      # PIPELINE_PAT (when set) opens the revert PR as a person, so its PR
+      # Validation starts on its own; GitHub doesn't start workflows for PRs the
+      # workflow token opens (they wait for a maintainer's "Approve and run").
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.PIPELINE_PAT || github.token }}
 
       - name: Resolve config
         id: cfg
@@ -55,7 +59,7 @@ jobs:
 
       - name: Create the revert branch + PR
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PIPELINE_PAT || github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
           REF_IN: ${{ inputs.ref }}
