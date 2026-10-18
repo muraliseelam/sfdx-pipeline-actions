@@ -20,6 +20,15 @@ on:
         required: false
         default: ""
 
+# The release train writes (release branch, merge, tag, GitHub Release, audit
+# log) and reads checks/statuses in preflight. A repo whose default workflow
+# token is read-only can't start the run without these.
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
 jobs:
   prod:
     uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/prod-release.yml@v1
