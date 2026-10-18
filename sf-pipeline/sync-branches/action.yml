@@ -75,10 +75,12 @@ runs:
         for b in $(echo "$ENV_BRANCHES" | python3 -c "import sys,json;print(' '.join(json.load(sys.stdin)))"); do
           [ "$b" = "$BASELINE" ] && continue
           echo "::group::Syncing $b -> ${TIP:0:8}"
-          SNAP="/tmp/prot-$b.json"; HAD_PROT=""
-          if GH_TOKEN="$PUSH_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/branches/$b/protection" >/tmp/prot-raw-$b.json 2>/dev/null; then
+          # Branch names may contain '/' (e.g. env/qa); keep the temp files flat.
+          SAFE="${b//\//__}"
+          RAW="/tmp/prot-raw-$SAFE.json"; SNAP="/tmp/prot-$SAFE.json"; HAD_PROT=""
+          if GH_TOKEN="$PUSH_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/branches/$b/protection" >"$RAW" 2>/dev/null; then
             HAD_PROT="yes"
-            python3 -c "$XFORM" </tmp/prot-raw-$b.json >"$SNAP"
+            python3 -c "$XFORM" <"$RAW" >"$SNAP"
             GH_TOKEN="$PUSH_TOKEN" gh api -X DELETE "repos/${GITHUB_REPOSITORY}/branches/$b/protection" >/dev/null 2>&1 \
               && echo "protection lifted on $b"
           fi
