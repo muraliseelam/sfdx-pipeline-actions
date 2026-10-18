@@ -10,7 +10,9 @@
 #       - Require review from Code Owners (REQUIRE_CODE_OWNER_REVIEWS=true by
 #         default) so any PR touching a path in .github/CODEOWNERS — e.g. the
 #         pipeline config or workflows — needs the platform team's approval
-#       - Required status checks: the PR Validation gates ("quality", "validate")
+#       - Required status check: `pr-validation`, the commit status PR Validation
+#         writes on the PR head (its job check runs are named "validate / <job>",
+#         so they cannot be required by a fixed name)
 #       - Stale reviews dismissed on new commits
 #       - Conversation resolution required
 #       - No force-push, no deletion
@@ -65,7 +67,7 @@ if [ -z "$ENTRY" ]; then
 fi
 
 echo "Repo:        $REPO"
-echo "Entry:       $ENTRY  (PR-only, ${REQUIRED_REVIEWS} review(s), code-owner reviews: ${REQUIRE_CODE_OWNER_REVIEWS}, checks: quality+validate)"
+echo "Entry:       $ENTRY  (PR-only, ${REQUIRED_REVIEWS} review(s), code-owner reviews: ${REQUIRE_CODE_OWNER_REVIEWS}, checks: pr-validation)"
 echo "Downstream:  ${DOWNSTREAM:-<none>}  (guard-rails)"
 echo "Production:  $PROD  (guard-rails)"
 echo "Enforce admins: $ENFORCE_ADMINS"
@@ -76,7 +78,7 @@ apply_entry() {
   local body
   body="$(cat <<JSON
 {
-  "required_status_checks": { "strict": false, "contexts": ["quality", "validate"] },
+  "required_status_checks": { "strict": false, "contexts": ["pr-validation"] },
   "enforce_admins": ${ENFORCE_ADMINS},
   "required_pull_request_reviews": {
     "dismiss_stale_reviews": true,
