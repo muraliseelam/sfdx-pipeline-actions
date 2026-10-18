@@ -101,6 +101,8 @@ jobs:
           BRANCH="rollback/${SHORT}"
           git checkout -B "$BRANCH" "origin/$BASE"
 
+          # MFLAG is empty or "-m 1" and must split into separate words.
+          # shellcheck disable=SC2086
           if ! git revert --no-edit $MFLAG "$SHA"; then
             echo "::error::Revert of $SHA hit conflicts against '$BASE'. Resolve manually:"
             echo "  git checkout -B $BRANCH origin/$BASE && git revert $MFLAG $SHA"
@@ -111,6 +113,8 @@ jobs:
           git push origin "$BRANCH" --force-with-lease
 
           TITLE="Rollback: revert $SRC_DESC"
+          # The backticks are literal Markdown, not command substitution.
+          # shellcheck disable=SC2016
           BODY="$(printf 'Automated rollback (REQ-016). Reverts `%s` (%s) on top of `%s`.\n\nThis revert flows through the standard pipeline: validation -> approval -> real deploy -> merge. Approve to restore the last known-good state.' "$SHA" "$SRC_DESC" "$BASE")"
 
           # The org may block Actions from opening PRs; fall back to a one-click link.
