@@ -1,7 +1,7 @@
 name: "SF Pipeline Release Gather"
 description: >-
   Resolve the set of story branches for a weekly release from the pipeline's own
-  deployment state — NO Jira required. Gathers every OPEN pull request that has
+  deployment state — NO Jira required. Gathers every MERGED pull request that has
   been promoted all the way to the LAST environment in the promotion chain (label
   `deployed:<last env>`) and is targeting the
   production baseline branch, then emits the space-separated list of their head
@@ -23,6 +23,12 @@ inputs:
     default: "hold"
   base:
     description: "Only gather PRs whose base branch is this (the production baseline). Empty = any base."
+    required: false
+    default: ""
+  baseline:
+    description: >-
+      The production baseline branch. A story whose tip is already in it shipped in an
+      earlier release and is skipped. Empty = only skip stories whose branch was deleted.
     required: false
     default: ""
   repo:
@@ -52,6 +58,7 @@ runs:
         LABEL: ${{ inputs.label }}
         EXCLUDE_LABEL: ${{ inputs.exclude_label }}
         BASE: ${{ inputs.base }}
+        BASELINE: ${{ inputs.baseline }}
         REPO: ${{ inputs.repo }}
       run: |
         set -euo pipefail
@@ -64,14 +71,28 @@ runs:
         BASE_ARGS=()
         [ -n "$BASE" ] && BASE_ARGS=(--base "$BASE")
 
-        # One query for every MERGED PR carrying the release label; then locally
-        # drop any that also carry the exclude/hold label. Promotion PRs are
-        # squash-merged into the target env branch once their deploy succeeds, so
-        # the release set is the collection of MERGED PRs carrying $LABEL.
-        # jq keeps branch + number aligned and stable (sorted by PR number).
-        RAW="$(gh pr list --repo "$REPO" --state merged --label "$LABEL" "${BASE_ARGS[@]}" \
-                 --json number,headRefName,labels --limit 200 \
-                 --jq "[.[] | select([.labels[].name] | index(\"$EXCLUDE_LABEL\") | not)] | sort_by(.number)")"
+        # One query for every MERGED PR carrying the release label. Promotion PRs
+        # are squash-merged into the target env branch once their deploy succeeds,
+        # so the release set is the collection of MERGED PRs carrying $LABEL.
+        # The control PR people work on and the env PRs the pipeline opens share
+        # one head branch, so a hold on ANY of them holds the story, and each story
+        # is listed once, under its lowest PR number.
+        HELD="$(gh pr list --repo "$REPO" --state all --label "$EXCLUDE_LABEL" \
+                  --json headRefName --limit 200 --jq '[.[].headRefName] | unique | join(" ")')"
+        ALL="$(gh pr list --repo "$REPO" --state merged --label "$LABEL" "${BASE_ARGS[@]}" \
+                 --json number,headRefName --limit 200)"
+        RAW="$(ALL="$ALL" HELD="$HELD" python3 -c '
+        import json, os, sys
+        held = set(os.environ["HELD"].split())
+        seen, out = set(), []
+        for p in sorted(json.loads(os.environ["ALL"]), key=lambda p: p["number"]):
+            if p["headRefName"] in held:
+                print("  hold #%s -> %s" % (p["number"], p["headRefName"]), file=sys.stderr)
+            elif p["headRefName"] not in seen:
+                seen.add(p["headRefName"])
+                out.append(p)
+        print(json.dumps(out))
+        ')"
 
         STORIES="$(echo "$RAW" | python3 -c 'import sys,json;print(" ".join(p["headRefName"] for p in json.load(sys.stdin)))')"
         KEYS="$(echo "$RAW"    | python3 -c 'import sys,json;print(" ".join(str(p["number"]) for p in json.load(sys.stdin)))')"
@@ -94,11 +115,15 @@ runs:
         # survivors; only fail if nothing live remains.
         git fetch origin --prune --quiet || true
         LIVE=""
+        [ -n "$BASELINE" ] && git fetch origin "+refs/heads/$BASELINE:refs/remotes/origin/$BASELINE" --quiet || true
         for s in $STORIES; do
-          if git ls-remote --exit-code --heads origin "$s" >/dev/null 2>&1; then
-            LIVE="$LIVE $s"
-          else
+          if ! git ls-remote --exit-code --heads origin "$s" >/dev/null 2>&1; then
             echo "::notice::Skipping '$s' — its branch no longer exists on origin (already released / cleaned up)."
+          elif [ -n "$BASELINE" ] && git fetch origin "+refs/heads/$s:refs/remotes/origin/$s" --quiet \
+               && git merge-base --is-ancestor "origin/$s" "origin/$BASELINE" 2>/dev/null; then
+            echo "::notice::Skipping '$s' — it is already in '$BASELINE' (shipped in an earlier release)."
+          else
+            LIVE="$LIVE $s"
           fi
         done
         LIVE="$(echo "$LIVE" | xargs || true)"

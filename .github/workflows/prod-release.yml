@@ -95,6 +95,7 @@ jobs:
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/release-gather@main
         with:
           label: ${{ needs.plan.outputs.release_label }}
+          baseline: ${{ needs.plan.outputs.prod_branch }}
           github_token: ${{ github.token }}
       - name: Build release branch + merge stories
         env:
