@@ -7,7 +7,8 @@
 #
 #   1. every environment branch + the production branch
 #   2. every label the pipeline reads or writes
-#      (approved, hold, <bypass_label>, deploy:<env>, deployed:<env>)
+#      (approved, hold, <bypass_label>, deploy:<env>, deployed:<env>, and
+#      prod-approved when the config has a production block)
 #   3. every GitHub Environment named in the config
 #
 # It is IDEMPOTENT and ADDITIVE: it never deletes a branch, label, environment
@@ -91,6 +92,10 @@ for v in (prod.get("deploy_environment"), prod.get("validate_environment")):
 labels = ["approved", "hold", str(cfg.get("bypass_label") or "bypass-quality-gates")]
 for n in names:
     labels += [f"deploy:{n}", f"deployed:{n}"]
+if prod_branch:
+    # Release preflight accepts this label as authorization (a solo maintainer
+    # can't approve their own release PR), so it has to exist before Part 3.
+    labels.append("prod-approved")
 
 all_branches = list(dict.fromkeys(branches + ([prod_branch] if prod_branch else [])))
 # The baseline is what every other branch is cut FROM, so it must already exist.
@@ -156,7 +161,7 @@ colour_for() {
   case "$1" in
     deploy:*)   printf '1d76db' ;;   # blue  — an action you take
     deployed:*) printf '0e8a16' ;;   # green — a state the pipeline stamped
-    approved)   printf '0e8a16' ;;
+    approved|prod-approved) printf '0e8a16' ;;
     hold)       printf 'd93f0b' ;;   # red   — holds a change back
     *)          printf 'fbca04' ;;   # amber — bypass / other
   esac
@@ -166,6 +171,7 @@ desc_for() {
     deploy:*)   printf 'Promote this change to %s' "${1#deploy:}" ;;
     deployed:*) printf 'Deployed to %s by the pipeline' "${1#deployed:}" ;;
     approved)   printf 'Approve this PR for deployment' ;;
+    prod-approved) printf 'Authorize this release PR for production' ;;
     hold)       printf 'Hold this change back from the next release' ;;
     *)          printf 'Bypass the quality gates (admins only)' ;;
   esac
