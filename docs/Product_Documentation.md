@@ -758,7 +758,14 @@ entirely.
 An admin can add `bypass_label` to skip the gates. The bypass is honoured **only
 if the person who added the label has admin/maintain permission on the repo**,
 re-verified at run time by the `bypass` action — the label alone is not authority.
-An active bypass also causes the entry-stage validation guard to be skipped.
+An active bypass also causes the entry-stage validation guard to be skipped. The
+bypass is read from the PR being deployed, so it applies to the entry deploy only:
+promotions open their own env PRs and always run the gate.
+
+**Where the gate sits.** In PR validation the gate judges a check-only deploy. In a
+real deploy (the approval deploy and every promotion) it runs after Salesforce has
+accepted the deploy, so a change between Salesforce's 75% and `coverage_threshold`
+is already in that org when the gate fails the job and the env PR stays unmerged.
 
 ---
 
@@ -903,9 +910,9 @@ Step-by-step onboarding instructions live in
 | Scope | Group | Effect |
 |---|---|---|
 | PR validation | `pr-validation-<pr>` | A new push supersedes the in-flight validation |
-| Deploy | per environment | Serialises deploys into the same org |
+| Deploy | `approval-deploy-<pr>` | A re-approval can't deploy the same PR twice. Different PRs may deploy into one org at the same time; Salesforce queues them inside the org, and a per-org group would let GitHub cancel a queued deploy |
 | Promotion | per PR + env | Prevents a double promotion from a re-added label |
-| Release | per release branch | One train at a time |
+| Release | `prod-release` | One train at a time, across all release branches |
 
 > ⚠️ **Caller gotcha.** A caller must **not** declare a concurrency group equal to
 > the reusable workflow's own (e.g. `pr-validation-<pr>`). It cancels itself and
@@ -991,6 +998,34 @@ Fixed in **v1.1.0**: notification is now never fatal. Every failure path emits a
 GitHub `::warning` and exits 0 — `401`/`403`, `404`, any other non-2xx, network
 errors and timeouts (capped at 30s) — and the previously unchecked webhook path
 is handled too. Re-running the identical release then passed.
+
+### Third verified run — a new project on new orgs (2026-10-17/18)
+
+`sfdx-pipeline-example` was rebuilt from scratch by following the User Guide, Part 1,
+against four **new** scratch orgs (`int → qa → stage → prod`), then driven through every
+stage, every runbook and four releases.
+
+| Area | Result |
+|---|---|
+| Org onboarding (`bootstrap-org.sh`) | New orgs refuse Connected Apps; the kit now falls back to an External Client App. JWT logins verified on all four orgs |
+| Project Init | Dry run, then apply: branches, labels and environments created |
+| PR validation | Field-only (coverage skipped), Apex at 100%, Apex at 81.8% (gate failed), admin bypass honoured |
+| Approve guard | `approved` added before validation was green: removed with an explanation |
+| Approval deploy | Deploy → merge → `deployed:int` (after the branch-protection fix below) |
+| Promotion | `deploy:qa`, `deploy:stage` on the control PR; ordering guard refused `stage` before `qa` |
+| Release train | 2026.42 (field), 2026.43 (Apex), 2026.45 (deletions, RunLocalTests), 2026.46, 2026.47 (a rollback) — reviewer gate, quick deploy, tag, Release, branch sync |
+| Hold | A hold on the control PR holds the whole story; shipped stories are skipped |
+| Runbooks | Redeploy (dry run), Recreate (with and without `confirm_reset`), Rollback of a released change through production, Sync Env Branches |
+| `delta_baseline: target` | An env-only rollback deletes the change from the env org |
+
+Fixed as a result: the entry branch required checks that never report (`quality`,
+`validate`); the example Prod Release caller lacked permissions (`startup_failure` on
+read-only token defaults); Project Init didn't create `prod-approved`; release-gather
+listed stories twice, ignored a hold on the control PR and re-gathered shipped
+stories; Sync Env Branches and Ops Rollback didn't use `PIPELINE_PAT`. Documented:
+allowing Actions to open PRs on new repositories, `REQUIRED_REVIEWS=0` for a solo
+maintainer, what `PIPELINE_PAT` is needed for, the coverage gate's position in real
+deploys, and env-only rollbacks under `delta_baseline: prod`.
 
 ---
 
@@ -1193,9 +1228,8 @@ issues; no code defect is implied.
    tag are published, each with its internal refs correctly rewritten, and
    `sfdx-pipeline-example` has been migrated to `@v1` on all four branches through a
    full production release. See [§24](#24-versioning-and-distribution).
-2. **Promotion retry asymmetry** — when a promotion fails *before* deploying, the
-   `deploy:<env>` label is left in place, so re-adding it is a no-op. The
-   merge-conflict path removes it. Align the two. *(Queued for v1.1.)*
+2. ~~**Promotion retry asymmetry**~~ — **done.** Every failure path now removes the
+   `deploy:<env>` label, so re-adding it retries (verified in the third run, §23).
 3. **Runner cost and concurrency at enterprise scale** — research-shaped, and now
    the live question as more projects onboard.
 4. **End-to-end onboarding of a brand-new project** via `org-bootstrap` — now

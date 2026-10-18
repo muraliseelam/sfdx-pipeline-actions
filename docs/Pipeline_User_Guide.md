@@ -630,19 +630,20 @@ The release went out; only the follow-up sync of the env branches failed, becaus
 branch protection refuses the workflow token's force-push. Add an admin
 `PIPELINE_PAT` and run **Sync Environment Branches**.
 
-### A promotion failed before deploying, and re-adding the label does nothing
+### A promotion failed — how do I retry it?
 
-If the promotion failed while **creating** the env PR (e.g. a transient GitHub
-API error), the `deploy:<env>` label is left in place — so re-adding it is a
-no-op. **Remove the label, then add it again** to retrigger:
+Every failed promotion removes its `deploy:<env>` label and comments the reason on
+the control PR, so fix the cause and **add the label again**. A failure before the
+deploy (e.g. the env PR couldn't be created) deployed nothing and moved no branch.
 
-```bash
-gh pr edit <pr> --remove-label deploy:stage
-gh pr edit <pr> --add-label deploy:stage
-```
+### A promotion failed on the coverage gate
 
-Nothing was deployed and no branch moved, so this is always safe. The
-merge-conflict path *does* remove the label, so there you can simply re-add it.
+On a real deploy the coverage gate is checked **after** Salesforce has accepted the
+deploy (Salesforce only requires 75% per class). A change below `coverage_threshold`
+therefore reaches that org, but its env PR is not merged, so the org and the branch
+disagree. Raise the coverage and re-add the label, or remove the change from the org
+by hand. An admin bypass on the control PR does **not** carry into promotions; stages
+with `test_level: NoTestRun` skip the gate.
 
 ### Preflight says the release PR "is not authorized"
 
