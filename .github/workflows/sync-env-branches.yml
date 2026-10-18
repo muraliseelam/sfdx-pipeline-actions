@@ -38,10 +38,14 @@ jobs:
       matrix:
         branch: ${{ fromJSON(needs.plan.outputs.branches) }}
     steps:
+      # PIPELINE_PAT (when set) pushes and opens PRs as a person: an admin token can
+      # update a protected env branch directly, and a PR it opens starts its own
+      # checks. The workflow token can do neither.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ needs.plan.outputs.prod_branch }}
+          token: ${{ secrets.PIPELINE_PAT || github.token }}
 
       - name: Configure git
         run: |
@@ -50,7 +54,7 @@ jobs:
 
       - name: Merge ${{ needs.plan.outputs.prod_branch }} into ${{ matrix.branch }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PIPELINE_PAT || github.token }}
           PROD_BRANCH: ${{ needs.plan.outputs.prod_branch }}
         run: |
           BR="${{ matrix.branch }}"
