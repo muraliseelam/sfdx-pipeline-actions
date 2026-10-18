@@ -1027,6 +1027,24 @@ allowing Actions to open PRs on new repositories, `REQUIRED_REVIEWS=0` for a sol
 maintainer, what `PIPELINE_PAT` is needed for, the coverage gate's position in real
 deploys, and env-only rollbacks under `delta_baseline: prod`.
 
+Also fixed during the run: Sync Env Branches, Ops Rollback and the post-release sync
+now work with `PIPELINE_PAT` on protected branches, including branch names that
+contain `/` (verified with a renamed chain `mon → tue → wed` on `env/monday`,
+`env/tuesday`, `env/wednesday`, whose GitHub Environments kept the names `int`, `qa`,
+`stage`).
+
+**Open questions from the run** (behaviour unchanged, decisions pending):
+
+1. A release with no Apex skips the production check-only validation ("nothing to
+   test"), so the reviewer approves an unvalidated deploy, and the deploy job runs a
+   full deploy instead of a quick deploy. A `NoTestRun` check-only deploy would still
+   catch broken or missing metadata before the approval.
+2. The quick deploy has no fallback: if Salesforce refuses the validated job (e.g. it
+   is older than 10 days), the release stops before merge and tag, and a re-run
+   validates again. Safe, but manual.
+3. The coverage gate in real deploys runs after the deploy (see §15), and an admin
+   bypass doesn't carry into promotions.
+
 ---
 
 ## 24. Versioning and distribution
