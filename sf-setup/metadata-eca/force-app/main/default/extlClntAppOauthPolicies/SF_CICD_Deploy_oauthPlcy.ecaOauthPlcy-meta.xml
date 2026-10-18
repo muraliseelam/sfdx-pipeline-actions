@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  "Admin approved users are pre-authorized" for users on __PROFILE__ (the
+  integration user's profile), and no IP restriction, so JWT logins from
+  GitHub-hosted runners work.
+-->
+<ExtlClntAppOauthConfigurablePolicies xmlns="http://soap.sforce.com/2006/04/metadata">
+    <commaSeparatedProfile>__PROFILE__</commaSeparatedProfile>
+    <externalClientApplication>SF_CICD_Deploy</externalClientApplication>
+    <ipRelaxationPolicyType>Bypass</ipRelaxationPolicyType>
+    <label>SF CICD Deploy OAuth Policies</label>
+    <permittedUsersPolicyType>AdminApprovedPreAuthorized</permittedUsersPolicyType>
+</ExtlClntAppOauthConfigurablePolicies>

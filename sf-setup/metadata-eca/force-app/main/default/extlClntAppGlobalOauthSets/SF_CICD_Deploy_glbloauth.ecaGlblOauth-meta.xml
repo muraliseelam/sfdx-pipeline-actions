@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExtlClntAppGlobalOauthSettings xmlns="http://soap.sforce.com/2006/04/metadata">
+    <callbackUrl>http://localhost:1717/OauthRedirect</callbackUrl>
+    <certificate>__CERT_CONTENT__</certificate>
+    <consumerKey>__CONSUMER_KEY__</consumerKey>
+    <externalClientApplication>SF_CICD_Deploy</externalClientApplication>
+    <isConsumerSecretOptional>true</isConsumerSecretOptional>
+    <isPkceRequired>false</isPkceRequired>
+    <isSecretRequiredForRefreshToken>false</isSecretRequiredForRefreshToken>
+    <label>SF CICD Deploy Global OAuth</label>
+</ExtlClntAppGlobalOauthSettings>

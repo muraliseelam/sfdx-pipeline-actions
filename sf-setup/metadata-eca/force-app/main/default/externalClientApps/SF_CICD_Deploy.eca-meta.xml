@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SF_CICD_Deploy as an External Client App — the fallback bootstrap-org.sh uses
+  when the org refuses to create a Connected App ("You can't create a connected
+  app"), which is the default for orgs created since Spring '26. The pipeline's
+  JWT bearer login works the same way with either app; only the setup differs.
+
+  The four files under this folder are one app. bootstrap-org.sh fills in
+  __CONTACT_EMAIL__, __CERT_CONTENT__, __CONSUMER_KEY__ (generated, then written
+  to SF_CONSUMER_KEY) and __PROFILE__ (pre-authorized for JWT) before deploy.
+-->
+<ExternalClientApplication xmlns="http://soap.sforce.com/2006/04/metadata">
+    <contactEmail>__CONTACT_EMAIL__</contactEmail>
+    <description>Salesforce CI/CD pipeline login (OAuth 2.0 JWT bearer flow)</description>
+    <distributionState>Local</distributionState>
+    <isProtected>false</isProtected>
+    <label>SF CICD Deploy</label>
+</ExternalClientApplication>

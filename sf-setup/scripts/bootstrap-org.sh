@@ -7,8 +7,12 @@
 #   2. Authenticates to the org as an admin (one-time interactive web login, or
 #      a pre-supplied SFDX auth URL / already-authenticated alias for CI).
 #   3. Deploys the SF_CICD_Deploy Connected App (cert injected) + permission set
-#      — no manual "New Connected App" or certificate upload.
-#   4. Reads back the org-generated Consumer Key automatically.
+#      — no manual "New Connected App" or certificate upload. Orgs that refuse
+#      new Connected Apps (the default since Spring '26) get the same app as an
+#      External Client App instead (metadata-eca/), which JWT logs in through
+#      the same way.
+#   4. Reads back the org-generated Consumer Key automatically (an External
+#      Client App gets a generated key, kept in --key-dir for re-runs).
 #   5. Creates the integration user + assigns the permission set (idempotent).
 #   6. Writes SF_CONSUMER_KEY / SF_USERNAME / SF_INSTANCE_URL / SF_JWT_KEY into
 #      the matching GitHub Environment.
@@ -25,7 +29,7 @@
 #     --repo your-org/sfdx-pipeline-example --env int \
 #     --int-username cicd@acme.com.int --contact-email devops@acme.com \
 #     [--login web|jwt|skip] [--profile "System Administrator"] \
-#     [--key-dir .secrets] [--no-secrets]
+#     [--app-type auto|connected|external] [--key-dir .secrets] [--no-secrets]
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETUP_ROOT="$(cd "$HERE/.." && pwd)"
@@ -33,7 +37,7 @@ SETUP_ROOT="$(cd "$HERE/.." && pwd)"
 ORG_ALIAS=""; INSTANCE_URL="https://login.salesforce.com"; REPO=""; ENVN=""
 INT_USERNAME=""; CONTACT_EMAIL="devops@example.com"; LOGIN="web"
 PROFILE="System Administrator"; PERMSET="SF_CICD_Deploy"; KEY_DIR=".secrets"
-PUSH_SECRETS=1
+PUSH_SECRETS=1; APP_TYPE="auto"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     --profile)       PROFILE="$2";       shift 2 ;;
     --permset)       PERMSET="$2";       shift 2 ;;
     --key-dir)       KEY_DIR="$2";       shift 2 ;;
+    --app-type)      APP_TYPE="$2";      shift 2 ;;
     --no-secrets)    PUSH_SECRETS=0;     shift 1 ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
@@ -54,6 +59,7 @@ done
 
 : "${ORG_ALIAS:?--org-alias is required}"
 : "${INT_USERNAME:?--int-username is required}"
+case "$APP_TYPE" in auto|connected|external) ;; *) echo "Unknown --app-type value: $APP_TYPE" >&2; exit 1 ;; esac
 
 # ---- 1. keypair ------------------------------------------------------------
 if [[ ! -f "$KEY_DIR/cert.body" ]]; then
@@ -98,28 +104,76 @@ s = s.replace('__CONTACT_EMAIL__', os.environ['CONTACT_EMAIL'])
 open(path, 'w').write(s)
 PY
 
-echo ">> Deploying Connected App + permission set to '$ORG_ALIAS'"
 # Run from inside $WORK so the CLI uses this self-contained project as the root.
 # Deploying with an absolute --source-dir while cwd is a different SFDX project
 # makes the CLI emit an unsafe "../../.." relative path that the Metadata API rejects.
-( cd "$WORK" && sf project deploy start --target-org "$ORG_ALIAS" \
-    --source-dir force-app --ignore-conflicts --wait 15 )
+deploy_work() {
+  local rc=0
+  DEPLOY_OUT="$( cd "$WORK" && sf project deploy start --target-org "$ORG_ALIAS" \
+      --source-dir force-app --ignore-conflicts --wait 15 2>&1 )" || rc=$?
+  printf '%s\n' "$DEPLOY_OUT"
+  return "$rc"
+}
+
+USE_ECA=0
+[[ "$APP_TYPE" == external ]] && USE_ECA=1
+if [[ "$USE_ECA" -eq 0 ]]; then
+  echo ">> Deploying Connected App + permission set to '$ORG_ALIAS'"
+  if ! deploy_work; then
+    if [[ "$APP_TYPE" == auto ]] && grep -qi "create a connected app" <<<"$DEPLOY_OUT"; then
+      echo ">> '$ORG_ALIAS' doesn't allow new Connected Apps; deploying it as an External Client App instead"
+      USE_ECA=1
+    else
+      exit 1
+    fi
+  fi
+fi
+
+if [[ "$USE_ECA" -eq 1 ]]; then
+  # The org doesn't generate an External Client App's consumer key, so make one,
+  # and keep it so a re-run deploys the same key the GitHub secret holds.
+  KEY_FILE="$KEY_DIR/eca-consumer-key.$ORG_ALIAS"
+  [[ -s "$KEY_FILE" ]] || python3 -c 'import secrets; print("SFCICD" + secrets.token_hex(24))' > "$KEY_FILE"
+  CKEY="$(tr -d '\r\n' < "$KEY_FILE")"
+  rm -rf "$WORK/force-app/main/default/connectedApps"
+  cp -R "$SETUP_ROOT/metadata-eca/force-app/." "$WORK/force-app/"
+  CERT_BODY="$CERT_BODY" CONTACT_EMAIL="$CONTACT_EMAIL" CKEY="$CKEY" PROFILE="$PROFILE" \
+    python3 - "$WORK/force-app/main/default" <<'PY'
+import os, sys
+from pathlib import Path
+from xml.sax.saxutils import escape
+values = {"__CERT_CONTENT__": os.environ["CERT_BODY"], "__CONTACT_EMAIL__": os.environ["CONTACT_EMAIL"],
+          "__CONSUMER_KEY__": os.environ["CKEY"], "__PROFILE__": escape(os.environ["PROFILE"])}
+for path in Path(sys.argv[1]).glob("ext*/*.xml"):
+    s = path.read_text()
+    for k, v in values.items():
+        s = s.replace(k, v)
+    path.write_text(s)
+PY
+  echo ">> Deploying External Client App + permission set to '$ORG_ALIAS'"
+  deploy_work
+fi
 
 # ---- 4. read back the generated Consumer Key -------------------------------
-echo ">> Retrieving generated Consumer Key"
-RET="$(mktemp -d)"
-( cd "$WORK" && sf project retrieve start --target-org "$ORG_ALIAS" \
-    --metadata "ConnectedApp:SF_CICD_Deploy" >/dev/null )
-CKEY="$(grep -o '<consumerKey>[^<]*</consumerKey>' "$APP" | sed 's/<[^>]*>//g' || true)"
-rm -rf "$RET"
-if [[ -z "$CKEY" ]]; then
-  echo "!! Could not read consumerKey automatically. Retrieve it from Setup > App Manager > SF CICD Deploy > View, and set SF_CONSUMER_KEY manually." >&2
+if [[ "$USE_ECA" -eq 0 ]]; then
+  echo ">> Retrieving generated Consumer Key"
+  RET="$(mktemp -d)"
+  ( cd "$WORK" && sf project retrieve start --target-org "$ORG_ALIAS" \
+      --metadata "ConnectedApp:SF_CICD_Deploy" >/dev/null )
+  CKEY="$(grep -o '<consumerKey>[^<]*</consumerKey>' "$APP" | sed 's/<[^>]*>//g' || true)"
+  rm -rf "$RET"
+  if [[ -z "$CKEY" ]]; then
+    echo "!! Could not read consumerKey automatically. Retrieve it from Setup > App Manager > SF CICD Deploy > View, and set SF_CONSUMER_KEY manually." >&2
+  fi
 fi
 
 # ---- 5. integration user + permission set ----------------------------------
+# An External Client App pre-authorizes --profile through its own OAuth policy,
+# so only a Connected App needs the permission-set link (an empty label skips it).
+APP_LABEL="SF CICD Deploy"; [[ "$USE_ECA" -eq 1 ]] && APP_LABEL=""
 bash "$HERE/create-integration-user.sh" \
   --org "$ORG_ALIAS" --username "$INT_USERNAME" --email "$CONTACT_EMAIL" \
-  --profile "$PROFILE" --permset "$PERMSET"
+  --profile "$PROFILE" --permset "$PERMSET" --app-label "$APP_LABEL"
 
 # ---- 6. push GitHub Environment secrets ------------------------------------
 if [[ "$PUSH_SECRETS" -eq 1 && -n "$REPO" && -n "$ENVN" && -n "$CKEY" ]]; then
@@ -134,6 +188,11 @@ fi
 
 echo
 echo "✅ Bootstrap complete for org '$ORG_ALIAS' (env '${ENVN:-n/a}')."
-echo "   If a later JWT login is refused, pre-authorize 'SF CICD Deploy' for the"
-echo "   integration user's profile once: Setup > App Manager > SF CICD Deploy >"
-echo "   Manage > Edit Policies (Permitted Users = Admin approved) > add profile."
+if [[ "$USE_ECA" -eq 1 ]]; then
+  echo "   'SF CICD Deploy' is an External Client App, pre-authorized for profile '$PROFILE'."
+  echo "   A JWT login can take a few minutes to start working after the first deploy."
+else
+  echo "   If a later JWT login is refused, pre-authorize 'SF CICD Deploy' for the"
+  echo "   integration user's profile once: Setup > App Manager > SF CICD Deploy >"
+  echo "   Manage > Edit Policies (Permitted Users = Admin approved) > add profile."
+fi

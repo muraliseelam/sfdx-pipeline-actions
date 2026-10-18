@@ -25,7 +25,7 @@ sf-setup/
 | Old manual step | Now |
 |---|---|
 | Generate JWT key + cert | `gen-jwt-keypair.sh` (once) |
-| Create Connected App in each org | **deployed as metadata** (cert injected) |
+| Create Connected App in each org | **deployed as metadata** (cert injected); orgs that refuse new Connected Apps get it as an **External Client App** |
 | Upload certificate | injected into the app before deploy |
 | Copy the Consumer Key | **read back automatically** via retrieve |
 | Create the integration user | anonymous Apex (`createIntegrationUser.apex`) |
@@ -76,6 +76,14 @@ cd sf-setup/scripts
 cp orgs.tsv.example orgs.tsv    # edit rows: env  alias  instance-url  username
 ./bootstrap-all.sh --repo your-org/sfdx-pipeline-example --contact-email devops@acme.com
 ```
+
+## Orgs that refuse new Connected Apps
+Orgs created since Spring '26 reject a Connected App deploy with *You can't create a
+connected app*. `bootstrap-org.sh` then deploys the same `SF_CICD_Deploy` app as an
+**External Client App** (`metadata-eca/`): same certificate, pre-authorized for
+`--profile`, with a generated consumer key kept in `--key-dir` so re-runs reuse it.
+The pipeline's JWT login works the same with either app. Force one with
+`--app-type connected|external` (default `auto`).
 
 ## The ONE residual manual action (only if needed)
 The platform requires an authenticated admin session to deploy the first app —
