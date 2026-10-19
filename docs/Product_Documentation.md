@@ -247,7 +247,7 @@ branch names from the config):
 | Branch | Protection |
 |---|---|
 | **entry** (`environments[0].branch`) | PR-only · required approvals · required `pr-validation` status · stale reviews dismissed · conversation resolution · no force-push · no deletion |
-| **downstream + prod** (`qa`, `stage`, `main`) | Guard-rails: no force-push, no deletion. The deploy guard, not branch protection, requires `deploy-<previous env>` before a promotion deploys |
+| **downstream + prod** (`qa`, `stage`, `main`) | Guard-rails: no force-push, no deletion. The deploy guard, not branch protection, requires `deploy-<env>` from every earlier stage before a promotion deploys |
 
 `enforce_admins` defaults to **false** so an admin keeps an escape hatch — GitHub
 forbids approving your own PR, and the post-approval auto-merge still has to
@@ -372,7 +372,7 @@ explicitly only if you stamp a label the pipeline did not generate.
 | `outputs` | — | The whole resolved config, including `eff_baseline`, `last_env` and `release_label` |
 | `resolve` | a **branch** | branch → env; `r_is_stage` is true **only** for `auto` / `approval` gates |
 | `promote` | an **env name** | Guard rails for a manual promotion; refuses PR-driven stages |
-| `prdeploy` | an **env name** | `r_require_env` (the immediately preceding env, **regardless of its gate**), `r_is_entry`, `r_branch`, `r_next_*` |
+| `prdeploy` | an **env name** | `r_require_env` (the immediately preceding env, **regardless of its gate**), `r_require_envs` (every earlier env, in order — what the ordering guard checks), `r_is_entry`, `r_branch`, `r_next_*` |
 
 > **`resolve` is keyed by branch; `promote` and `prdeploy` are keyed by name.**
 > Passing an environment *name* to `resolve` silently returns nothing whenever
@@ -534,7 +534,7 @@ environment branch never advances ahead of a real deployment.
 | # | Guard | Question | Notes |
 |---|---|---|---|
 | 1 | merge conflict | Is the PR mergeable? | Retries while GitHub is still computing mergeability — `UNKNOWN` is not a pass |
-| 2 | ordering | Did the *previous* environment really deploy **this commit**? | Trusts **only** the `deploy-<env>` commit status |
+| 2 | ordering | Did **every earlier** environment really deploy **this commit**? (`stage` checks `int` and `qa`) | Trusts **only** the `deploy-<env>` commit status |
 | 3 | validation | Is `pr-validation` green for this head SHA? | Entry stage only; skipped when a bypass is active |
 
 Guard 2 is why phantom deletion matters: a check-only run must never be mistakable
@@ -572,7 +572,7 @@ flowchart TD
     PREP["<b>prepare</b><br/>find or CREATE the<br/>feature→&lt;env&gt; PR<br/><i>PIPELINE_PAT, else GITHUB_TOKEN</i>"]
     CONF{"mergeable?"}
     FAILC["❌ report conflict on the CONTROL PR<br/>+ link to the env PR<br/><i>nothing deploys, no branch moves</i>"]
-    ORD{"ordering guard<br/>predecessor deployed<br/>THIS commit?"}
+    ORD{"ordering guard<br/>every earlier stage deployed<br/>THIS commit?"}
     DEP["<b>deploy</b> — real deploy<br/>of the delta to the &lt;env&gt; org"]
     MRG["<b>merge</b> — squash the env PR"]
     STAMP["stamp deployed:&lt;env&gt; on BOTH PRs<br/>clear deploy:&lt;env&gt;<br/>💬 confirm on the control PR"]
@@ -708,8 +708,9 @@ producing a `package.xml` and, where relevant, a `destructiveChanges.xml`.
 | `target` | Each deploy/validation diffs against the PR's **target env branch** (int PR → `origin/int`, qa PR → `origin/qa`). The package is exactly what that environment is missing, so a QA package can legitimately differ from the INT package for the same story. | Environments can drift — e.g. hotfixes land straight into a higher env |
 | `prod` *(default)* | Every environment diffs against `baseline_branch`. Every stage validates and deploys the identical prod-relative artifact. | Environments are kept in lockstep |
 
-The resolved value surfaces as **`eff_baseline`** and is computed in both
-`deploy.yml` and `pr-validation.yml`. The reference consumer `sfdx-pipeline-example`
+The resolved value surfaces as **`eff_baseline`** and is computed in
+`deploy.yml`, `pr-validation.yml` and `sf-promote-label.yml`, so a promotion
+deploys the same package as the entry deploy. The reference consumer `sfdx-pipeline-example`
 uses `target`.
 
 ### Test selection

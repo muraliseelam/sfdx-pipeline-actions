@@ -77,7 +77,9 @@ jobs:
       test_level:         ${{ steps.pd.outputs.r_test_level }}
       jira_status:        ${{ steps.pd.outputs.r_jira_status }}
       require_env:        ${{ steps.pd.outputs.r_require_env }}
+      require_envs:       ${{ steps.pd.outputs.r_require_envs }}
       is_entry:           ${{ steps.pd.outputs.r_is_entry }}
+      eff_baseline:       ${{ steps.base.outputs.eff_baseline }}
     steps:
       - uses: actions/checkout@v4
       - name: Resolve target environment name
@@ -105,6 +107,18 @@ jobs:
       - id: pd
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with: { mode: prdeploy, arg: "${{ steps.envn.outputs.name }}" }
+      # Same delta as the entry deploy: delta_baseline=prod (default) diffs the
+      # feature against the production baseline, so every stage gets the same
+      # package; delta_baseline=target diffs against this stage's own branch.
+      - id: base
+        env:
+          DELTA_BASELINE: ${{ steps.cfg.outputs.delta_baseline }}
+          TARGET_BRANCH: ${{ steps.pd.outputs.r_branch }}
+          PROD_BASELINE: ${{ steps.cfg.outputs.baseline_branch }}
+        run: |
+          [ "${DELTA_BASELINE:-prod}" = "target" ] && EFF="$TARGET_BRANCH" || EFF="$PROD_BASELINE"
+          echo "eff_baseline=$EFF" >> "$GITHUB_OUTPUT"
+          echo "delta_baseline='${DELTA_BASELINE:-prod}' -> diff against origin/$EFF"
 
   # ---- Ensure the <env> PR exists + is conflict-free (surface to control PR) ---
   prepare:
@@ -224,6 +238,7 @@ jobs:
           head_sha: ${{ inputs.head_sha }}
           env_name: ${{ needs.plan.outputs.env_name }}
           require_env: ${{ needs.plan.outputs.require_env }}
+          require_envs: ${{ needs.plan.outputs.require_envs }}
           is_entry: ${{ needs.plan.outputs.is_entry }}
           bypass_active: "false"
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -236,7 +251,7 @@ jobs:
           check_only: "false"
           test_level: ${{ needs.plan.outputs.test_level }}
           manifest_title: "Deploy"
-          baseline_branch: ${{ needs.plan.outputs.env_branch }}
+          baseline_branch: ${{ needs.plan.outputs.eff_baseline }}
           delta_merge_base: "true"
           source_path: ${{ needs.plan.outputs.source_path }}
           api_version: ${{ needs.plan.outputs.api_version }}

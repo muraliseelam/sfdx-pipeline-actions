@@ -2,8 +2,8 @@ name: "Pre-deploy guards"
 description: >-
   Block a deploy that shouldn't happen. Three checks, each fatal:
     1. Merge-conflict — the PR must merge cleanly into its target env branch.
-    2. Ordering — the predecessor stage (require_env) must already be deployed
-       for THIS commit (qa needs int, stage needs qa).
+    2. Ordering — every earlier stage (require_envs, else require_env) must
+       already be deployed for THIS commit (qa needs int; stage needs int AND qa).
     3. Validation — the entry stage requires a green `pr-validation` status
        (skipped when an admin bypass is active).
   On any failure the action comments on the PR and fails the job.
@@ -20,6 +20,10 @@ inputs:
     required: true
   require_env:
     description: "Predecessor stage that must be deployed for this commit (blank = entry)."
+    required: false
+    default: ""
+  require_envs:
+    description: "Comma-separated earlier stages that must ALL be deployed for this commit. Overrides require_env."
     required: false
     default: ""
   is_entry:
@@ -60,12 +64,12 @@ runs:
         echo "No merge conflicts with $BASE (mergeable='$state')."
 
     - name: Ordering guard
-      if: ${{ inputs.require_env != '' }}
+      if: ${{ inputs.require_envs != '' || inputs.require_env != '' }}
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         REPO: ${{ github.repository }}
-        REQ_ENV: ${{ inputs.require_env }}
+        NEEDED_ENVS: ${{ inputs.require_envs || inputs.require_env }}
         SHA: ${{ inputs.head_sha }}
         ENVN: ${{ inputs.env_name }}
         PR: ${{ inputs.pr_number }}
@@ -75,15 +79,25 @@ runs:
         # exclusively by a REAL deploy (deploy.yml, after the org deploy succeeds).
         # Check-only PR validation never sets it, so a lingering phantom
         # "deployment" record from a validation run can't satisfy this guard.
-        state=$(gh api "repos/$REPO/commits/$SHA/status" \
-          --jq '.statuses[] | select(.context=="deploy-'"$REQ_ENV"'") | .state' 2>/dev/null | tail -n1 || echo "")
-        if [ "$state" = "success" ]; then
-          echo "Ordering guard passed: '$REQ_ENV' really deployed for ${SHA:0:8} (deploy-$REQ_ENV=success)."
+        # Every earlier stage must have it: stage needs int AND qa, not just qa.
+        missing=""
+        for REQ_ENV in ${NEEDED_ENVS//,/ }; do
+          state=$(gh api "repos/$REPO/commits/$SHA/status" \
+            --jq '.statuses[] | select(.context=="deploy-'"$REQ_ENV"'") | .state' 2>/dev/null | tail -n1 || echo "")
+          if [ "$state" = "success" ]; then
+            echo "Ordering guard: '$REQ_ENV' really deployed for ${SHA:0:8} (deploy-$REQ_ENV=success)."
+          else
+            missing="${missing:+$missing, }$REQ_ENV (deploy-$REQ_ENV=${state:-missing})"
+          fi
+        done
+        if [ -z "$missing" ]; then
+          echo "Ordering guard passed for '$ENVN'."
           exit 0
         fi
+        state="$missing"; REQ_ENV="${NEEDED_ENVS//,/, }"
         gh pr comment "$PR" --repo "$REPO" --body \
-          "⛔ **Cannot deploy to \`$ENVN\`** — commit \`${SHA:0:8}\` hasn't been deployed to \`$REQ_ENV\` yet (\`deploy-$REQ_ENV\`=\`${state:-missing}\`). Get the \`$REQ_ENV\` PR deployed for this commit first, then re-approve."
-        echo "::error::'$ENVN' blocked — no successful '$REQ_ENV' deploy for ${SHA:0:8} (deploy-$REQ_ENV=${state:-missing})."
+          "⛔ **Cannot deploy to \`$ENVN\`** — commit \`${SHA:0:8}\` must be deployed to every earlier stage first (\`$REQ_ENV\`). Not deployed yet: $state."
+        echo "::error::'$ENVN' blocked — commit ${SHA:0:8} is not deployed to: $state."
         exit 1
 
     - name: Validation gate (entry stage)

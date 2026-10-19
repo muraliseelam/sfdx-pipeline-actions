@@ -235,8 +235,10 @@ def cmd_prdeploy(cfg, target):
     branch), this deploys a single PR's head commit to one environment's org and
     gates it on the *immediately preceding* environment in the chain — regardless
     of gate mode. The first environment has no predecessor (require_env = "").
+    r_require_envs lists EVERY earlier environment, in chain order, so a deploy
+    can check that the change really reached each one (stage needs int AND qa).
 
-    Emits: r_name, r_gh_environment, r_test_level, r_require_env.
+    Emits: r_name, r_gh_environment, r_test_level, r_require_env, r_require_envs.
     """
     target = target.strip()
     envs = normalize_envs(cfg)
@@ -260,6 +262,8 @@ def cmd_prdeploy(cfg, target):
             "r_test_level": env["test_level"],
             "r_jira_status": env.get("jira_status", ""),
             "r_require_env": require_env,
+            # Every earlier environment, comma-separated, in chain order.
+            "r_require_envs": ",".join(e["name"] for e in envs[:idx]),
             # This env's own trunk branch (the base a PR merges into once deployed).
             "r_branch": env["branch"],
             # Whether this is the entry env (idx 0) — the only stage that requires

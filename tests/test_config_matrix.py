@@ -172,6 +172,7 @@ def test_prdeploy_chain():
     o = plan(WEEKDAYS, "prdeploy", "mon")
     check("entry stage is flagged as entry", o["r_is_entry"], "true")
     check("entry stage has no predecessor to wait for", o["r_require_env"], "")
+    check("entry stage requires no earlier deploys", o["r_require_envs"], "")
     check("entry stage knows its own branch", o["r_branch"], "env/monday")
     check("entry stage knows the next stage", o["r_next_name"], "tue")
     check("entry stage knows the next branch", o["r_next_branch"], "env/tuesday")
@@ -179,6 +180,7 @@ def test_prdeploy_chain():
     o = plan(WEEKDAYS, "prdeploy", "wed")
     check("mid stage is not entry", o["r_is_entry"], "false")
     check("mid stage requires its predecessor", o["r_require_env"], "tue")
+    check("mid stage requires EVERY earlier stage", o["r_require_envs"], "mon,tue")
     check("mid stage resolves its GitHub Environment", o["r_gh_environment"], "wednesday-org")
     check("mid stage resolves its branch", o["r_branch"], "env/wednesday")
 

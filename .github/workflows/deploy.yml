@@ -73,6 +73,7 @@ jobs:
       test_level:         ${{ steps.resolve.outputs.r_test_level }}
       jira_status:        ${{ steps.resolve.outputs.r_jira_status }}
       require_env:        ${{ steps.pd.outputs.r_require_env }}
+      require_envs:       ${{ steps.pd.outputs.r_require_envs }}
       is_entry:           ${{ steps.pd.outputs.r_is_entry }}
     steps:
       - uses: actions/checkout@v4
@@ -149,6 +150,7 @@ jobs:
           head_sha: ${{ needs.ctx.outputs.head_sha }}
           env_name: ${{ needs.plan.outputs.env_name }}
           require_env: ${{ needs.plan.outputs.require_env }}
+          require_envs: ${{ needs.plan.outputs.require_envs }}
           is_entry: ${{ needs.plan.outputs.is_entry }}
           bypass_active: ${{ needs.bypass.outputs.active }}
           github_token: ${{ secrets.GITHUB_TOKEN }}

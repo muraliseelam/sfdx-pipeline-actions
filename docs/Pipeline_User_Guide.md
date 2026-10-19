@@ -473,9 +473,12 @@ feature/PROJ-123 ──PR──► int      pr-validation ✓ → approve → de
 ### Promote between environments
 
 Add the `deploy:<env>` label to the int PR. The pipeline will refuse to skip a
-step: the **ordering guard** requires a successful `deploy-<previous-env>` status
-for that exact commit. A change cannot reach stage without having really deployed
-to qa.
+step: the **ordering guard** requires a successful `deploy-<env>` status from
+**every earlier environment** for that exact commit. `qa` checks `int`; `stage`
+checks `int` and `qa`. A change cannot reach stage without having really deployed
+to both. Each stage deploys the same package (`main` vs the feature, with the
+default `delta_baseline: prod`), and its env PR merges only after that deploy
+succeeds. No approval is needed on the env PRs.
 
 Re-adding a label for something already stamped `deployed:<env>` is a safe no-op.
 
@@ -612,11 +615,12 @@ a successful release; dispatch it manually if branches have drifted.
 `approve-guard` removes it because `pr-validation` is not green for the current
 commit. Get validation passing, then approve again.
 
-### "Predecessor environment has not deployed this commit"
+### "must be deployed to every earlier stage first"
 
-The ordering guard. The commit you are promoting was never really deployed to the
-previous environment. Deploy it there first — a merged PR is not enough, the
-`deploy-<previous-env>` **commit status** must exist for that exact SHA.
+The ordering guard. The commit you are promoting was never really deployed to one
+or more earlier environments; the message lists which. Deploy it there first — a
+merged PR is not enough, the `deploy-<env>` **commit status** must exist for that
+exact SHA in every earlier environment.
 
 ### "GitHub Actions is not permitted to create or approve pull requests"
 
