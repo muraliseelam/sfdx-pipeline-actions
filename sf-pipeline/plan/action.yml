@@ -56,6 +56,7 @@ outputs:
   r_source_branch: { description: "Promote-from branch", value: "${{ steps.run.outputs.r_source_branch }}" }
   r_jira_status: { description: "Jira status to transition the story to for this env", value: "${{ steps.run.outputs.r_jira_status }}" }
   r_require_env: { description: "Predecessor env that must be deployed before this promote (ordering guard)", value: "${{ steps.run.outputs.r_require_env }}" }
+  r_require_envs: { description: "Every earlier env, comma-separated, that must be deployed for the commit (ordering guard)", value: "${{ steps.run.outputs.r_require_envs }}" }
   r_is_entry: { description: "True when this env is the entry (first) stage (prdeploy mode)", value: "${{ steps.run.outputs.r_is_entry }}" }
   r_next_name: { description: "Next env name in the promotion chain (prdeploy mode)", value: "${{ steps.run.outputs.r_next_name }}" }
   r_next_branch: { description: "Next env branch in the promotion chain (prdeploy mode)", value: "${{ steps.run.outputs.r_next_branch }}" }
