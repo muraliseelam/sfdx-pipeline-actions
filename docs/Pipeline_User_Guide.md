@@ -41,13 +41,14 @@ pipeline to finish this part — just follow the steps in order.
 
 ---
 
-### Step 1 — Copy two things into your repo
+### Step 1 — Copy three things into your repo
 
 From this repository, copy into your own repo:
 
 | Copy this | To here |
 |---|---|
 | `examples/consumer/.github/workflows/` (11 files) | `.github/workflows/` |
+| `examples/consumer/.github/CODEOWNERS` | `.github/CODEOWNERS` |
 | `sf-pipeline/pipeline.config.example.yml` | `sf-pipeline/pipeline.config.yml` |
 
 ```bash
@@ -55,12 +56,19 @@ From this repository, copy into your own repo:
 git clone --depth 1 https://github.com/muraliseelam/sfdx-pipeline-actions /tmp/sfdx-pipeline
 mkdir -p .github/workflows sf-pipeline
 cp /tmp/sfdx-pipeline/examples/consumer/.github/workflows/*.yml .github/workflows/
+cp /tmp/sfdx-pipeline/examples/consumer/.github/CODEOWNERS .github/CODEOWNERS
 cp /tmp/sfdx-pipeline/sf-pipeline/pipeline.config.example.yml sf-pipeline/pipeline.config.yml
 ```
 
 Those eleven workflow files are **callers**: each is a trigger plus a single
 `uses:` line. They contain no logic, and you should never add any. All the logic
 stays in this repository and is versioned here.
+
+`CODEOWNERS` names who must approve a change to the callers or to
+`pipeline.config.yml` — the files that decide what runs with your org
+credentials. Replace `@your-org/pipeline-owners` with real users or a team,
+ideally two or more people (nobody can approve their own PR). Step 8 makes
+GitHub enforce it.
 
 ---
 
@@ -131,9 +139,15 @@ in the pipeline needs to change.
 
 | `gate:` | What happens | Use it for |
 |---|---|---|
-| `auto` | A PR into this branch deploys for real and merges itself, no approval | A low-friction dev stage |
+| `auto` | Every push to a (non-draft) PR into this branch deploys for real and merges itself, no approval and no PR Validation run | A low-friction dev stage |
 | `approval` | A PR runs check-only validation and posts a report; a reviewer approving then deploys and merges | Your main quality stage |
 | `on_demand` | Not PR-driven. Deployed when someone adds a `deploy:<name>` label | Later stages like preprod/live |
+
+> **Using `gate: auto`?** Copy the current `deploy.yml` caller from
+> `examples/consumer/` — it also fires on `pull_request` opened / reopened /
+> synchronize / ready_for_review; an older copy never deploys an auto stage.
+> Step 8 gives an auto **entry** branch 0 required reviews, so the pipeline can
+> merge it unattended.
 
 > **Which `test_level`?** Leave it out and you get `RunSpecifiedTests`, which runs
 > only the tests covering what you changed. `NoTestRun` is faster but is rejected
@@ -175,25 +189,40 @@ and click **Run workflow** with *apply* left **unchecked**.
 It prints exactly what it would create:
 
 ```
-1/3  Branches
+1/4  Branches
   ✔ branch dev     (would create, from main)
   ✔ branch test    (would create, from main)
   ...
-2/3  Labels
+2/4  Labels
   ✔ label deploy:preprod   (would create)
   ...
-3/3  GitHub Environments
+3/4  GitHub Environments
   ✔ environment dev        (would create)
+  ...
+  ✔ environment prod — deployments limited to branch 'main' (would set)
+  ✔ environment prod-validate — deployments limited to branch 'main' (would set)
+4/4  Pull requests opened by GitHub Actions
+  ! Actions may not create pull requests, so deploy:<env> needs a PIPELINE_PAT secret.
 ```
 
 Read it. If the branch and environment names are the ones you intended, run it
 again with **apply checked**. It is idempotent and additive — it never deletes or
 moves anything, so re-run it any time you add or rename an environment.
 
-> **"Environments cannot be created here"?** Creating a GitHub Environment needs
-> repo *admin*. Either run it as an admin, or add a personal access token with
-> admin rights as the `PIPELINE_PAT` repository secret and re-run. Branches and
-> labels are still created either way.
+**The production environments only accept the production branch.** Your
+`deploy_environment` and `validate_environment` hold the production org's
+credentials, and a GitHub Environment with no deployment branch rule hands its
+secrets to a workflow on *any* branch — so anyone who can push a branch could
+read them. Project Init limits both to `production.branch` (the branch
+**Prod Release** is run from). It does this to environments that already exist
+too, keeping their reviewers; re-run it on an older repo to tighten them. A
+`release/*` branch is deliberately not allowed: anyone with write access can push
+one.
+
+> **"Environments cannot be created here"?** Creating a GitHub Environment, and
+> limiting its branches, needs repo *admin*. Either run it as an admin, or add a
+> personal access token with admin rights as the `PIPELINE_PAT` repository secret
+> and re-run. Branches and labels are still created either way.
 
 Prefer a terminal? The same thing, locally:
 
@@ -203,11 +232,16 @@ bash /tmp/sfdx-pipeline/sf-pipeline/scripts/init-project.sh --repo OWNER/REPO
 bash /tmp/sfdx-pipeline/sf-pipeline/scripts/init-project.sh --repo OWNER/REPO --apply
 ```
 
-> **New repositories: let Actions open pull requests.** `deploy:<env>` opens the
-> feature→`<env>` PR with the workflow token. GitHub turns that off by default, so
-> without a `PIPELINE_PAT` (Step 9) every promotion stops with *GitHub Actions is not
-> permitted to create or approve pull requests*. Turn on **Settings → Actions → General →
-> Workflow permissions → Allow GitHub Actions to create and approve pull requests**.
+> **New repositories: let promotions open pull requests.** `deploy:<env>` opens the
+> feature→`<env>` PR with `PIPELINE_PAT` when you have one (Step 9), otherwise with
+> the workflow token — which GitHub forbids by default, so every promotion stops with
+> *GitHub Actions is not permitted to create or approve pull requests*. Either add the
+> `PIPELINE_PAT`, or turn on **Settings → Actions → General → Workflow permissions →
+> Allow GitHub Actions to create and approve pull requests** (locally, as an admin:
+> add `--allow-actions-prs` to the `--apply` run above). That setting also lets a
+> workflow *approve* a pull request, and such an approval counts towards the
+> required reviews (though never as a code owner's), so on a team repo prefer the
+> `PIPELINE_PAT`.
 
 ---
 
@@ -223,12 +257,37 @@ Each environment needs four secrets so the pipeline can log in to its org:
 | `SF_JWT_KEY` | The private key, **base64-encoded** |
 
 **The easy way.** Run the **Org Bootstrap** workflow once per org from the Actions
-tab. It creates the connected app, generates the certificate, creates and
+tab. It deploys the `SF CICD Deploy` app, generates the certificate, creates and
 configures the integration user, and writes all four secrets into the GitHub
-Environment for you. You supply the org's admin login and the environment name.
+Environment for you. Orgs that refuse new Connected Apps (new orgs, since Spring
+'26) get the same app as an **External Client App** automatically; the four
+secrets are the same either way.
 
-**The manual way**, if your org restricts connected apps, is in
-[`sf-setup/README.md`](../sf-setup/README.md).
+It needs two **repository** secrets before the first run:
+
+| Secret | What it is |
+|---|---|
+| `SFDX_AUTH_URL` | An sfdx auth URL for a System Administrator of the org you are bootstrapping (`sf org display --verbose --target-org <alias>`). It names **one** org — replace it before you bootstrap the next |
+| `BOOTSTRAP_TOKEN` | A personal access token with admin on this repo, so it can write Environment secrets |
+
+You supply the environment name, login URL, integration username and a contact
+email. **Delete both secrets once the last org is done**: any workflow a
+developer pushes can read repository secrets, and these two are an org admin
+login and a repo admin token.
+
+**From a terminal instead** — this is what the verified runs used, and it needs
+no secrets in GitHub (a browser opens once per org for the admin login):
+
+```bash
+# from the root of YOUR repo, one org at a time
+bash /tmp/sfdx-pipeline/sf-setup/scripts/bootstrap-org.sh \
+  --org-alias int-admin --instance-url https://test.salesforce.com \
+  --repo OWNER/REPO --env int \
+  --int-username cicd@acme.com.int --contact-email devops@acme.com
+```
+
+`bootstrap-from-config.sh` does every org your config declares in one pass.
+Both, and the fully manual route, are in [`sf-setup/README.md`](../sf-setup/README.md).
 
 Either way, secrets go in **Settings → Environments → `<env>` → Environment
 secrets**, *not* repository secrets. That separation is what stops a dev deploy
@@ -251,37 +310,96 @@ environment **and nothing else**:
 | `validate_environment` | **No** | Check-only; must never block anyone |
 | `deploy_environment` | **Yes** | This click *is* the production gate |
 
+**Prevent self-review.** On the same page, tick **Prevent self-review** when two or
+more people can approve: whoever starts the release can then not approve its
+production deploy themselves. **Working alone, leave it off** — otherwise nobody
+can ever approve your releases.
+
+Both production environments only accept deployments from the production branch
+(Step 5), so always run **Prod Release** from that branch — the default in the
+*Run workflow* menu.
+
 ---
 
 ### Step 8 — Apply branch protection
 
+Run it from the root of your repo (it reads your `pipeline.config.yml`), as a repo
+admin. Add `DRY_RUN=true` first to print what each branch would get:
+
 ```bash
 REPO=OWNER/REPO bash /tmp/sfdx-pipeline/sf-pipeline/scripts/setup-branch-protection.sh
+
+# working alone (see below):
+REPO=OWNER/REPO REQUIRED_REVIEWS=0 bash .../setup-branch-protection.sh
 
 # for a real team — also stops admins committing straight to a branch:
 REPO=OWNER/REPO ENFORCE_ADMINS=true bash .../setup-branch-protection.sh
 ```
 
+**Every pipeline branch becomes pull-request-only**, so nobody can push straight to
+a stage or to production and skip its deploy and guards:
+
 | Branch | What it gets |
 |---|---|
-| Entry | PR-only, required approval, required `pr-validation` status, no force-push |
-| Later stages + prod | No force-push, no deletion |
+| Entry | PR-only; `REQUIRED_REVIEWS` approvals (default 1) and code-owner review; required statuses `pr-validation` (for a `gate: approval` entry) and `deploy-<entry>`; stale approvals dismissed; conversations resolved |
+| Later stages | PR-only with no approvals — the pipeline opens and merges these PRs itself; required status `deploy-<env>` |
+| Production | PR-only; the entry branch's approvals and code-owner review; no required status |
+| All of them | No force-push, no deletion |
 
-`ENFORCE_ADMINS` defaults to **false** so a solo admin keeps an escape hatch —
-GitHub will not let you approve your own PR.
+The required statuses are the ones the pipeline writes: `pr-validation` after a
+green validation, and `deploy-<env>` — named after the environment, not the branch
+— only after a **real** deploy, right before it merges. So a PR into a stage can
+only merge once its exact commit is live in that org, and the merge button cannot
+get ahead of the pipeline. The production branch needs no status because the
+release train deploys before it merges. (The jobs' own check runs are named
+`<caller job> / <job>` and cannot be required by a fixed name.)
 
-**Working alone?** That also means the entry branch's required review can never be
-met, and the pipeline's merge after a successful deploy is refused. Approve with the
-`approved` label instead and drop the review requirement:
+Each required status is **pinned to the GitHub Actions app**, which is what the
+pipeline writes them as, so a `deploy-<env>` someone posts with their own token
+can't unlock a merge. The default app id, `15368`, is github.com's; on GitHub
+Enterprise Server set `STATUS_APP_ID` to your instance's GitHub Actions app id
+(`STATUS_APP_ID=""` leaves the statuses unpinned).
 
-```bash
-REPO=OWNER/REPO REQUIRED_REVIEWS=0 bash .../setup-branch-protection.sh
-```
+**Code-owner review** is what stops a pull request from quietly changing a caller
+workflow or `pipeline.config.yml`: with the `CODEOWNERS` from Step 1, such a PR
+cannot merge until an owner approves. It follows `REQUIRED_REVIEWS` — on with 1 or
+more, off with 0 — because it is still a review someone else has to give. Set
+`REQUIRE_CODE_OWNER_REVIEWS=true` with `REQUIRED_REVIEWS=0` to require a review only
+for those files.
 
-**Protection and the post-release sync.** After a release the pipeline force-pushes
-`main` onto every env branch, which protected branches allow only for an admin token.
-Add `PIPELINE_PAT` (Step 9); without it the release still succeeds, but each branch
-warns *Could not realign `<branch>`* and has to be synced by hand.
+**Authorizing a release with protection on.** The release PR is merged into
+production by the workflow token after the deploy, so it must meet the production
+branch's review rule. With `REQUIRED_REVIEWS` 1 or more, authorize it with an
+**Approve** review from someone other than its author (a code owner, if it touches
+the files in `CODEOWNERS`); the `prod-approved` label on its own is only enough with
+`REQUIRED_REVIEWS=0`.
+
+`ENFORCE_ADMINS` defaults to **false** so an admin keeps an escape hatch — and so
+an admin `PIPELINE_PAT` can still push the **Sync Env Branches** merge onto a
+protected branch. Without that (no PAT, or `ENFORCE_ADMINS=true`) Sync Env Branches
+falls back to a sync PR per branch, which an admin has to merge; the post-release
+realign below is unaffected, because it lifts protection for its push.
+
+**Working alone?** GitHub will not let you approve your own PR, so the entry
+branch's required review can never be met and the pipeline's merge after a
+successful deploy is refused. Run it with `REQUIRED_REVIEWS=0` (code-owner review
+switches off with it), approve entry PRs with the `approved` label, and authorize
+releases with `prod-approved`. Your own `approved` label on your own entry PR is
+refused unless you also set `allow_self_approval: true` in `pipeline.config.yml`
+**on the entry branch** — the gates are read from the branch a PR targets, and as
+an admin you can commit it there directly.
+
+**Protection and the post-release sync.** After a release the pipeline realigns
+every env branch with `main` — resetting a branch whose content is all in `main`,
+merging `main` into one that still holds unreleased stories — lifting and
+restoring each branch's protection with `PIPELINE_PAT` (Step 9). Without it the
+release still succeeds, but each branch warns *Could not realign `<branch>`* and
+has to be synced by hand. The restore keeps the branch's settings — app-pinned
+statuses, review rules, and extras you may add by hand such as last-push approval,
+bypass lists or signed commits — and warns if GitHub took only the core rules. If
+it can't restore protection at all, that step fails and prints the old settings.
+
+Re-run the script whenever you add or rename an environment.
 
 ---
 
@@ -293,7 +411,14 @@ All of these are **silent no-ops if you skip them**. None can ever fail a deploy
 |---|---|
 | Chat notifications | `CHAT_WEBHOOK_URL` (Slack, Teams or any webhook — the provider is auto-detected) *or* `CHAT_API_URL` + `CHAT_API_TOKEN` + `CHAT_CHANNEL_ID` |
 | Jira story updates | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` |
-| Post-release branch sync on protected branches; promotion and rollback PRs that validate without a manual *Approve and run*; promotion across forks | `PIPELINE_PAT` (a PAT with repo **admin**) |
+| Post-release branch sync and Sync Env Branches on protected branches; promotions without *Allow GitHub Actions to create … pull requests*; promotion, sync and rollback PRs that validate without a manual *Approve and run*; Project Init creating environments | `PIPELINE_PAT` (a PAT with repo **admin**) |
+
+> **`PIPELINE_PAT` is effectively admin for every writer.** Any workflow a
+> developer pushes can read repository secrets. Use a fine-grained token limited to
+> this one repository — *Administration*, *Contents*, *Pull requests* and
+> *Workflows* read and write (the post-release sync pushes commits that may touch
+> `.github/workflows/`) — and rotate it. A promotion that fails with *Bad
+> credentials* means it expired.
 
 ---
 
@@ -333,6 +458,8 @@ mistakes that account for most failed first setups:
 | Nothing happens when you open the PR | `pr-validation.yml`'s `branches:` filter does not match your entry branch (Step 4) |
 | `'xyz' is not a configured environment` | A label or input names an environment that is not in `pipeline.config.yml`. The error lists the valid names |
 | Login fails against the org | Secrets are repository secrets rather than **environment** secrets, or `SF_JWT_KEY` was not base64-encoded |
+| A deploy succeeds but the PR never merges | Branch protection refused the pipeline's merge: a solo maintainer without `REQUIRED_REVIEWS=0`, or a missing code-owner approval (Step 8) |
+| Your `approved` label on your own PR is removed | Self-approval of the entry deploy is off: set `allow_self_approval: true` on the entry branch if you work alone (Step 8) |
 
 ---
 
@@ -373,6 +500,14 @@ Checklist when you change the chain:
    `pr-validation.yml` (Step 4). This is the only file outside the config that
    ever names an environment.
 5. Set required reviewers on the production deploy environment if it changed.
+6. Re-run `setup-branch-protection.sh` (Step 8). Each branch's required status is
+   `deploy-<environment name>`, so after a rename the old rule waits for a status
+   nothing writes any more, and a new branch is unprotected until you do.
+
+> **A config change applies where it lands.** Gates and environments are read from
+> the branch a PR targets (if it is protected; otherwise from the default
+> branch), never from the PR itself. A change to `pipeline.config.yml` therefore
+> applies to PRs into a branch once it has merged into that branch.
 
 > **A chain can be any length**, including one environment. Nothing assumes three.
 > **`name` and `branch` are independent too** — a stage called `qa` can live on a
@@ -416,11 +551,16 @@ gh pr create --base int --title "PROJ-123: add release note fields" --body "..."
 - computes the delta with sfdx-git-delta and lists the changed components,
 - runs the quality gates that apply to your change (PMD for Apex, Sonar for Apex
   or LWC/Aura, coverage for Apex),
-- runs a **check-only** validation deploy against the INT org,
+- runs a **check-only** validation deploy against the INT org — a change without
+  Apex too, so broken metadata fails here,
 - posts **one sticky comment** with the result,
 - writes the `pr-validation` commit status.
 
 Nothing is deployed for real at this point.
+
+> **Changing `pipeline.config.yml` in your PR?** The gates that judge the PR are
+> read from `int`, not from your branch, so your change applies only once it has
+> merged.
 
 ### Step 4. Read the PR comment
 
@@ -432,8 +572,10 @@ If it fails, push a fix. Validation re-runs and supersedes the previous run.
 
 ### Step 5. Get an approval
 
-Once validation is green, a reviewer approves the PR. The pipeline then adds the
-`approved` label, which **triggers the real deploy**.
+Once validation is green, a reviewer with write access **approves** the PR. That
+Approve review **triggers the real deploy**. Instead of a review, a repo admin
+can add the `approved` label — but not on their own PR, unless the project set
+`allow_self_approval: true` (a solo operator, Part 1 Step 8).
 
 > If you add `approved` before validation is green, **approve-guard removes it**
 > and comments why. Wait for green, then approve again.
@@ -441,8 +583,14 @@ Once validation is green, a reviewer approves the PR. The pipeline then adds the
 ### Step 6. The deploy runs and the PR merges itself
 
 On approval the pipeline runs pre-deploy guards, deploys to the INT org for real,
-**squash-merges the PR**, writes the `deploy-int` commit status and stamps
-`deployed:int` on the PR. You do not merge manually.
+writes the `deploy-int` commit status, **squash-merges the PR** at exactly the
+commit it deployed and stamps `deployed:int` on the PR. You do not merge manually.
+
+The approval is for the commit you had when it was given. **Don't push while it
+deploys**: a commit pushed after the approval is refused before the deploy (*Not
+deployed to `int` — a new commit was pushed…*), and one pushed during the deploy
+leaves the PR unmerged. Either way, wait for validation on the new head and
+approve again.
 
 ### Step 7. Promote — just add a label
 
@@ -452,11 +600,13 @@ To move the same change to QA, add the **`deploy:qa`** label to that same PR:
 gh pr edit <pr-number> --add-label deploy:qa
 ```
 
-The pipeline opens the `feature → qa` PR, checks that INT already deployed this
-exact commit, deploys to QA, merges and stamps `deployed:qa`. Then repeat with
-`deploy:stage`.
+The pipeline checks that INT deployed **and merged** this exact commit, opens the
+`feature → qa` PR, deploys to QA, merges it at the deployed commit and stamps
+`deployed:qa`. Then repeat with `deploy:stage` — once `deployed:qa` is there.
 
 You keep using the **original int PR** as the control surface for the whole chain.
+Promote only after it has merged, and push nothing more to the feature branch: a
+new commit has never been deployed, so it goes through int first (a new PR).
 
 ### What a full developer cycle looks like
 
@@ -472,13 +622,22 @@ feature/PROJ-123 ──PR──► int      pr-validation ✓ → approve → de
 
 ### Promote between environments
 
-Add the `deploy:<env>` label to the int PR. The pipeline will refuse to skip a
-step: the **ordering guard** requires a successful `deploy-<env>` status from
-**every earlier environment** for that exact commit. `qa` checks `int`; `stage`
-checks `int` and `qa`. A change cannot reach stage without having really deployed
-to both. Each stage deploys the same package (`main` vs the feature, with the
-default `delta_baseline: prod`), and its env PR merges only after that deploy
-succeeds. No approval is needed on the env PRs.
+Add the `deploy:<env>` label to the **merged** int PR. The pipeline will refuse to
+skip a step: the **ordering guard** requires a successful `deploy-<env>` status —
+written by the pipeline itself — from **every earlier environment** for that exact
+commit, and `deployed:<env>` on the int PR, which says it was merged there too.
+`qa` checks `int`; `stage` checks `int` and `qa`. A change cannot reach stage
+without having really deployed to both. Each stage deploys the same package
+(`main` vs the feature, with the default `delta_baseline: prod`), and its env PR
+merges only after that deploy succeeds, at exactly the deployed commit. No
+approval is needed on the env PRs.
+
+The promotion is refused — with a comment on the int PR, the label removed, and
+nothing deployed — when the label names the entry stage, the int PR isn't merged,
+an earlier stage isn't deployed and merged, the feature branch has moved past the
+merged commit, or the env PR conflicts. **A conflict is resolved through int:** a
+fix pushed to the feature branch is a new commit, so open a new PR into int with
+it and promote from that PR once it has merged.
 
 Re-adding a label for something already stamped `deployed:<env>` is a safe no-op.
 
@@ -491,9 +650,13 @@ from **Actions → Prod Release**.
 
 Run the workflow with `action = assemble`.
 
-It collects every PR carrying `deployed:stage` that has not already shipped,
-creates the release branch (`release/<prefix><n>`) and pushes it. The job summary
-lists the stories it gathered.
+It collects every story carrying `deployed:stage` that has not already shipped
+and that the pipeline really deployed to **every** stage (its own `deploy-<env>`
+statuses — a hand-added label isn't enough), creates the release branch
+(`release/<prefix><n>`), merges the exact commit each story deployed — never
+commits pushed to its branch later — and pushes it. The job summary lists each
+story with the commit released. Name stories in `stories` to release only those;
+each must still be proven, or the run fails.
 
 > **`assemble` does not open the release PR.** It prints a pre-filled compare link
 > and stops. Opening the PR is a deliberate human step, so someone reads the list
@@ -519,20 +682,30 @@ Preflight refuses an unauthorized release. Either:
 > You cannot approve your own PR on GitHub, so a solo operator must use the
 > `prod-approved` label.
 
+An authorization covers the content it saw: an Approve review counts only for
+the commit it approved, and re-assembling the release with new content removes
+`prod-approved`.
+
 #### Step 4 — `action: release`
 
-Run the workflow again with `action = release`.
+Run the workflow again with `action = release`, from the production branch.
 
-1. **Preflight** — confirms the release PR exists, is **authorized** and is green.
+1. **Preflight** — confirms the release PR exists, is **authorized** at its
+   current commit, is green, can merge into `main` under its branch protection,
+   and hasn't been deployed already. Its head commit is what gets validated,
+   deployed and merged.
 2. **Validate** — a check-only validation against production in the **ungated**
    `validate_environment`, producing a quick-deploy id. No reviewer is disturbed
-   for a run that might fail.
+   for a run that might fail. A release without Apex is validated too (no tests);
+   it gets a quick-deploy id only when `destructive_tests` names a canary.
 3. **Prod gate** — the job targeting the **gated** `deploy_environment` pauses for
    its required reviewer. This click is the production approval.
 4. **Quick-deploy** — deploys the already-validated package (fast, no re-run of
-   tests), merges the release PR into `main`, tags the release (`v<version>`),
-   publishes a GitHub Release, then replays `main` back onto `int`, `qa` and
-   `stage` so every branch agrees again.
+   tests; with no quick-deploy id, a full deploy of the same delta), marks the
+   release PR `deployed:prod`, merges it into `main`, tags the release
+   (`v<version>`), publishes a GitHub Release, then realigns `int`, `qa` and
+   `stage` with `main` so every branch agrees again (a branch with conflicts is
+   left as is, with a warning — resolve it with **Sync Env Branches**).
 
 > **Why two environments for one deploy?** So the expensive, risky work is
 > validated *before* a human is asked to approve anything. See
@@ -573,7 +746,7 @@ this is not a promotion.
 | `feature_ref` | The branch or commit to deploy |
 | `environment` | int / qa / stage / … |
 | `dry_run` | **Defaults to `true`** (check-only). Uncheck for a real deploy |
-| `profiles_mode` | One-off override of `full` / `incremental` |
+| `profiles_mode` | `config` (default — use `pipeline.config.yml`), or a one-off `full` / `incremental` |
 
 Higher orgs still require their GitHub Environment reviewer.
 
@@ -585,7 +758,7 @@ validated, reviewed and audited. Nothing is force-deployed.
 
 | Input | Notes |
 |---|---|
-| `pr_number` | A merged PR to revert (merge commits use `-m 1` automatically) |
+| `pr_number` | A **merged** PR to revert — an open or closed-unmerged PR is refused, as there is nothing to roll back (merge commits use `-m 1` automatically) |
 | `ref` | Alternatively, a commit SHA |
 | `base` | Branch to revert on; defaults to the entry branch. For a prod hotfix rollback, revert on the baseline branch |
 
@@ -603,8 +776,10 @@ there is nothing to delete. Delete such components in the org by hand, or use
 
 ### Sync env branches
 
-Merges `main` into every env branch. Normally invoked automatically at the end of
-a successful release; dispatch it manually if branches have drifted.
+Merges `main` into every env branch. A release realigns the env branches itself,
+so dispatch this when branches have drifted, or when that realign left a branch
+as is because of conflicts: a conflicting branch gets a PR cut from `main`, which
+shows the conflicts to resolve.
 
 ---
 
@@ -613,52 +788,159 @@ a successful release; dispatch it manually if branches have drifted.
 ### The `approved` label keeps disappearing
 
 `approve-guard` removes it because `pr-validation` is not green for the current
-commit. Get validation passing, then approve again.
+commit. Get validation passing, then approve again. The pipeline also removes it,
+with a comment, when the person who added it may not approve: on the entry PR the
+label needs a repo admin who isn't the PR's author (unless `allow_self_approval:
+true`), on a later stage write access.
+
+### *Not deployed to `<env>`* — a new commit was pushed after … was approved
+
+The approval was for an earlier commit. Right before the deploy the pipeline saw
+a newer head (or a closed PR), so it deployed nothing, merged nothing and removed
+`approved`. Once PR Validation is green for the current head, approve again — the
+pipeline deploys and merges exactly that commit.
+
+### *Deployed `<sha>` to `<env>`, but this PR was not merged*
+
+The deploy succeeded, but the merge was refused — usually because a commit was
+pushed while it deployed (the merge only takes the deployed commit), or because
+branch protection refused it (Part 1, Step 8). The org has `<sha>`; the branch does
+not, and `deployed:<env>` was not added, so later stages refuse this change. Once
+PR Validation is green for the PR's current head, approve again (or re-add
+`approved`): that deploys and merges the current head.
 
 ### "must be deployed to every earlier stage first"
 
 The ordering guard. The commit you are promoting was never really deployed to one
 or more earlier environments; the message lists which. Deploy it there first — a
 merged PR is not enough, the `deploy-<env>` **commit status** must exist for that
-exact SHA in every earlier environment.
+exact SHA in every earlier environment, written by the pipeline itself (a status
+someone posts by hand is ignored). A promotion also needs `deployed:<env>` from
+each earlier stage on the int PR: *deployed, but `deployed:<env>` is not on …*
+means that stage's merge hasn't happened yet — wait for its promotion to finish,
+or fix the refused merge first.
+
+### *`deploy:<entry>` is not a promotion*
+
+The entry stage deploys when its PR is approved, never by a label. Approve the
+int PR instead; add `deploy:<env>` labels only for the stages after it, once the
+int PR has merged.
+
+### Promotion refused — `<branch>` *has moved on*
+
+The int PR deployed one commit, but the feature branch now has commits after it,
+which were never deployed anywhere — the env PR would merge them. Take them
+through int first: open a new PR from the feature branch into int, and promote
+from that PR once it is deployed and merged. If they don't belong, reset the
+branch to the deployed commit and re-add the label.
 
 ### "GitHub Actions is not permitted to create or approve pull requests"
 
-A `deploy:<env>` label couldn't open the feature→`<env>` PR. Turn on **Settings →
-Actions → General → Allow GitHub Actions to create and approve pull requests**, or add
-a `PIPELINE_PAT`, then re-add the label. Nothing was deployed and no branch moved.
+A `deploy:<env>` label couldn't open the feature→`<env>` PR. Add a `PIPELINE_PAT`,
+or turn on **Settings → Actions → General → Allow GitHub Actions to create and approve
+pull requests** (or run `init-project.sh --apply --allow-actions-prs` as an admin),
+then re-add the label. Nothing was deployed and no branch moved.
 
 ### "Could not realign `<branch>` — sync it manually" after a release
 
-The release went out; only the follow-up sync of the env branches failed, because
-branch protection refuses the workflow token's force-push. Add an admin
-`PIPELINE_PAT` and run **Sync Environment Branches**.
+The release went out; only the follow-up sync of the env branches failed —
+usually because branch protection refuses the workflow token's push, or the
+branch moved while it synced (the push never overwrites that). Add an admin
+`PIPELINE_PAT` and run **Sync Environment Branches**. On protected branches that
+push also needs `ENFORCE_ADMINS` left at `false`; otherwise it opens a sync PR per
+branch for an admin to merge.
+
+### Merging is blocked: *Required status check "deploy-`<env>`" is expected*
+
+Branch protection at work. A PR into an environment branch can merge only once
+that exact commit has really been deployed there, and only a real deploy writes
+`deploy-<env>` — the check accepts it only from the GitHub Actions app. Don't
+merge it by hand: approve the entry PR, or add `deploy:<env>` to the control PR,
+and the pipeline deploys and merges it. If you pushed a new commit after the
+deploy, that commit has not been deployed — approve or promote again. If you
+renamed the environment, re-run `setup-branch-protection.sh`.
+
+### The release deployed, but the release PR did not merge
+
+Production is live; the post-deploy merge into the production branch failed.
+Preflight already refuses a release PR that branch protection would block, so
+look at the finalize log: usually the release branch changed after preflight (the
+merge takes only the commit production runs), or a review was dismissed in
+between. Fix that — for a review rule, an **Approve** review from someone other
+than the PR's author — then **Re-run failed jobs** on the Prod Release run. That
+finishes the merge, the tag, the GitHub Release and the branch sync without
+deploying again; it skips a PR that is already merged. Don't run the release
+again: preflight refuses a PR that carries `deployed:prod`.
+
+### *Branch "…" is not allowed to deploy to prod* (or `prod-validate`)
+
+Both production environments accept only the production branch (Project Init sets
+this). Run **Prod Release** from that branch — the default in *Run workflow*. A
+pull request **into** a `release/…` branch hits the same rule: its validation runs
+from the pull request's merge ref, which may not use production secrets.
+Production is validated by **Prod Release** itself.
 
 ### A promotion failed — how do I retry it?
 
-Every failed promotion removes its `deploy:<env>` label and comments the reason on
-the control PR, so fix the cause and **add the label again**. A failure before the
-deploy (e.g. the env PR couldn't be created) deployed nothing and moved no branch.
+Every failed promotion removes its `deploy:<env>` label and comments on the
+control PR why it stopped (Salesforce errors inline) and what the org and the
+branch now hold; an env PR the run opened is closed. Fix the cause and **add the
+label again**. A failure before the deploy (e.g. the env PR couldn't be created)
+deployed nothing and moved no branch. If the fix is new code, it is a new commit:
+take it through int first and promote from that PR.
 
 ### A promotion failed on the coverage gate
 
-On a real deploy the coverage gate is checked **after** Salesforce has accepted the
-deploy (Salesforce only requires 75% per class). A change below `coverage_threshold`
-therefore reaches that org, but its env PR is not merged, so the org and the branch
-disagree. Raise the coverage and re-add the label, or remove the change from the org
-by hand. An admin bypass on the control PR does **not** carry into promotions; stages
-with `test_level: NoTestRun` skip the gate.
+The change was validated with its tests, and the gate stopped it **before**
+anything was deployed: the org and the branch still agree. Raising the coverage
+is a new commit, so take it through int (a new PR) and promote from that PR. An
+admin bypass on the control PR does **not** carry into promotions; stages with
+`test_level: NoTestRun` skip the gate.
 
 ### Preflight says the release PR "is not authorized"
 
 The production release requires the release PR to be authorized. Either have **a
 different user approve** it, or add the **`prod-approved`** label. GitHub forbids
-approving your own PR, so a solo operator must use the label.
+approving your own PR, so a solo operator must use the label. Preflight's other
+refusals:
+
+| Message | What to do |
+|---|---|
+| *approved, but not at its current commit* | The release branch changed after the review. Approve again, or add `prod-approved` |
+| *can't merge into `main` yet — branch protection blocks it* | Usually a required review: the label alone doesn't meet it (Part 1, Step 8). Nothing was deployed |
+| *conflicts with `main`* | Assemble the release again |
+| *carries `deployed:prod`* | That release is already in production. Re-run the earlier run's failed finalize job instead |
 
 ### The deploy guard reports a merge conflict
 
-Rebase the feature branch on the target env branch and push. The guard runs before
-anything touches an org, so nothing partial was deployed.
+For an entry PR, rebase the feature branch on the target env branch and push,
+then approve again. For a promotion, the fix is a new commit: take it through int
+first and promote from that PR. The guard runs before anything touches an org, so
+nothing partial was deployed. *GitHub has not finished checking whether this PR
+can merge* is the same guard: try again in a minute.
+
+### *Deletions skipped — not in `<env>`*
+
+Informational. The change deletes components that org no longer has (already
+deleted, or never deployed there), so there was nothing to delete; Salesforce
+would otherwise fail the whole deploy. The report lists them. If nothing else was
+left, the deploy succeeds without deploying anything.
+
+### *Salesforce refused the quick deploy …*
+
+A validated job can be quick-deployed once, within 10 days, if it ran Apex tests
+and the org hasn't changed under it — another deploy may have landed between the
+validation and the quick deploy. Nothing was deployed. For a promotion, re-add the
+label; for an entry deploy, approve again (or remove and re-add `approved`) — it
+validates afresh. For a release, check **Setup → Deployment Status** in
+production, then run **Prod Release** with `action: release` again: it validates
+again and asks for approval again. There is no automatic fallback.
+
+### *… was still running in Salesforce when the wait ran out*
+
+The job may still complete in the org. Check **Setup → Deployment Status** before
+retrying, so you don't deploy twice. For a release whose deploy did complete, the
+job summary lists how to finish by hand (label, merge, tag, sync).
 
 ### The workflow run shows **0 jobs**
 
@@ -682,7 +964,8 @@ types — Apex for PMD, Apex or LWC/Aura JS for Sonar. Sonar additionally needs
 
 Bypass is honoured only if the person who **added** the label has admin or
 maintain permission on the repo, re-verified at run time. The label alone is not
-authority.
+authority. A push after the label was added removes it (like a stale review); an
+admin re-adds it for the new head.
 
 ### A validation left a stray deployment record
 
@@ -737,12 +1020,17 @@ Per-run detail is in the job summary's **🧾 Audit** table and in the
 
 | Label | Who adds it | Effect |
 |---|---|---|
-| `approved` | Reviewer (pipeline stamps it) | Triggers the real entry deploy, then auto-merge |
-| `deploy:<env>` | Developer / release manager | Promote this change to `<env>` |
-| `deployed:<env>` | Pipeline | Record — this commit really deployed to `<env>` |
-| `bypass-quality-gates` | **Admin only** | Skip the quality gates for this PR |
+| `approved` | Entry PR: a repo admin who isn't its author (unless `allow_self_approval`). Later stages: anyone with write access | Like an Approve review: triggers the real deploy, then the merge |
+| `deploy:<env>` | Developer / release manager, on the merged int PR | Promote this change to `<env>` |
+| `deployed:<env>` | Pipeline, after the merge | Record — this commit was deployed to `<env>` and merged |
+| `bypass-quality-gates` | **Admin only** | Skip the quality gates for this PR (dropped by a later push) |
+| `prod-approved` | Release manager, on the release PR | Authorizes the production release |
+| `deployed:prod` | Pipeline, on the release PR | Production runs this release — a second run is refused |
 
 ### Commit statuses
+
+Both are written by the pipeline as `github-actions[bot]`; a status anyone else
+posts is ignored.
 
 | Status | Written by | Means |
 |---|---|---|
@@ -759,8 +1047,8 @@ gh pr create --base int --title "PROJ-123: ..." --body "..."
 gh pr edit <pr> --add-label deploy:qa
 gh pr edit <pr> --add-label deploy:stage
 
-# branch protection
-REPO=owner/repo bash sf-pipeline/scripts/setup-branch-protection.sh
+# branch protection — from the root of your repo
+REPO=owner/repo bash /path/to/sfdx-pipeline-actions/sf-pipeline/scripts/setup-branch-protection.sh
 
 # audit history
 git show origin/audit-log:audit/audit-log.jsonl | jq .
@@ -774,3 +1062,5 @@ git show origin/audit-log:audit/audit-log.jsonl | jq .
 4. Never set `concurrency` on a caller.
 5. Never merge a pipeline PR by hand; the pipeline merges after a successful deploy.
 6. `deployed:<env>` is a record, not an instruction — promote with `deploy:<env>`.
+7. Once a PR is approved or merged, don't push to its branch: a new commit takes a
+   new approval, and after the int merge a new PR into int.

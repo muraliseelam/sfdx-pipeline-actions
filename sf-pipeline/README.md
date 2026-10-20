@@ -21,19 +21,22 @@ sf-pipeline/
 ├── pipeline.config.example.yml   ← template for a consumer's pipeline.config.yml
 │
 │   # ---------- composite actions (one folder each, all action.yml) ----------
-├── plan/              read the caller's config → outputs (outputs | resolve | prdeploy)
+├── plan/              read the config (gates from a PR's protected base branch) → outputs
 ├── changes/           install SF CLI + sfdx-git-delta → delta package + manifest
-├── deploy/            auth → profiles → validate/deploy → coverage gate → report → audit
-├── guard/             fatal pre-deploy guards: merge conflict, ordering, missing validation
-├── approval/          interpret the approval signal
+├── deploy/            auth → delta → lint → skip absent deletions → profiles →
+│                      validate/deploy (gated: validate → coverage gate → quick deploy)
+│                      → report → audit
+├── guard/             fatal pre-deploy guards: PR open at the deployed commit + mergeable,
+│                      ordering, missing validation (trusts only the pipeline's statuses)
+├── approval/          interpret the approval signal and check who gave it
 ├── bypass/            resolve and re-verify an admin quality-gate bypass at run time
-├── merge-pr/          squash-merge the PR after a successful deploy
+├── merge-pr/          squash-merge the PR after a successful deploy, only at the deployed SHA
 ├── report/            assemble the single sticky PR comment
 ├── status/            write the pr-validation / deploy-<env> commit statuses
 ├── coverage/          Apex coverage gate          → coverage-gate.py
-├── release-gather/    collect the deployed:stage PRs for a release
-├── release-preflight/ verify the release PR exists, is authorized and green
-├── sync-branches/     merge main into the env branches (degrades to a PR on conflict)
+├── release-gather/    collect the stories proven deployed to every stage, at their deployed commit
+├── release-preflight/ verify the release PR is authorized at its head, green, mergeable, not yet deployed
+├── sync-branches/     post-release realign: reset or merge main into each env branch, keep protection
 ├── jira/              comment on + transition the story named in the branch
 ├── notify/            dispatch deploy notifications → scripts/notify.sh
 │
@@ -55,6 +58,7 @@ sf-pipeline/
 | `audit.py` · `audit-append.sh` | Structured audit record + durable append to the `audit-log` branch |
 | `jira.py` | Jira comment and transition |
 | `dependency_lint.py` | Metadata dependency checks |
+| `prune_destructive.py` | Skip deletions the target org no longer has |
 | `setup-branch-protection.sh` | Codified, idempotent branch protection |
 
 ---
@@ -66,8 +70,9 @@ can reach their siblings. **Reusable workflows run in the *caller's* checkout**,
 where this folder does not exist — so a workflow must never invoke
 `sf-pipeline/scripts/*` directly. It always goes through a composite action.
 
-The only file that *is* read from the caller's workspace is
-`sf-pipeline/pipeline.config.yml`, which is why consumers keep it.
+The only pipeline file a consumer keeps is `sf-pipeline/pipeline.config.yml`. For a
+pull request, `plan` reads its gates and environments from the PR's protected base
+branch (`config_ref`), so a PR can't relax the gates that judge it.
 
 See [Product_Documentation.md §3](../docs/Product_Documentation.md#3-portability--how-cross-repo-path-resolution-works).
 
@@ -83,9 +88,10 @@ secrets, branch protection, labels and a smoke test — is in
 **[Pipeline_User_Guide.md — Part 1](../docs/Pipeline_User_Guide.md#part-1--set-up-the-pipeline-one-time)**.
 
 Branch protection is scripted (idempotent; needs `gh` authenticated as a repo
-admin):
+admin). Run it from the root of the **consuming** repo, so it reads that repo's
+config, using your checkout of this repository:
 
 ```bash
-REPO=owner/repo bash sf-pipeline/scripts/setup-branch-protection.sh
-REPO=owner/repo ENFORCE_ADMINS=true bash sf-pipeline/scripts/setup-branch-protection.sh   # strict
+REPO=owner/repo bash /path/to/sfdx-pipeline-actions/sf-pipeline/scripts/setup-branch-protection.sh
+REPO=owner/repo ENFORCE_ADMINS=true bash /path/to/sfdx-pipeline-actions/sf-pipeline/scripts/setup-branch-protection.sh   # strict
 ```

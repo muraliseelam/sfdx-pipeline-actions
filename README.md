@@ -33,14 +33,16 @@ it. They hold **no pipeline logic of their own**.
 
 - **One config file per project.** Branching, orgs, gates, test levels, quality
   thresholds and integrations are all driven by `pipeline.config.yml`. Onboarding
-  a new project is copying 8 caller files and editing one YAML.
+  a new project is copying 11 caller files and editing one YAML.
 - **A change can never skip an environment.** The ordering guard trusts only a
   real deploy, recorded as a commit status — not a label someone could add.
 - **Delta deployments.** Only what actually changed is deployed, diffed either
   against the target branch or against your production baseline.
 - **Quality gates that mean something.** Apex coverage thresholds, dependency
   linting, profile handling, and an admin-only bypass whose permission is
-  re-verified at run time, not trusted from the label.
+  re-verified at run time, not trusted from the label. A real deploy with Apex is
+  validated and coverage-gated *before* anything reaches the org, and a PR can't
+  relax the gates that judge it.
 - **A production release train** with validation and deployment split across two
   GitHub Environments, so the long check-only validation runs unattended and the
   human approval sits immediately before a fast quick-deploy.
@@ -69,13 +71,14 @@ it. They hold **no pipeline logic of their own**.
 > [!NOTE]
 > The pipeline keeps **no database** — labels and commit statuses *are* the state.
 > Only a **real deploy** ever writes a `deploy-<env>` commit status, which is
-> exactly what the ordering guard trusts. A change can never skip an environment.
+> exactly what the ordering guard trusts — and only a status the pipeline itself
+> wrote counts. A change can never skip an environment.
 
 | 🏷️ Label | Who sets it | Meaning |
 |:--|:--|:--|
-| `approved` | reviewer | 🔓 triggers the **real** entry deploy, then auto-merge |
+| `approved` | admin on the entry PR (not its author) · writer later | 🔓 like an **Approve** review, triggers the **real** deploy, then the merge |
 | `deploy:<env>` | human | ➡️ **instruction** — promote this change to `<env>` |
-| `deployed:<env>` | pipeline | ✅ **record** — this commit really landed in `<env>` |
+| `deployed:<env>` | pipeline | ✅ **record** — this commit was deployed to `<env>` and merged |
 | `bypass-quality-gates` | 🔐 admin only | ⏭️ skip quality gates *(permission re-verified at run time)* |
 
 ---
@@ -86,6 +89,7 @@ it. They hold **no pipeline logic of their own**.
 
 ```bash
 cp -r examples/consumer/.github/workflows/. .github/workflows/
+cp examples/consumer/.github/CODEOWNERS .github/CODEOWNERS   # then name your owners in it
 cp sf-pipeline/pipeline.config.example.yml sf-pipeline/pipeline.config.yml
 ```
 
@@ -105,7 +109,16 @@ chain can be any length.
 **entry** branch. It is the one environment name that lives outside the config.
 
 **5.** Run the **Project Init** workflow from the Actions tab (dry run first). It
-creates every branch, label and GitHub Environment your config declares.
+creates every branch, label and GitHub Environment your config declares, and
+lets only the production branch use the production environments' secrets.
+
+**6.** Apply branch protection, so nobody can push straight to an environment
+branch or to production:
+
+```bash
+REPO=OWNER/REPO bash /path/to/sfdx-pipeline-actions/sf-pipeline/scripts/setup-branch-protection.sh
+# working alone? prefix it with REQUIRED_REVIEWS=0
+```
 
 ➡️ **[Full step-by-step — User Guide, Part 1](./docs/Pipeline_User_Guide.md#part-1--set-up-the-pipeline-one-time)**
 
@@ -140,8 +153,8 @@ jobs:
 > with the reusable workflow it invokes **cancels itself** and produces a run with
 > **zero jobs**. Concurrency is owned by the reusable workflow.
 
-📌 A complete, working set of all 8 callers lives in
-[`examples/consumer/`](./examples/consumer/).
+📌 A complete, working set of all 11 callers, plus an example `CODEOWNERS` for
+the pipeline wiring, lives in [`examples/consumer/`](./examples/consumer/).
 
 ---
 
@@ -154,7 +167,7 @@ jobs:
 | 📁 `sf-pipeline/scripts/` | Shared shell + Python helpers |
 | 📄 `sf-pipeline/pipeline.config.example.yml` | Annotated template for a consumer's config |
 | 📁 `sf-setup/` | Org bootstrap kit — connected app, permission set, scripts |
-| 📁 `examples/consumer/` | A working consumer: 8 thin callers + one config |
+| 📁 `examples/consumer/` | A working consumer: 11 thin callers + an example `CODEOWNERS` |
 | 📁 `scripts/` | Maintainer tooling — validate, set owner, cut and verify releases |
 | 📁 `docs/` | The two documents 📘🚀 and the editable diagrams |
 
@@ -172,8 +185,11 @@ jobs:
 | 🔴 **Reusable workflow** | the **caller's** checkout — this repo is *not* there | ❌ **Never.** Always go through a composite action |
 | 🟢 **Composite action** | `$GITHUB_ACTION_PATH` — fetched by slug | ✅ Yes, via `$GITHUB_ACTION_PATH/../scripts/…` |
 
-The **only** file read from the caller's workspace is
-`sf-pipeline/pipeline.config.yml` — precisely why consumers keep it.
+The **only** pipeline file a consumer keeps is `sf-pipeline/pipeline.config.yml`.
+For a pull request, its gates and environments are read from the PR's **base**
+branch (if that branch is protected, else the default branch), so a PR's own
+config change applies only once it merges; `source_path`, `api_version` and
+`node_version` come from the change itself.
 
 > [!CAUTION]
 > Breaking this rule is the single most common way to break every consumer at
@@ -199,11 +215,11 @@ uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/pr-validation.yml@v1
 Breaking changes ship as `v2`; you opt in by changing one character.
 
 > [!IMPORTANT]
-> **Maintainers: never tag `main` directly.** These workflows reference this
-> repository's own composite actions **45 times**, and on `main` every one of
-> those reads `@main`. A tag cut straight from `main` would leave consumers
-> pinned in name only while the real logic kept floating. Each release tag
-> therefore carries a commit that rewrites those references to itself:
+> **Maintainers: never tag `main` directly.** These workflows (and the `approval`
+> action) reference this repository's own actions and workflows **51 times**, and
+> on `main` every one of those reads `@main`. A tag cut straight from `main` would
+> leave consumers pinned in name only while the real logic kept floating. Each
+> release tag therefore carries a commit that rewrites those references to itself:
 >
 > ```bash
 > ./scripts/cut-release.sh v1.2.0 --push

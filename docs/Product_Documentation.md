@@ -87,7 +87,7 @@ contributes three things and nothing more:
 flowchart LR
     subgraph CONS["CONSUMER — a Salesforce project repo"]
         direction TB
-        CW["<b>.github/workflows/*.yml</b><br/>8 thin callers · no logic<br/><i>trigger + permissions + uses:</i>"]
+        CW["<b>.github/workflows/*.yml</b><br/>11 thin callers · no logic<br/><i>trigger + permissions + uses:</i>"]
         CFG["<b>sf-pipeline/pipeline.config.yml</b><br/>the only pipeline file it edits"]
         SRC["<b>force-app/</b><br/>Salesforce metadata"]
     end
@@ -95,14 +95,14 @@ flowchart LR
     subgraph CENT["CENTRAL — sfdx-pipeline-actions"]
         direction TB
         RW["<b>.github/workflows/*.yml</b><br/>11 reusable workflows<br/><i>on: workflow_call</i>"]
-        CA["<b>sf-pipeline/&lt;action&gt;/action.yml</b><br/>17 composite actions"]
-        SC["<b>sf-pipeline/scripts/*</b><br/>14 shared helpers"]
+        CA["<b>sf-pipeline/&lt;action&gt;/action.yml</b><br/>15 composite actions"]
+        SC["<b>sf-pipeline/scripts/*</b><br/>16 shared helpers"]
         RW -->|"uses: …/sf-pipeline/&lt;action&gt;@main"| CA
         CA -->|"$GITHUB_ACTION_PATH/../scripts/…"| SC
     end
 
     CW ==>|"uses: …/.github/workflows/X.yml@v1<br/><b>secrets: inherit</b>"| RW
-    CFG -.->|"read at run time from<br/>the CALLER's checkout"| CA
+    CFG -.->|"read at run time —<br/>gates from the PR's base branch"| CA
     SRC -.->|"delta source"| CA
 
     style CONS fill:#E6F7FD,stroke:#00BCEB,stroke-width:2px
@@ -116,8 +116,11 @@ flowchart LR
    never contains pipeline logic.
 2. **`secrets: inherit`** — the central workflows never hold credentials. They run
    with the *consumer's* secrets, scoped by GitHub Environment.
-3. **Config is read from the caller's checkout at run time**, so the same central
-   code behaves differently per project without branching.
+3. **Config is read from the consumer repo at run time**, so the same central
+   code behaves differently per project without branching. For a pull request
+   the gates and environments come from the PR's **base** branch (if protected,
+   else the default branch), never from the PR's own copy — see
+   [§6](#where-the-config-is-read-from).
 4. **Consumers pin a released tag.** `v1` is published and is the ref every
    consumer should use — see [§24](#24-versioning-and-distribution).
 
@@ -242,16 +245,63 @@ merged anything from `int`.
 ### Branch protection
 
 Applied by `sf-pipeline/scripts/setup-branch-protection.sh` (idempotent, reads
-branch names from the config):
+the chain from the config; `DRY_RUN=true` prints the payloads). **Every pipeline
+branch is pull-request-only** — a branch anyone with write access can push to
+skips every deploy and guard:
 
 | Branch | Protection |
 |---|---|
-| **entry** (`environments[0].branch`) | PR-only · required approvals · required `pr-validation` status · stale reviews dismissed · conversation resolution · no force-push · no deletion |
-| **downstream + prod** (`qa`, `stage`, `main`) | Guard-rails: no force-push, no deletion. The deploy guard, not branch protection, requires `deploy-<env>` from every earlier stage before a promotion deploys |
+| **entry** (`environments[0].branch`) | PR-only · `REQUIRED_REVIEWS` approvals (default 1) · code-owner review · required statuses `pr-validation` (approval-gated entry) and `deploy-<entry>` · stale reviews dismissed · conversation resolution |
+| **later stages** (`qa`, `stage`, …) | PR-only with 0 approvals (the pipeline opens and merges these PRs unattended) · required status `deploy-<env>` |
+| **production** (`production.branch`) | PR-only · the entry branch's approvals and code-owner review · no required status |
+| all | no force-push · no deletion |
+
+Why these, and not more:
+
+- **Required statuses are commit statuses the pipeline writes**, keyed by
+  environment *name*. `deploy-<env>` is written only by a real deploy, on the PR
+  head, immediately before `merge-pr` squash-merges with the workflow token — so a
+  PR into a stage can merge only once its exact commit is live there, and the merge
+  button cannot get ahead of the pipeline. The jobs' own check runs are named
+  `<caller job> / <job>` by GitHub, so they cannot be required by a fixed name.
+  The production branch has no status to require: the release train deploys, then
+  merges the release PR (`prod-release.yml`, finalize) without writing one.
+- **Required statuses are pinned to the GitHub Actions app** (`STATUS_APP_ID`,
+  default `15368` on github.com). The pipeline writes them with `GITHUB_TOKEN`, so
+  a `deploy-<env>` someone posts with their own token can't satisfy protection.
+  `STATUS_APP_ID=""` leaves them unpinned; on GitHub Enterprise Server pass your
+  instance's GitHub Actions app id. The guards apply the same rule (§12).
+- **Later stages need no human review**: the change was reviewed on entry, and the
+  ordering guard requires `deploy-<env>` from every earlier stage before a
+  promotion deploys.
+- **The production branch carries the entry review rule** because both production
+  GitHub Environments trust it (§5): whatever lands there, the caller workflows
+  included, runs with production credentials. The release PR is merged by the
+  workflow token, so with `REQUIRED_REVIEWS ≥ 1` it needs an Approve review —
+  `prod-approved` alone satisfies preflight but not this rule.
+- **Code-owner review** (`REQUIRE_CODE_OWNER_REVIEWS`, default: on when
+  `REQUIRED_REVIEWS ≥ 1`, off at 0) makes a PR that edits a caller workflow or
+  `pipeline.config.yml` wait for an owner named in `.github/CODEOWNERS` —
+  `examples/consumer/.github/CODEOWNERS` is the template. It gates the **merge**:
+  `pull_request` runs still execute the PR's own copy of the callers before anyone
+  reviews it, with the sandbox environments' secrets (see §5).
+- **The post-release realign keeps it.** `sync-branches` snapshots each env
+  branch's protection, lifts it, pushes (`--force-with-lease`) and restores it with
+  `PIPELINE_PAT` — app-pinned checks, review rules, *require last-push approval*,
+  dismissal and bypass lists, lock, fork syncing and signed commits included. If
+  GitHub rejects the full snapshot it restores the core rules and warns; if it
+  can't restore at all, the step fails and prints the snapshot (§11).
+  `tests/test_branch_protection.py` proves the round trip.
 
 `enforce_admins` defaults to **false** so an admin keeps an escape hatch — GitHub
-forbids approving your own PR, and the post-approval auto-merge still has to
-complete. Set `ENFORCE_ADMINS=true` for a real multi-developer team.
+forbids approving your own PR — and so an admin `PIPELINE_PAT` can push the
+**Sync Env Branches** merge onto a PR-only branch (without it, that workflow opens a
+sync PR per branch). Set `ENFORCE_ADMINS=true` for a real multi-developer team. A
+solo maintainer runs `REQUIRED_REVIEWS=0`, sets `allow_self_approval: true` (§6),
+approves with the `approved` label and authorizes releases with `prod-approved`.
+A `gate: auto` entry branch gets 0 required reviews whatever `REQUIRED_REVIEWS`
+says (it is merged unattended after every deploy); it still requires its
+`deploy-<entry>` status.
 
 ---
 
@@ -263,7 +313,7 @@ complete. Set `ENFORCE_ADMINS=true` for a real multi-developer team.
 | qa | `qa` | `qa` | optional | `NoTestRun` | `deploy:qa` label on the int PR |
 | stage | `stage` | `stage` | optional | `NoTestRun` | `deploy:stage` label on the int PR |
 | prod (validate) | `main` | `prod-validate` | **no** | `RunSpecifiedTests` | check-only, unattended |
-| prod (deploy) | `main` | `prod` | **yes** | quick-deploy | reviewer-gated release train |
+| prod (deploy) | `main` | `prod` | **yes** | quick-deploy (full deploy when the validation ran no tests, §11) | reviewer-gated release train |
 
 ### Why credentials live in GitHub Environments
 
@@ -289,9 +339,48 @@ validation began — asked to approve something nobody had tested yet. Splitting
 them lets validation run unattended and pages a human only once the release is
 provably deployable.
 
+### Only the production branch can use the production secrets
+
+Both environments hold the **production org's** JWT credentials — `prod-validate`
+is check-only by convention, not by permission. A GitHub Environment with no
+deployment branch rule gives its secrets to a job on *any* ref, so without one,
+anyone with write access could push a branch whose workflow names `prod` and read
+them. Project Init (`init-project.sh`) therefore sets both to **selected
+branches: `production.branch`** — creating them that way, and tightening existing
+ones while keeping their reviewers, wait timer and admin bypass.
+
+That one branch is enough: GitHub matches the rule against the run's `GITHUB_REF`,
+and every Prod Release job runs on the ref it was dispatched from — the production
+branch. `release/*` is deliberately not allowed (any writer can push one), and
+neither is anything a `pull_request` run uses (`refs/pull/<n>/merge`). One
+consequence: a PR **into** a release branch, which `plan.py` would validate against
+`prod-validate`, is refused at the environment; production is validated by the
+release train itself.
+
+**Prevent self-review.** With two or more required reviewers on `prod`, enable
+*Prevent self-review* so whoever dispatches a release can't approve its deploy.
+Leave it off for a solo maintainer, who would otherwise be unable to release.
+
+### What a writer can reach
+
+Branch rules can't protect the sandbox environments the same way: PR validation,
+the approval deploy and label promotion run on `pull_request*` events, from the
+PR's merge ref and with the PR's own copy of the caller workflows. A developer
+with write access can therefore run code with a sandbox's credentials before any
+review — give each sandbox integration user only what deployment needs. (CODEOWNERS
+only blocks the *merge*; this is GitHub behaviour.) A deployment branch policy on
+a sandbox environment would close it, but those runs' `refs/pull/<n>/merge` refs
+can't match one, so add it only if you accept that PR validation, the approval
+deploy and promotions can no longer use that environment. Likewise
+every **repository** secret is readable by a workflow any writer pushes:
+`PIPELINE_PAT` is in practice repo admin for every writer, so scope it to this
+repository, and delete the Org Bootstrap secrets (§19) once onboarding is done.
+
 ### Optional repo-level secrets
 
-`PIPELINE_PAT` (PR creation where Actions is forbidden from opening PRs),
+`PIPELINE_PAT` (admin; PR creation where Actions may not open PRs, PRs that start
+their own checks, the post-release realign and Sync Env Branches on protected
+branches, Project Init creating environments),
 `CHAT_API_TOKEN`, `CHAT_CHANNEL_ID`, `CHAT_WEBHOOK_URL`,
 `SONAR_TOKEN`, `SONAR_HOST_URL`,
 `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`.
@@ -303,6 +392,26 @@ provably deployable.
 `sf-pipeline/pipeline.config.yml` in the **consumer** repo is the single edit
 surface. It is read at run time by the `plan` composite action
 (`sf-pipeline/scripts/plan.py`).
+
+### Where the config is read from
+
+A PR must not be able to relax the gates that judge it, so the `plan` action's
+`config_ref` input fetches the file from a trusted branch instead of the
+checked-out workspace, and reports which one in its `config_source` output:
+
+| Run | Gates and environments come from |
+|---|---|
+| PR validation, approve-guard, the approval deploy (also via `manual_pr`) | The PR's **base** branch |
+| Label promotion | The **control PR's** base branch (the entry branch) |
+| Prod Release, the runbooks, Project Init, Sync Env Branches, a manual PR Validation | The dispatched ref's checkout (`config_source=workspace`) |
+
+The base branch counts only if it is **protected** — anyone with write access can
+create an unprotected branch — otherwise the repository's default branch is used.
+So a PR's own change to `pipeline.config.yml` takes effect only after it merges.
+Three keys describe the code being shipped rather than policy, and still come
+from the change itself (`plan.py --code-config`): `source_path`, `api_version`
+and `node_version`. Because a PR can set them, they are validated — plain
+relative path / version characters only, or the run fails.
 
 ### Top-level keys
 
@@ -322,6 +431,7 @@ surface. It is read at run time by the `plan` composite action
 | `profiles_mode` | `full` | `full` or `incremental` — see §14 |
 | `bypass_label` | — | Label an **admin** can add to bypass quality gates |
 | `require_pr_approval` | `true` | Whether a reviewer approval is required at the entry stage |
+| `allow_self_approval` | `false` | Whether a PR's author may approve its own **entry** deploy with the `approved` label (§9). A solo operator sets `true` on the entry branch — an admin can commit it there directly |
 | `notifications.chat` / `.jira` | — | Toggle each integration |
 
 ### Per-environment keys
@@ -339,9 +449,16 @@ surface. It is read at run time by the `plan` composite action
 
 | Gate | Behaviour |
 |---|---|
-| `auto` | Feature PR → real deploy + auto-merge, no approval |
-| `approval` | PR → check-only validation + report; approval (or the `approved` label) triggers the real deploy + merge |
+| `auto` | Every push to a non-draft PR into the branch (opened · reopened · synchronize · ready for review) → real deploy → merge at the deployed SHA, no approval. No PR Validation run, so the deploy guard skips the `pr-validation` check; with Apex and the coverage gate on, the deploy validates with the tests first (`gated`, §15). A push during a run makes it stop — the run for the newer commit deploys it |
+| `approval` | PR → check-only validation + report; approval (or the `approved` label) triggers the real deploy + merge. A push to the PR deploys nothing |
 | `on_demand` | Not PR-driven; deployed via the promotion label or a manual runbook |
+
+> **`gate: auto` needs the current deploy caller.** The example
+> `examples/consumer/.github/workflows/deploy.yml` also fires on `pull_request`
+> `opened`, `reopened`, `synchronize` and `ready_for_review`; a caller copied
+> before that listens only for reviews and labels, and never deploys an auto
+> stage. Copy the example again. As the entry stage, an auto branch also needs
+> `REQUIRED_REVIEWS=0` in branch protection (§4).
 
 **Gate defaults (`plan.py` → `normalize_envs`).** When `gate:` is omitted:
 
@@ -428,7 +545,7 @@ sequenceDiagram
     GH->>C: approve-guard → deploy
     C->>C: guards — conflict · ordering · validation
     C->>ORG: REAL deploy (int)
-    C->>GH: merge PR · deploy-int = success · deployed:int
+    C->>GH: deploy-int = success · merge PR at that SHA · deployed:int
 
     D->>GH: add deploy:qa
     C->>ORG: REAL deploy (qa)
@@ -474,8 +591,13 @@ flowchart TD
     style SKIP fill:#eee,stroke:#999
 ```
 
-Three details that matter:
+Four details that matter:
 
+- **A change without Apex is validated too.** `sf project deploy validate` won't
+  take `NoTestRun`, so a config-only delta runs a check-only
+  `sf project deploy start --dry-run`: every component is still checked against
+  the org, and the validation can fail. (It used to be skipped, so it was always
+  green.)
 - **`eff_baseline`** — with `delta_baseline: target` the delta is computed against
   the PR's base branch, so the report describes *exactly* what the approval deploy
   will push. With `prod` every env diffs against `baseline_branch`.
@@ -483,7 +605,8 @@ Three details that matter:
   deployment record. `validate-status` marks it inactive and deletes it so it can
   never satisfy a downstream ordering guard. This is load-bearing, not cosmetic.
 - **`pr-validation` commit status** is the durable output. Both the approval guard
-  and the entry-stage deploy guard key off it — not off job results.
+  and the entry-stage deploy guard key off it — not off job results, and only off
+  the status the pipeline wrote (§12).
 
 ---
 
@@ -493,62 +616,102 @@ Three details that matter:
 
 ```mermaid
 flowchart TD
-    T{"approval signal?<br/>review=approved · approved label<br/>· manual_pr override"}
+    T{"approval signal?<br/>review=approved · approved label<br/>· manual_pr override<br/>· push to a gate: auto PR"}
     STOP(["no deploy"])
-    CTX["<b>ctx</b> — resolve PR context"]
+    CTX["<b>ctx</b> — resolve PR context<br/><i>who may approve (below)</i>"]
     PL["<b>plan</b> — resolve env from BASE branch<br/>+ require_env + is_entry"]
     BY["<b>bypass</b>"]
     CHG["<b>changes</b>"]
 
     subgraph GRD["<b>guards</b> — each one fatal"]
         direction TB
-        G1["1 · merge conflict<br/><i>retries while GitHub computes</i>"]
+        G1["1 · PR open · head = approved commit<br/>· merges cleanly<br/><i>UNKNOWN after retries = refusal</i>"]
         G2["2 · ordering<br/><i>deploy-&lt;require_env&gt; = success<br/>for THIS commit</i>"]
         G3["3 · validation (entry only)<br/><i>pr-validation = success<br/>unless bypass active</i>"]
         G1 --> G2 --> G3
     end
 
+    FR{"PR re-read just<br/>before the deploy:<br/>still open at that SHA?"}
     DEP["<b>deploy</b> — check_only=false<br/>in the env's GitHub Environment<br/>coverage gate off when NoTestRun"]
     ST["deploy-&lt;env&gt; = success<br/><i>unlocks the merge</i>"]
-    MG["<b>merge</b> — squash into env branch"]
+    MG{"<b>merge</b> — squash,<br/>pinned to the deployed SHA"}
     LB["stamp deployed:&lt;env&gt;<br/>clear approved + deploy:&lt;env&gt;"]
+    NM["❌ deployed, NOT merged<br/>no deployed:&lt;env&gt; · approved removed<br/>💬 the org has &lt;sha&gt;, the branch doesn't"]
     RP["<b>comment</b> — deploy report"]
 
     T -->|no| STOP
     T -->|yes| CTX --> PL --> BY --> CHG --> GRD
-    GRD -->|all pass| DEP --> ST --> MG --> LB
+    GRD -->|all pass| FR
+    FR -->|yes| DEP --> ST --> MG
+    FR -->|"moved / closed"| MOVED["❌ approved removed · 💬 why<br/>nothing deploys · nothing merges"]
+    MG -->|merged| LB --> RP
+    MG -->|"refused — head moved, protection"| NM
+    DEP -.->|failure| RP
     GRD -->|any fail| BLOCK["❌ comment on the PR<br/>nothing deploys · nothing merges"]
-    DEP --> RP
 
     style DEP fill:#E6F7FD,stroke:#00BCEB,stroke-width:2px
     style GRD fill:#fffbe6,stroke:#e6a100
     style BLOCK fill:#ffe6e6,stroke:#c00
+    style MOVED fill:#ffe6e6,stroke:#c00
+    style NM fill:#ffe6e6,stroke:#c00
     style STOP fill:#eee,stroke:#999
 ```
 
 **The invariant:** the PR merges *only* after the org deploy succeeds, so an
 environment branch never advances ahead of a real deployment.
 
+### Exactly the approved commit is deployed and merged
+
+An approval is for one commit, the PR head when it was given. Right before the
+deploy the PR is read again: if a commit was pushed after the approval, or the PR
+was closed, nothing deploys, `approved` is removed and the PR says why (*Not
+deployed to `<env>` — a new commit was pushed after … was approved*). The merge
+is pinned to the deployed SHA (`gh pr merge --match-head-commit`), so a commit
+pushed **during** the deploy is never merged undeployed: the PR stays open,
+`deployed:<env>` is not stamped, `approved` is removed and the comment says the
+org has `<sha>` but the branch does not. The deploy report is not posted then —
+it would claim "deployed and merged". Either way, approve again once PR
+Validation is green for the new head; the pipeline deploys and merges exactly
+that commit. On a `gate: auto` stage the newer push has already started its own
+run, which deploys it.
+
 ### The three fatal guards
 
 | # | Guard | Question | Notes |
 |---|---|---|---|
-| 1 | merge conflict | Is the PR mergeable? | Retries while GitHub is still computing mergeability — `UNKNOWN` is not a pass |
-| 2 | ordering | Did **every earlier** environment really deploy **this commit**? (`stage` checks `int` and `qa`) | Trusts **only** the `deploy-<env>` commit status |
-| 3 | validation | Is `pr-validation` green for this head SHA? | Entry stage only; skipped when a bypass is active |
+| 1 | PR state + merge conflict | Is the PR **open**, is its head still the commit being deployed, and does it merge cleanly? | Retries while GitHub computes mergeability — `UNKNOWN` after the retries is a refusal, not a pass |
+| 2 | ordering | Did **every earlier** environment really deploy **this commit**? (`stage` checks `int` and `qa`) | Trusts **only** the `deploy-<env>` commit status, and only one created by `github-actions[bot]` |
+| 3 | validation | Is `pr-validation` green for this head SHA? | Entry stage only (and not an auto stage); skipped when a bypass is active. Same creator rule |
 
 Guard 2 is why phantom deletion matters: a check-only run must never be mistakable
 for a deploy.
+
+### Who may approve
+
+The approval action checks the person behind the signal, using the config from
+the PR's base branch:
+
+| Signal | Accepted from |
+|---|---|
+| **Approve** review | Someone with write access to the repo (on a public repo anyone can submit an Approve review; it starts nothing) |
+| `approved` label, entry stage | A repo **admin** — and not the PR's own author, unless `allow_self_approval: true` |
+| `approved` label, later approval-gated stage | Anyone with write access (a developer self-approves; the ordering guard is that stage's gate) |
+| `manual_pr` dispatch | admin or maintain; waives the peer approval |
+
+A refused label is removed with a comment saying why. The label is matched
+case-insensitively, so `Approved` works too.
 
 ### Approval guard
 
 GitHub forbids approving your own PR, so on qa/stage a developer self-approves
 with the `approved` label. Labels have no native preconditions — `approve-guard`
-supplies one.
+supplies one. It reads the gates from the PR's base branch, re-verifies who
+added a bypass label (the label alone is not authority), and trusts only a
+`pr-validation` status the pipeline wrote.
 
 ```mermaid
 flowchart LR
-    L["approved added"] --> BP{"bypass label<br/>present?"}
+    L["approved added"] --> BP{"verified<br/>admin bypass?"}
     BP -->|yes| OK["✅ approval stands"]
     BP -->|no| ST{"pr-validation<br/>for head SHA"}
     ST -->|success| OK
@@ -562,30 +725,35 @@ flowchart LR
 
 ## 10. Stage 3 — label-driven promotion
 
-The **int PR is the control surface**, even after it is merged and closed.
+The **int PR is the control surface** once it has been approved, deployed and
+**merged** — a promotion only ever ships the commit the entry stage deployed.
 
 ```mermaid
 flowchart TD
     L["deploy:qa / deploy:stage<br/>added to the int PR"]
-    IDEM{"control PR already<br/>carries deployed:&lt;env&gt;?"}
-    NOOP(["no-op — idempotent"])
-    PREP["<b>prepare</b><br/>find or CREATE the<br/>feature→&lt;env&gt; PR<br/><i>PIPELINE_PAT, else GITHUB_TOKEN</i>"]
-    CONF{"mergeable?"}
-    FAILC["❌ report conflict on the CONTROL PR<br/>+ link to the env PR<br/><i>nothing deploys, no branch moves</i>"]
-    ORD{"ordering guard<br/>every earlier stage deployed<br/>THIS commit?"}
-    DEP["<b>deploy</b> — real deploy<br/>of the delta to the &lt;env&gt; org"]
-    MRG["<b>merge</b> — squash the env PR"]
+    IDEM{"control PR carries deployed:&lt;env&gt;<br/>AND bot deploy-&lt;env&gt; = success?"}
+    NOOP(["no-op — idempotent<br/>💬 nothing to do · label cleared"])
+    REF{"<b>prepare</b> refusals<br/>entry stage? · control PR not merged?<br/>earlier stage not deployed + merged?<br/>feature tip ≠ merged head?"}
+    PREP["find or CREATE the<br/>feature→&lt;env&gt; PR at that commit<br/><i>PIPELINE_PAT, else GITHUB_TOKEN</i>"]
+    CONF{"MERGEABLE?"}
+    FAILC["❌ reason on the CONTROL PR · label removed<br/>no stray env PR (kept on a conflict)<br/><i>nothing deploys, no branch moves</i>"]
+    ORD{"ordering guard + re-check<br/>env PR still open at THIS commit?"}
+    DEP["<b>deploy</b> — real deploy of the same package<br/>(main vs the commit) to the &lt;env&gt; org"]
+    MRG["<b>merge</b> — squash the env PR<br/>pinned to the deployed SHA"]
     STAMP["stamp deployed:&lt;env&gt; on BOTH PRs<br/>clear deploy:&lt;env&gt;<br/>💬 confirm on the control PR"]
-    FAIL["<b>report_failure</b><br/>❌ note + run link on the control PR<br/>remove deploy:&lt;env&gt; so it can be retried"]
+    FAIL["<b>report_failure</b><br/>❌ reason + what the org and branch hold<br/>remove deploy:&lt;env&gt; · close the env PR it opened"]
 
     L --> IDEM
     IDEM -->|yes| NOOP
-    IDEM -->|no| PREP --> CONF
-    CONF -->|no| FAILC
+    IDEM -->|no| REF
+    REF -->|any| FAILC
+    REF -->|none| PREP --> CONF
+    CONF -->|"CONFLICTING / UNKNOWN"| FAILC
     CONF -->|yes| ORD
     ORD -->|blocked| FAIL
     ORD -->|pass| DEP --> MRG --> STAMP
     DEP -.->|failure| FAIL
+    MRG -.->|refused| FAIL
 
     style DEP fill:#E6F7FD,stroke:#00BCEB,stroke-width:2px
     style STAMP fill:#e6ffe6,stroke:#0a0
@@ -594,13 +762,41 @@ flowchart TD
     style NOOP fill:#eee,stroke:#999
 ```
 
+### When `prepare` refuses
+
+Each refusal is explained on the **control PR**, removes `deploy:<env>` (so
+re-adding it retries), deploys nothing and moves no branch. Most are checked
+before any env PR exists, and one this run opened is closed again — except on a
+conflict, where it stays open to show the conflicting files:
+
+| Refused when | Why |
+|---|---|
+| The label names the entry stage | `deploy:<entry>` is not a promotion — the entry stage deploys on approval |
+| The control PR isn't merged | A promotion ships what the entry stage approved, deployed **and** merged |
+| An earlier stage lacks `deploy-<env>` = success (written by `github-actions[bot]`) for the commit, or the control PR lacks `deployed:<env>` | Not deployed there yet — or deployed but not merged (its promotion is still running, or its merge was refused) |
+| The feature branch tip isn't the control PR's merged head | Commits pushed after the int merge were never deployed anywhere: open a new PR from the branch into int and promote from that, or reset the branch to the merged head |
+| The env PR conflicts, or GitHub hasn't computed its mergeability | A PR that can't merge would only fail **after** the deploy |
+
+**Resolving a conflict.** A promotion merges only the commit int deployed, so a
+fix pushed to the feature branch is a new commit: take it through int first (a
+new PR into int), then promote from that PR.
+
 Key properties:
 
-- **Idempotent** — re-adding a label that already produced a `deployed:<env>` is a
-  no-op, so a retry cannot double-deploy.
-- **Self-healing on failure** — a failed promotion removes `deploy:<env>` so the
-  label can simply be re-added to retry.
-- **`deployed:stage`** is the durable signal the release train later reads.
+- **Exactly the deployed commit merges.** The env PR's head must be the commit
+  being promoted — `prepare` checks it, the deploy job re-checks it right before
+  the org is touched, and the merge is pinned to the deployed SHA
+  (`--match-head-commit`).
+- **Idempotent** — a label re-added after `deployed:<env>` is a no-op, but only
+  when the bot-written `deploy-<env>` status is there too: a hand-added
+  `deployed:<env>` is not trusted, and the promotion runs.
+- **Self-healing on failure** — every failure comment names the reason
+  (Salesforce errors inline) and says what the org and the branch hold, removes
+  `deploy:<env>` so it can simply be re-added, and closes the env PR if this run
+  opened it. An unknown `deploy:<x>` label gets a comment and is removed;
+  `deploy: qa` (with a space) is rejected.
+- **`deployed:stage`** is where the release train starts looking — it then checks
+  the commit statuses (§11).
 
 ---
 
@@ -611,18 +807,18 @@ Key properties:
 ```mermaid
 flowchart TD
     subgraph AS["action: assemble"]
-        A1["<b>release-gather</b><br/>merged PRs labelled deployed:stage<br/><i>or an explicit stories list</i>"]
-        A2["build/refresh release/&lt;version&gt;<br/>from main · merge the stories"]
+        A1["<b>release-gather</b><br/>candidates: deployed:stage<br/>proof: bot deploy-&lt;env&gt; for EVERY stage<br/><i>an explicit stories list only narrows it</i>"]
+        A2["build/refresh release/&lt;version&gt;<br/>from main · merge each story's<br/>DEPLOYED commit, never the tip"]
         A3["💬 summary prints a compare link<br/><i>it does NOT open the PR</i>"]
         A1 --> A2 --> A3
     end
 
     subgraph RL["action: release"]
-        R1["<b>preflight</b><br/>release PR exists · authorized · green"]
-        R2["<b>validate</b><br/>env: prod-validate — <b>NO reviewers</b><br/>check_only=true → captures deploy_id"]
+        R1["<b>preflight</b><br/>release PR open · authorized at its head · green<br/>mergeable into main · not deployed:prod"]
+        R2["<b>validate</b> the preflight commit<br/>env: prod-validate — <b>NO reviewers</b><br/>check_only=true → captures deploy_id"]
         R3{{"⏸ <b>env: prod</b><br/>REQUIRED REVIEWERS"}}
-        R4["<b>deploy</b><br/>QUICK-DEPLOY the validated deploy_id<br/><i>not recompiled · not re-tested</i>"]
-        R5["<b>finalize</b><br/>merge PR · tag v&lt;version&gt;<br/>GitHub Release · sync-branches"]
+        R4["<b>deploy</b><br/>QUICK-DEPLOY the validated deploy_id<br/><i>no id (no Apex): full deploy</i><br/>→ deployed:prod on the release PR"]
+        R5["<b>finalize</b><br/>merge at the deployed SHA · tag v&lt;version&gt;<br/>GitHub Release · sync-branches"]
         R1 --> R2 --> R3 --> R4 --> R5
     end
 
@@ -644,7 +840,59 @@ flowchart TD
 
 **Validate-then-quick-deploy is the point.** Production is not recompiled or
 re-tested after approval — the exact artifact validated against `prod-validate` is
-the one promoted. *What a reviewer approves is what ships.*
+the one promoted. *What a reviewer approves is what ships.* (A release without
+Apex is the one exception — see [No-Apex releases](#no-apex-releases).)
+
+### What may be released
+
+`release-gather` uses `deployed:<last env>` only to **find** candidates. A story
+ships only when its deployed commit carries `deploy-<env>` = success, created by
+`github-actions[bot]`, for **every** stage (`deploy-int`, `deploy-qa`,
+`deploy-stage`). A hand-added label or a status someone posted is ignored with a
+warning — otherwise a story deployed to int only could reach a release.
+
+- **Assemble merges that exact commit**, never the branch tip. Commits pushed to
+  the story branch afterwards never went through the stages; they are left out
+  with a warning. The job summary lists each story with the commit released.
+- **An explicit `stories` list only narrows the gather.** A named story that isn't
+  proven, is on `hold` or has no merged PR fails the run.
+- **Nothing unaccounted for.** Assemble refuses a release branch holding commits
+  that no proven story accounts for (a story since put on hold, a hand push):
+  assemble a new version, or delete the branch and re-run.
+- **Nothing to release is an error**, not an empty release.
+
+### One commit, end to end
+
+Preflight records the release PR's head commit, and that commit is what is
+validated, deployed and merged (`gh pr merge --match-head-commit`): a push to the
+release branch meanwhile can't slip into production or into `main`.
+
+An authorization is for the content it saw. Re-assembling an open release PR with
+new content removes `prod-approved` (and says so on the PR), and an Approve review
+counts only for the commit it approved. Preflight also refuses — before anything
+is deployed — when branch protection would block the release PR's merge into
+`main` (`mergeStateStatus` `BLOCKED`, e.g. a required review is missing and only
+the label was given) or when it conflicts.
+
+### No double deploy
+
+Right after the production deploy the release PR gets
+`deployed:<deploy_environment>` (e.g. `deployed:prod`), and preflight refuses a PR
+that carries it. If finalize failed, **re-run the failed finalize job** — it skips
+a PR that is already merged — instead of running the release again.
+
+### No-Apex releases
+
+A release whose delta has no Apex is still validated against production before the
+reviewer is asked: a check-only `sf project deploy start --dry-run` that runs no
+tests. Salesforce quick-deploys only a validation that ran tests, so after
+approval the deploy job deploys the same delta again — a full, atomic deploy —
+unless `destructive_tests` names a canary: the validation then runs it, and the
+release quick-deploys what was validated. In production `--test-level` is omitted
+for a package without Apex (Salesforce runs no tests for it; `NoTestRun` is only
+for development orgs). The run summary and the chat message say which case
+applied, and the deploy job uses the same `test_level`, destructive tests and
+`profiles_mode` as the validation.
 
 **Destructive canary.** Salesforce forbids `NoTestRun` whenever Apex is involved,
 including deletions. A destructive-only production change therefore runs the
@@ -652,10 +900,32 @@ configured `destructive_tests` canary rather than a whole, possibly red, org
 suite. A deletion has no coverage requirement, so a single stable passing test
 satisfies the platform. Blank falls back to `RunLocalTests`.
 
-**Post-go-live sync.** `sync-branches` merges `main` into every env branch so the
-next delta starts from what is live. A protected branch or a conflict degrades to
-a sync PR; if the org blocks Actions from opening PRs it warns rather than failing
-the release.
+### Quick deploy refused
+
+If Salesforce refuses the quick deploy — the validation is older than 10 days, was
+already used, or production changed under it — the release stops before the
+merge and the tag with an explicit error. Check **Setup → Deployment Status** in
+production, then run the release again: it validates again and asks for approval
+again. There is **no automatic fallback**, by design: a client timeout looks the
+same while the org keeps deploying, and a second deploy on top would not be the
+artifact the reviewer approved. If the deploy did complete after all, don't deploy
+again — the job summary gives the manual finish (label, merge, tag, sync).
+
+### Post-go-live sync
+
+`sync-branches` realigns every env branch with `main` so the next delta starts
+from what is live:
+
+| The env branch… | Result |
+|---|---|
+| holds nothing that isn't in `main` | reset to `main` |
+| holds unreleased stories (deployed there, not released yet) | `main` is merged into it |
+| holds changes that conflict with `main` | left as is, with a warning — resolve it with **Sync Env Branches**, which opens a conflict PR cut from the production branch |
+
+Pushes use `--force-with-lease`, so a branch that moved meanwhile is never
+overwritten. Protection is lifted for the push and restored with `PIPELINE_PAT`,
+app-pinned checks and the extra settings included (§4). If it can't be restored,
+the step fails and prints the snapshot; the release itself is done by then.
 
 ---
 
@@ -668,27 +938,41 @@ stateDiagram-v2
     direction LR
     [*] --> Open: PR feature → int
     Open --> Validated: pr-validation = success
-    Validated --> DeployedInt: approved → deploy-int = success
-    DeployedInt --> DeployedQA: deploy:qa → deploy-qa = success
-    DeployedQA --> DeployedStage: deploy:stage → deploy-stage = success
-    DeployedStage --> Released: release train → tag
+    Validated --> DeployedInt: approved → deploy-int = success → merged → deployed:int
+    DeployedInt --> DeployedQA: deploy:qa → deploy-qa = success → merged → deployed:qa
+    DeployedQA --> DeployedStage: deploy:stage → deploy-stage = success → merged → deployed:stage
+    DeployedStage --> Released: release train → deployed:prod → tag
     Released --> [*]
 
     Validated --> Open: new commit pushed
     Open --> Open: approved added early → label removed
 ```
 
+**Deployed is not merged.** `deploy-<env>` is written right after the deploy and
+unlocks the merge; `deployed:<env>` is stamped only **after** the merge. A commit
+with `deploy-<env>` but no `deployed:<env>` was deployed but not merged (the
+merge was refused, or the promotion is still running), and later stages refuse
+it until it is merged.
+
+**Only the pipeline's statuses count.** The pipeline writes every commit status
+with `GITHUB_TOKEN`, so they are created by `github-actions[bot]`. The guards,
+the promotion workflow, approve-guard and `release-gather` read only those; a
+`deploy-<env>` or `pr-validation` someone posts with their own token or a PAT is
+ignored, and branch protection pins the same contexts to the GitHub Actions app
+(§4).
+
 ### Markers
 
 | Marker | Kind | Written by | Read by |
 |---|---|---|---|
-| `pr-validation` | commit status | pr-validation `signal` | approve-guard · entry deploy guard |
-| `deploy-<env>` | commit status | **real deploy only** | ordering guard · branch protection |
-| `approved` | label | human | deploy trigger · approve-guard |
+| `pr-validation` | commit status | pr-validation `signal` | approve-guard · entry deploy guard · branch protection |
+| `deploy-<env>` | commit status | **real deploy only** | ordering guard · promotion `prepare` · `release-gather` · branch protection — creator `github-actions[bot]` only |
+| `approved` | label | human (§9: who may) | deploy trigger · approve-guard |
 | `deploy:<env>` | label | human | promotion trigger |
-| `deployed:<env>` | label | pipeline | idempotency · release-gather |
-| `bypass-quality-gates` | label | **admin only** | bypass action (permission re-verified at run time) |
+| `deployed:<env>` | label | pipeline, after the merge | promotion idempotency (with `deploy-<env>`) · `release-gather`'s index of candidates — not proof of a deploy |
+| `bypass-quality-gates` | label | **admin only** | bypass action (permission re-verified at run time; dropped by a later push) |
 | `prod-approved` | label | human, on the **release PR** | `release-preflight` — authorizes the production release |
+| `deployed:<deploy_environment>` | label | release train, on the **release PR** | `release-preflight` — refuses a second deploy of the same release |
 
 Because the state lives on the PR, the int PR remains meaningful after merge — it
 is the object the promotion labels are applied to and the object `release-gather`
@@ -713,6 +997,29 @@ The resolved value surfaces as **`eff_baseline`** and is computed in
 deploys the same package as the entry deploy. The reference consumer `sfdx-pipeline-example`
 uses `target`.
 
+**A delta that can't be computed fails the run.** A deploy treats "no changes" as
+success and merges, so `delta.sh` fails instead of reporting no changes when
+sfdx-git-delta fails, when it writes no `package.xml`, or when the merge-base
+(three-dot mode) can't be computed — a two-dot diff against a drifted branch
+would turn everything only the other side has into deletions. It also outputs
+`from_ref`, the ref the delta really came from, which the dependency lint and
+incremental profiles (§14) diff against.
+
+### Deletions the org no longer has
+
+Salesforce fails the **whole** deploy on a deletion of a component the target org
+doesn't have (*No `<Type>` named: … found*) — orgs drift, and a component may
+never have reached that org. Before deploying, `prune_destructive.py` lists each
+deleted type in the target org (`sf org list metadata`) and drops the deletions
+it has positively confirmed absent. It keeps a deletion whenever it is unsure:
+types whose listing fails, folder-based types (Report, Dashboard, Document,
+EmailTemplate), `StandardValueSet` and `Settings`; names are compared URL-decoded
+and case-insensitively. Skipped deletions appear in the job summary, the PR
+report and `skipped-deletions.json` in the `deploy-report-<env>` artifact. If
+nothing is left to deploy, the deploy succeeds without deploying anything (mode
+`nothing-left`). A quick deploy promotes an already validated package, so nothing
+is pruned there.
+
 ### Test selection
 
 `sf-pipeline/scripts/specified_tests.py` resolves which Apex tests to run for
@@ -731,7 +1038,7 @@ block into the job summary.
 | Mode | Behaviour | Trade-off |
 |---|---|---|
 | `full` *(default)* | Deploy the complete Profile / Permission Set from source | Safest when every referenced component already exists in the target org |
-| `incremental` | For each profile/PS in the delta, keep only the permission entries that reference a component **also in this delta** (field, object, class, tab, app, recordType …), plus profile-level settings such as `userPermissions`. Everything else is stripped | Avoids "component does not exist" failures on orgs that lag behind |
+| `incremental` | Each Profile / Permission Set in the delta is compared with the ref the delta came from (`from_ref` — for PR validation, PR deploys and promotions the merge-base of the baseline and the branch) and keeps only the permission entries that were **added or changed** there; profile-level settings are kept only when they changed. A file that is new on the branch deploys in full. Comparing with the baseline's *tip* instead would treat an entry another change updated there as this branch's change and deploy it back to the older value | Deploys exactly what the branch changed; avoids "component does not exist" failures on orgs that lag behind |
 
 The *Redeploy Feature Branch* runbook exposes a `profiles_mode` override for
 one-off runs.
@@ -747,12 +1054,16 @@ components**, so unrelated PRs are not slowed down:
 |---|---|---|
 | `pmd` | `*.cls` / `*.trigger` change | Apex static analysis |
 | `sonar` | Apex **or** LWC/Aura JS change | SonarQube scan (needs `SONAR_TOKEN`, `SONAR_HOST_URL`) |
-| `apex_coverage` | `*.cls` / `*.trigger` change | During the org deploy, against `coverage_threshold` |
+| `apex_coverage` | `*.cls` / `*.trigger` change | On a validation with the tests, against `coverage_threshold`, before anything is deployed |
 
 The coverage gate is implemented in `sf-pipeline/coverage/coverage-gate.py` and is
 **skipped when the env's `test_level` is `NoTestRun`** — there is no coverage to
 assess. A PR containing only metadata such as custom fields correctly skips it
-entirely.
+entirely. When Salesforce itself rejects a deploy, the coverage it measured is
+still recorded and shown in the report. The report's coverage cell reads the
+percentage against the threshold, *Bypassed*, *Rejected by Salesforce*, *Not run
+(NoTestRun)*, *Not measured*, or *Not run (no Apex)* — the last only when the
+delta really has no Apex.
 
 ### Bypass
 
@@ -761,12 +1072,25 @@ if the person who added the label has admin/maintain permission on the repo**,
 re-verified at run time by the `bypass` action — the label alone is not authority.
 An active bypass also causes the entry-stage validation guard to be skipped. The
 bypass is read from the PR being deployed, so it applies to the entry deploy only:
-promotions open their own env PRs and always run the gate.
+promotions open their own env PRs and always run the gate. A bypass covers the
+commits the admin saw: commits pushed after the label was added drop it (PR
+Validation removes it, like a stale review), and an admin re-adds it for the new
+head. approve-guard re-verifies who added the label too.
 
-**Where the gate sits.** In PR validation the gate judges a check-only deploy. In a
-real deploy (the approval deploy and every promotion) it runs after Salesforce has
-accepted the deploy, so a change between Salesforce's 75% and `coverage_threshold`
-is already in that org when the gate fails the job and the env PR stays unmerged.
+### Where the gate sits
+
+In PR validation the gate judges the check-only validation. In a **real** deploy
+with Apex and the gate on — the approval deploy, an auto deploy, every promotion,
+and *Redeploy Feature Branch* with `dry_run=false` — the deploy action runs in
+`gated` mode: it validates the package with its tests first, the gate judges that
+result, and only then quick-deploys the validated job. A change between
+Salesforce's 75% and `coverage_threshold` therefore never reaches the org: the job
+fails, nothing is deployed, and the env PR stays unmerged. A change without Apex,
+a bypass and a `NoTestRun` stage deploy directly, without the gate.
+
+A gated deploy makes two Salesforce jobs (validate, then quick deploy). If another
+deploy lands in that org in between, Salesforce may refuse the quick deploy: the
+run fails explicitly, nothing is deployed, and a retry validates afresh.
 
 ---
 
@@ -776,7 +1100,9 @@ Every deploy / validate / promote / rollback records a structured entry via
 `sf-pipeline/scripts/audit.py`:
 
 1. A **🧾 Audit** table in the job summary — who, status, commit, components,
-   profiles mode, coverage, deploy id, run link.
+   profiles mode, coverage, deploy id, run link. For a quick deploy (the release,
+   or a `gated` deploy) the deploy id is the quick deploy's own job; the
+   validation it promoted is recorded as `validation_id`.
 2. An `audit-record.json` uploaded with the `deploy-report-<env>` artifact.
 3. For **real deploys only** (not check-only validations), one JSON line appended
    to the durable **`audit-log`** branch at `audit/audit-log.jsonl` — a permanent,
@@ -809,9 +1135,9 @@ actions. They sit **alongside** the promotion chain, not inside it.
 | Runbook | Purpose | Key inputs |
 |---|---|---|
 | **Recreate Feature Branch** | Cut a clean `feature/<name>` from the baseline when a branch is stale or corrupted | `name`, `base` (defaults to the pipeline baseline), `confirm_reset` (**required `true`** to reset an existing branch — destructive) |
-| **Redeploy Feature Branch** | Idempotently (re)deploy a feature branch's delta to any environment, to retry a flaky deploy or re-validate after an org change. Does **not** move any env branch | `feature_ref`, `environment`, `dry_run` (**default true** = check-only), `profiles_mode` override |
-| **Rollback** | Revert a deployed change and open a **revert PR** into the entry branch, so the rollback flows through the same gate → approve → deploy → merge path — fully validated, reviewed and audited. Nothing is force-deployed | `pr_number` (merge commits use `-m 1` automatically) **or** `ref`; `base` |
-| **Sync env branches** | Merge `main` into every env branch after go-live | called by `prod-release`; also dispatchable |
+| **Redeploy Feature Branch** | Idempotently (re)deploy a feature branch's delta to any environment, to retry a flaky deploy or re-validate after an org change. Does **not** move any env branch | `feature_ref`, `environment`, `dry_run` (**default true** = check-only), `profiles_mode` (`config` = use `pipeline.config.yml`, the default · `full` · `incremental`) |
+| **Rollback** | Revert a deployed change and open a **revert PR** into the entry branch, so the rollback flows through the same gate → approve → deploy → merge path — fully validated, reviewed and audited. Nothing is force-deployed | `pr_number` of a **merged** PR (an unmerged one is refused; merge commits use `-m 1` automatically) **or** `ref`; `base` |
+| **Sync env branches** | Merge `main` into every env branch; a conflict opens a PR cut from the production branch | dispatch it when branches drift, or when the post-release realign (§11) left a branch with conflicts |
 
 A conflicting revert stops with manual `git revert` instructions rather than
 guessing.
@@ -830,8 +1156,27 @@ from the baseline so its delta stays clean.
 ## 19. Org bootstrap and onboarding
 
 `org-bootstrap.yml` plus the `sf-setup/` kit in the central repo automate standing
-up a new org's connection: the connected app, the JWT certificate, the integration
-user, and writing the four secrets into the consuming repo's GitHub Environment.
+up a new org's connection: the `SF CICD Deploy` app, the JWT certificate, the
+integration user, and writing the four secrets into the consuming repo's GitHub
+Environment. Orgs that refuse new Connected Apps (the default since Spring '26)
+get the same app as an **External Client App** (`sf-setup/metadata-eca/`); JWT
+login and the four secrets are the same either way.
+
+| Route | Runs | Needs |
+|---|---|---|
+| `sf-setup/scripts/bootstrap-org.sh` (one org) or `bootstrap-from-config.sh` (every org in the config) | Locally, from the consuming repo's root | `sf`, `gh` with repo admin, a one-time browser login per org |
+| **Org Bootstrap** workflow | In Actions, one dispatch per org | Repository secrets `SFDX_AUTH_URL` (an admin of *that* org) and `BOOTSTRAP_TOKEN` (repo admin) |
+
+The workflow is reusable, so it runs in the **consumer's** workspace, where
+`sf-setup/` does not exist. It checks the kit out of the central repo at the ref
+the caller pinned: its own `owner/repo/.github/workflows/org-bootstrap.yml@<ref>`
+string is an internal reference that `cut-release.sh` rewrites like every `uses:`,
+so `@v1` runs the v1 kit. Both its secrets are readable by any workflow a writer
+pushes — delete them after the last org.
+
+`push-env-secrets.sh` creates a missing environment but never re-`PUT`s an
+existing one, so re-bootstrapping `prod` can't disturb its reviewers or its
+branch rule (§5).
 
 Step-by-step onboarding instructions live in
 **[Pipeline_User_Guide.md](./Pipeline_User_Guide.md)**.
@@ -845,11 +1190,11 @@ Step-by-step onboarding instructions live in
 | Workflow | Purpose |
 |---|---|
 | `pr-validation.yml` | Check-only validation + quality gates + sticky report + `pr-validation` status |
-| `deploy.yml` | The real deploy, guards, merge, status and label stamping. Serves int, qa and stage |
-| `approve-guard.yml` | Holds the `approved` label until validation is green |
+| `deploy.yml` | The real deploy, guards, merge (pinned to the deployed SHA), status and label stamping. Serves every PR-driven stage: on approval, and on every push for a `gate: auto` stage |
+| `approve-guard.yml` | Holds the `approved` label until validation is green (gates from the PR's base branch) |
 | `sf-promote-label.yml` | Label-driven promotion orchestration |
 | `prod-release.yml` | `assemble` and `release` — the production train |
-| `sync-env-branches.yml` | Replay `main` onto the env branches |
+| `sync-env-branches.yml` | Merge `main` into the env branches; a conflict opens a PR cut from the production branch |
 | `org-bootstrap.yml` | Stand up a new org's connection and secrets |
 | `project-init.yml` | Create the branches, labels and GitHub Environments a config declares |
 | `sf-ops-recreate-feature.yml` | Recreate runbook |
@@ -865,20 +1210,20 @@ Step-by-step onboarding instructions live in
 
 | Action | Purpose |
 |---|---|
-| `plan` | Read the caller's config → outputs (`outputs` / `resolve` / `promote` / `prdeploy` modes) |
+| `plan` | Read the caller's config → outputs (`outputs` / `resolve` / `promote` / `prdeploy` modes); `config_ref` reads the gates from a protected base branch (§6) |
 | `init` | Create the branches, labels and GitHub Environments the config declares |
 | `changes` | Install SF CLI + sfdx-git-delta; compute the delta and manifest |
-| `deploy` | auth → profiles → validate/deploy → coverage gate → report → audit |
-| `guard` | The three fatal pre-deploy guards |
-| `approval` | Interpret the approval signal |
+| `deploy` | auth → delta → lint → skip absent deletions → profiles → validate/deploy (`gated`: validate → coverage gate → quick deploy) → report → audit |
+| `guard` | The three fatal pre-deploy guards (PR open at the deployed commit + mergeable · ordering · validation) |
+| `approval` | Interpret the approval signal and check who gave it (§9) |
 | `bypass` | Resolve and **re-verify** an admin bypass |
-| `merge-pr` | Squash-merge after a successful deploy |
+| `merge-pr` | Squash-merge after a successful deploy, only at the deployed SHA (`--match-head-commit`); fails with a `reason` otherwise |
 | `report` | The unified sticky PR comment |
 | `status` | Write `pr-validation` / `deploy-<env>` commit statuses |
 | `coverage` | Apex coverage gate |
-| `release-gather` | Collect the release label's PRs for a release (label from `release_label`) |
-| `release-preflight` | Verify the release PR exists, is authorized and green |
-| `sync-branches` | Merge `main` into env branches, degrading to a PR |
+| `release-gather` | Collect the stories for a release — candidates by `release_label`, proven by the bot's `deploy-<env>` statuses for every stage — and the exact commit of each |
+| `release-preflight` | Verify the release PR exists, is authorized at its head, green, mergeable and not already deployed; outputs the head commit |
+| `sync-branches` | Post-release realign: reset each env branch to `main` when that loses nothing, else merge `main` in; restores branch protection |
 | `jira` · `notify` | Integrations (no-ops when unconfigured) |
 
 ---
@@ -902,6 +1247,7 @@ Step-by-step onboarding instructions live in
 | `audit.py` · `audit-append.sh` | Structured audit record and durable append to the `audit-log` branch |
 | `jira.py` | Jira comment and transition |
 | `dependency_lint.py` | Metadata dependency checks |
+| `prune_destructive.py` | Skip deletions the target org no longer has (§13) |
 | `setup-branch-protection.sh` | Codified, idempotent branch protection |
 
 ---
@@ -912,8 +1258,8 @@ Step-by-step onboarding instructions live in
 |---|---|---|
 | PR validation | `pr-validation-<pr>` | A new push supersedes the in-flight validation |
 | Deploy | `approval-deploy-<pr>` | A re-approval can't deploy the same PR twice. Different PRs may deploy into one org at the same time; Salesforce queues them inside the org, and a per-org group would let GitHub cancel a queued deploy |
-| Promotion | per PR + env | Prevents a double promotion from a re-added label |
-| Release | `prod-release` | One train at a time, across all release branches |
+| Promotion | `promote-label-<deploy:env>-<feature branch>` | One promotion per env and story. `deploy:qa` and `deploy:stage` run in separate groups, so stage refuses until qa has merged (`deployed:qa`, §10). A label re-added during a run queues behind it, then no-ops |
+| Release | `prod-release` | One train at a time, across all release branches. A run waiting for the prod reviewer holds the group; of the runs queued behind it, GitHub keeps only the newest and cancels the older ones |
 
 > ⚠️ **Caller gotcha.** A caller must **not** declare a concurrency group equal to
 > the reusable workflow's own (e.g. `pr-validation-<pr>`). It cancels itself and
@@ -1034,17 +1380,40 @@ contain `/` (verified with a renamed chain `mon → tue → wed` on `env/monday`
 `env/tuesday`, `env/wednesday`, whose GitHub Environments kept the names `int`, `qa`,
 `stage`).
 
-**Open questions from the run** (behaviour unchanged, decisions pending):
+**Open questions from the run**, and where they stand after the fourth run:
 
-1. A release with no Apex skips the production check-only validation ("nothing to
-   test"), so the reviewer approves an unvalidated deploy, and the deploy job runs a
-   full deploy instead of a quick deploy. A `NoTestRun` check-only deploy would still
-   catch broken or missing metadata before the approval.
-2. The quick deploy has no fallback: if Salesforce refuses the validated job (e.g. it
-   is older than 10 days), the release stops before merge and tag, and a re-run
-   validates again. Safe, but manual.
-3. The coverage gate in real deploys runs after the deploy (see §15), and an admin
-   bypass doesn't carry into promotions.
+1. ~~A release with no Apex skips the production check-only validation~~ —
+   **resolved.** It is now validated with a check-only `--dry-run` deploy before the
+   reviewer is asked ([§11](#no-apex-releases)).
+2. The quick deploy has no fallback — **decided: none, by design.** A refused quick
+   deploy stops the release with an explicit error; a re-run validates and asks for
+   approval again ([§11](#quick-deploy-refused)).
+3. ~~The coverage gate in real deploys runs after the deploy~~ — **resolved.** A real
+   deploy with Apex validates first and is coverage-gated before anything reaches
+   the org (`gated` mode, [§15](#where-the-gate-sits)). An admin bypass still
+   doesn't carry into promotions — **open, by design**: a promotion opens its own
+   env PR, and the gate applies there.
+4. ~~Deleting a component the target org no longer has failed the whole deploy~~ —
+   **resolved.** Such deletions are skipped and listed
+   ([§13](#deletions-the-org-no-longer-has)).
+
+### Fourth run: adversarial testing (2026-10-19)
+
+The fourth run attacked the pipeline the way a developer with write access could.
+The table lists each attack and what stops it now; the live re-test results are
+filled in after the re-run.
+
+| Attack | What stops it now | Live re-test |
+|---|---|---|
+| A hand-added `deployed:stage` on a story that only reached int, gathered into a release | `release-gather` uses the label only to find candidates; a story ships only with bot-written `deploy-<env>` = success for every stage (§11) | *to be verified* |
+| A PR relaxing its own coverage gate in its copy of `pipeline.config.yml` | Gates and environments come from the PR's protected base branch (§6) | *to be verified* |
+| A commit pushed during the int deploy, then merged undeployed | The PR is re-read before the deploy, and the merge is pinned to the deployed SHA (§9) | *to be verified* |
+| A commit pushed after the int merge, merged into qa by the env PR | `prepare` refuses unless the feature tip is the control PR's merged head; the env PR merge is pinned (§10) | *to be verified* |
+| A forged `deploy-<env>` / `pr-validation` status posted with a person's token | Only statuses created by `github-actions[bot]` count; branch protection pins them to the GitHub Actions app (§4, §12) | *to be verified* |
+| Direct pushes to `qa`, `stage` and `main` | Every pipeline branch is pull-request-only (§4) | *to be verified* |
+| Production secrets read from a workflow on any branch | `prod` and `prod-validate` accept only the production branch (§5) | *to be verified* |
+| An author approving their own entry PR with the `approved` label | The entry label needs an admin who is not the author, unless `allow_self_approval: true`; a review needs write access (§9) | *to be verified* |
+| `deploy:prod` / `deploy:hotfix` labels | A label must name a configured stage after the entry: anything else is commented on and removed, and production is reached only through Prod Release (§10) | *to be verified* |
 
 ---
 
@@ -1074,8 +1443,8 @@ fixes without acting.
 > This is the single thing most likely to make a release silently meaningless.
 
 The reusable workflows do not only *get* called — they also *call*. Every one of
-them invokes this repository's composite actions, **45 such references** across the
-ten workflows:
+them invokes this repository's composite actions, **51 such references** across the
+eleven workflows and the `approval` action:
 
 ```yaml
 # .github/workflows/deploy.yml, on main
@@ -1091,8 +1460,8 @@ option. The fix is the standard action-monorepo pattern: **the release commit
 rewrites the refs, and exists only on the tag.**
 
 - `main` keeps `@main`, so day-to-day development is never frozen.
-- The `v1` tag points at a commit whose 45 internal refs all read `@v1`.
-- The `v1.0.0` tag points at a commit whose 45 internal refs all read `@v1.0.0`,
+- The `v1` tag points at a commit whose internal refs all read `@v1`.
+- The `v1.0.0` tag points at a commit whose internal refs all read `@v1.0.0`,
   making that pin genuinely immutable all the way down.
 
 Verify any tag before trusting it:
@@ -1253,6 +1622,12 @@ issues; no code defect is implied.
    the live question as more projects onboard.
 4. **End-to-end onboarding of a brand-new project** via `org-bootstrap` — now
    unblocked, since `@v1` is stable.
+5. **Known limitation: PR code runs before review.** CODEOWNERS only blocks the
+   merge. `pull_request` runs still execute the PR's own copy of the caller
+   workflows, with the sandbox environments' secrets, before anyone reviews it —
+   GitHub behaviour, not the pipeline's. Restrict the sandbox environments with
+   deployment branch policies only if you accept that PR validation (and the
+   approval deploy and promotions) can then no longer use them (§5).
 
 Separately, the central workflows run `actions/checkout@v4`, `actions/setup-node@v4`
 and `actions/upload-artifact@v4`, which log a Node 20 deprecation warning and are

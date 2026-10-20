@@ -11,9 +11,12 @@ sf-setup/
 │   └── force-app/main/default/
 │       ├── connectedApps/SF_CICD_Deploy.connectedApp-meta.xml
 │       └── permissionsets/SF_CICD_Deploy.permissionset-meta.xml
+├── metadata-eca/                              # the same app as an External Client App
+│   └── force-app/main/default/ext*/           # (orgs that refuse Connected Apps)
 └── scripts/
     ├── gen-jwt-keypair.sh          # 1 keypair, reused for all orgs
     ├── bootstrap-org.sh            # ← main: prepare ONE org end-to-end
+    ├── bootstrap-from-config.sh    # every org in pipeline.config.yml (+ config-orgs.py)
     ├── bootstrap-all.sh            # loop over orgs.tsv to do them all
     ├── create-integration-user.sh  # + apex/createIntegrationUser.apex
     ├── push-env-secrets.sh         # write the 4 JWT secrets into a GH Environment
@@ -102,8 +105,23 @@ System Administrator profile authenticates without this extra click.
   `.secrets/` to the consuming repo's `.gitignore`.
 - `SF_JWT_KEY` is stored base64-encoded so PEM newlines survive GitHub secrets.
 - Reuse the same keypair across orgs, or pass `--key-dir` to isolate per org.
+- `push-env-secrets.sh` only creates an environment that is missing. It never
+  re-writes an existing one, so bootstrapping `prod` again keeps its required
+  reviewers and its deployment branch rule.
 
 ## Running it from CI (optional, fully hands-off)
 See `.github/workflows/org-bootstrap.yml` in this repo — a reusable workflow that
 runs `bootstrap-org.sh` with `--login jwt` using an admin `SFDX_AUTH_URL` secret,
-so onboarding a new org is a single `workflow_dispatch`.
+so onboarding a new org is a single `workflow_dispatch`
+(`examples/consumer/.github/workflows/org-bootstrap.yml` is the caller).
+
+It checks this kit out of the central repo at the ref the caller pinned, and needs
+two repository secrets in the consuming repo:
+
+| Secret | Value |
+|---|---|
+| `SFDX_AUTH_URL` | `sf org display --verbose --target-org <alias>` → *Sfdx Auth Url*, for an admin of the org being bootstrapped. One org per value: replace it before the next run |
+| `BOOTSTRAP_TOKEN` | A PAT with admin on the consuming repo (writes Environment secrets; also reads this repo if your copy is private) |
+
+Any workflow a writer pushes can read repository secrets, so **delete both** once
+the last org is done.

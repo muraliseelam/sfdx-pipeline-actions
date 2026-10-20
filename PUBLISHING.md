@@ -84,9 +84,10 @@ SSH remote if it is not the account you intend to publish under.
 ./scripts/validate.sh
 ```
 
-Ten offline checks, including that every internal reference resolves to a real
-path, that the example consumer matches the example config, and that the
-environment-name portability suite passes. All ten must pass before you push.
+Thirteen offline checks, including that every internal reference resolves to a
+real path, that the example consumer matches the example config, that the
+environment-name portability suite passes, and that branch protection leaves no
+pipeline branch open. All thirteen must pass before you push.
 
 ---
 
@@ -122,7 +123,7 @@ tag while every action it calls still floats on `main` — a consumer pinning `@
 would be pinned in name only.
 
 So `cut-release.sh` puts one extra commit on each tag, off `main`, rewriting all
-47 internal references to point at the tag itself. `main` keeps `@main` so
+51 internal references to point at the tag itself. `main` keeps `@main` so
 day-to-day development is never frozen. That commit is never merged back.
 
 Verify any tag at any time:
@@ -149,7 +150,7 @@ Point your first Salesforce project at it using
 ## Checklist
 
 - [ ] `personalize.sh` run, no placeholders left
-- [ ] `validate.sh` — all ten checks pass
+- [ ] `validate.sh` — all thirteen checks pass
 - [ ] `main` pushed
 - [ ] `v1.0.0` **and** `v1` tags pushed
 - [ ] `verify-tag.sh v1` passes
