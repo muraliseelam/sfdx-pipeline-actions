@@ -136,8 +136,17 @@ jobs:
           git fetch origin --prune
           # Create or refresh release/<version> from the prod branch.
           OLD=""
+          # Nothing but the proven commits may ship. An existing release branch can
+          # hold older content (a story since put on hold or not proven, a hand
+          # push): refuse it up front, before a merge conflict hides the cause.
+          EXCL=("^origin/$PROD_BRANCH"); for h in "${H[@]}"; do EXCL+=("^$h"); done
           if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
             OLD="$(git rev-parse "origin/$BR")"
+            EXTRA="$(git rev-list --no-merges --abbrev-commit "origin/$BR" "${EXCL[@]}")"
+            if [ -n "$EXTRA" ]; then
+              echo "::error::$BR already contains commits that no story proven deployed to every stage accounts for: $(echo "$EXTRA" | xargs). Assemble a new version, or delete $BR and re-run."
+              exit 1
+            fi
             git checkout -B "$BR" "origin/$BR"; git merge --no-edit "origin/$PROD_BRANCH"
           else
             git checkout -B "$BR" "origin/$PROD_BRANCH"
@@ -150,9 +159,7 @@ jobs:
             git merge --no-edit -m "Merge $s at ${sha:0:8}" "$sha" || \
               { echo "::error::Merge conflict merging $s — rebase it on $PROD_BRANCH and re-run."; exit 1; }
           done
-          # Nothing but those commits may ship. An existing release branch can hold
-          # older content: a story since put on hold or not proven, or a hand push.
-          EXCL=("^origin/$PROD_BRANCH"); for h in "${H[@]}"; do EXCL+=("^$h"); done
+          # And after the merges: still nothing but those commits.
           EXTRA="$(git rev-list --no-merges --abbrev-commit HEAD "${EXCL[@]}")"
           if [ -n "$EXTRA" ]; then
             echo "::error::$BR contains commits that no story proven deployed to every stage accounts for: $(echo "$EXTRA" | xargs). Assemble a new version, or delete $BR and re-run."
