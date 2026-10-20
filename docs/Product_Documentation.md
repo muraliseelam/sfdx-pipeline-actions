@@ -1400,20 +1400,31 @@ contain `/` (verified with a renamed chain `mon → tue → wed` on `env/monday`
 ### Fourth run: adversarial testing (2026-10-19)
 
 The fourth run attacked the pipeline the way a developer with write access could.
-The table lists each attack and what stops it now; the live re-test results are
-filled in after the re-run.
+The table lists each attack, what stops it now, and the live re-test against
+`sfdx-pipeline-example` on 2026-10-20 (callers on `@main` at `b5c75fe`).
 
 | Attack | What stops it now | Live re-test |
 |---|---|---|
-| A hand-added `deployed:stage` on a story that only reached int, gathered into a release | `release-gather` uses the label only to find candidates; a story ships only with bot-written `deploy-<env>` = success for every stage (§11) | *to be verified* |
-| A PR relaxing its own coverage gate in its copy of `pipeline.config.yml` | Gates and environments come from the PR's protected base branch (§6) | *to be verified* |
-| A commit pushed during the int deploy, then merged undeployed | The PR is re-read before the deploy, and the merge is pinned to the deployed SHA (§9) | *to be verified* |
-| A commit pushed after the int merge, merged into qa by the env PR | `prepare` refuses unless the feature tip is the control PR's merged head; the env PR merge is pinned (§10) | *to be verified* |
-| A forged `deploy-<env>` / `pr-validation` status posted with a person's token | Only statuses created by `github-actions[bot]` count; branch protection pins them to the GitHub Actions app (§4, §12) | *to be verified* |
-| Direct pushes to `qa`, `stage` and `main` | Every pipeline branch is pull-request-only (§4) | *to be verified* |
-| Production secrets read from a workflow on any branch | `prod` and `prod-validate` accept only the production branch (§5) | *to be verified* |
-| An author approving their own entry PR with the `approved` label | The entry label needs an admin who is not the author, unless `allow_self_approval: true`; a review needs write access (§9) | *to be verified* |
-| `deploy:prod` / `deploy:hotfix` labels | A label must name a configured stage after the entry: anything else is commented on and removed, and production is reached only through Prod Release (§10) | *to be verified* |
+| A hand-added `deployed:stage` on a story that only reached int, gathered into a release | `release-gather` uses the label only to find candidates; a story ships only with bot-written `deploy-<env>` = success for every stage (§11) | ✅ #58 (int only) hand-labelled `deployed:stage`: assemble warned "a label is not proof" and left it out; `release/2026.91` held only PROJ-15 at its deployed commit. The stale `release/2026.90` (holding the first run's attack commit) was refused up front |
+| A PR relaxing its own coverage gate in its copy of `pipeline.config.yml` | Gates and environments come from the PR's protected base branch (§6) | ✅ #62 set `apex_coverage: false` and `coverage_threshold: 50`; the gate still ran from `int` (true, 85) and failed at 81.82%. Approving it was refused twice. A `source_path` with `; echo …` was rejected before any shell saw it |
+| A commit pushed during the int deploy, then merged undeployed | The PR is re-read before the deploy, and the merge is pinned to the deployed SHA (§9) | ✅ #61: commit B pushed mid-deploy; `int` got only the approved commit, the merge was refused, no `deployed:int`, and the PR said so. Re-approving the new head deployed and merged both |
+| A commit pushed after the int merge, merged into qa by the env PR | `prepare` refuses unless the feature tip is the control PR's merged head; the env PR merge is pinned (§10) | ✅ #58: a field pushed after the int merge, then `deploy:qa` → "has moved on", nothing deployed, no env PR left open |
+| A forged `deploy-<env>` / `pr-validation` status posted with a person's token | Only statuses created by `github-actions[bot]` count; branch protection pins them to the GitHub Actions app (§4, §12) | ✅ A `deploy-qa` = success POSTed with a personal token on #58's commit: `deploy:stage` refused (`deploy-qa`=missing), and a hand-made feature→qa PR stayed `BLOCKED` (only an admin override could merge it) |
+| Direct pushes to `qa`, `stage` and `main` | Every pipeline branch is pull-request-only (§4) | ✅ Protection applied with `REQUIRED_REVIEWS=0`: `int` [pr-validation, deploy-int], `qa` [deploy-qa], `stage` [deploy-stage], `main` PR-only; all pinned to app 15368, and still intact after the post-release realign. An admin push is reported as a bypassed rule |
+| Production secrets read from a workflow on any branch | `prod` and `prod-validate` accept only the production branch (§5) | ✅ Project Init set both to custom branch policy `main`; the release (dispatched on `main`) validated and deployed through them |
+| An author approving their own entry PR with the `approved` label | The entry label needs an admin who is not the author, unless `allow_self_approval: true`; a review needs write access (§9) | ✅ #55: the author's own `approved` label was removed with instructions; after `allow_self_approval: true` on `int` the same label deployed |
+| `deploy:prod` / `deploy:hotfix` labels | A label must name a configured stage after the entry: anything else is commented on and removed, and production is reached only through Prod Release (§10) | ✅ `deploy:prod` on #55: commented and removed; `deploy:int` on merged #58: "not a promotion" |
+
+The normal path ran in the same session: PROJ-15 (a label and an Apex class) was
+approved, deployed to `int` in `gated` mode (validate with its tests → coverage
+gate → quick deploy of that validation), promoted to `qa` and `stage` with the
+same main-vs-feature package (stage's guard checked `int` and `qa`), assembled
+into `release/2026.91`, validated against production with its tests and
+quick-deployed after the reviewer's approval. The post-release realign reset
+`qa`/`stage` to `main` and merged `main` into `int`, which still held unreleased
+stories. Also verified live: a deletion of a label the `int` org no longer had
+was skipped with a warning and the PR merged (#63), and a temporary
+`gate: auto` on `int` deployed and merged a PR on its push alone (#64).
 
 ---
 
