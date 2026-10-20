@@ -36,17 +36,27 @@ def check(label, actual, expected):
         print(f"  \033[32m\u2713\033[0m {label}")
 
 
-def plan(cfg_text, *args, expect_fail=False):
-    """Run plan.py against a config and return its $GITHUB_OUTPUT as a dict."""
+def plan(cfg_text, *args, expect_fail=False, code=None):
+    """Run plan.py against a config and return its $GITHUB_OUTPUT as a dict.
+
+    `code` is the config of the change being shipped (--code-config), as the
+    plan action passes it when the gates come from a PR's base branch.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         cfg = os.path.join(tmp, "pipeline.config.yml")
         with open(cfg, "w", encoding="utf-8") as fh:
             fh.write(cfg_text)
+        extra = []
+        if code is not None:
+            code_path = os.path.join(tmp, "code.config.yml")
+            with open(code_path, "w", encoding="utf-8") as fh:
+                fh.write(code)
+            extra = ["--code-config", code_path]
         out = os.path.join(tmp, "gh_output")
         open(out, "w").close()
         env = dict(os.environ, GITHUB_OUTPUT=out)
         proc = subprocess.run(
-            [sys.executable, PLAN, "--config", cfg, *args],
+            [sys.executable, PLAN, "--config", cfg, *extra, *args],
             capture_output=True, text=True, env=env,
         )
         if expect_fail:
@@ -254,6 +264,80 @@ def test_release_label_override():
     check("an explicit release_label wins", plan(cfg, "outputs")["release_label"], "ready-to-ship")
 
 
+def test_trusted_config():
+    print("\n\033[1mGates come from the trusted (base-branch) config, code keys from the change\033[0m")
+    # The PR's own copy relaxes every gate and re-maps the chain, as PR #52 did.
+    tampered = """
+source_path: src/app
+api_version: "64.0"
+node_version: "20"
+baseline_branch: evil
+quality_gates: { apex_coverage: false }
+coverage_threshold: 1
+bypass_label: anything
+require_pr_approval: false
+allow_self_approval: true
+environments:
+  - { name: thu, branch: env/thursday, gh_environment: live-validate, gate: auto, test_level: NoTestRun }
+production: { branch: production, validate_environment: qa }
+"""
+    trusted = WEEKDAYS + "quality_gates: { apex_coverage: true }\n"
+    o = plan(trusted, "outputs", code=tampered)
+    check("the coverage gate stays on", o["q_apex_coverage"], "true")
+    check("the coverage threshold stays", o["coverage_threshold"], "90")
+    check("the bypass label stays", o["bypass_label"], "bypass-quality-gates")
+    check("approval stays required", o["require_pr_approval"], "true")
+    check("self-approval stays off", o["allow_self_approval"], "false")
+    check("the baseline stays", o["baseline_branch"], "production")
+    check("the entry branch stays", o["entry_branch"], "env/monday")
+    check("the environment mapping stays", json.loads(o["auto_json"])[3]["gh_environment"], "thursday-org")
+    check("the prod validate environment stays", o["prod_validate_env"], "live-validate")
+    check("source_path follows the change", o["source_path"], "src/app")
+    check("api_version follows the change", o["api_version"], "64.0")
+    check("node_version follows the change", o["node_version"], "20")
+
+    o = plan(trusted, "prdeploy", "thu", code=tampered)
+    check("prdeploy ignores the change's chain", o["r_require_envs"], "mon,tue,wed")
+
+    o = plan(WEEKDAYS, "outputs", code="baseline_branch: x\n")
+    check("a change without code keys falls back to defaults", o["source_path"], "force-app")
+    o = plan(WEEKDAYS, "outputs")
+    check("without --code-config the config supplies them", o["api_version"], "62.0")
+
+
+def test_self_approval_flag():
+    print("\n\033[1mallow_self_approval\033[0m")
+    check("defaults to off", plan(MINIMAL, "outputs")["allow_self_approval"], "false")
+    check("can be turned on", plan(MINIMAL + "allow_self_approval: true\n", "outputs")["allow_self_approval"], "true")
+
+
+def test_unsafe_values():
+    print("\n\033[1mValues a PR supplies are plain paths / versions\033[0m")
+    for bad in ('force-app"; curl x | sh; echo "', "../outside", "/abs/path", "$(id)"):
+        p = plan(MINIMAL, "outputs", code=f"source_path: '{bad}'\n", expect_fail=True)
+        check(f"rejects source_path {bad!r}", p.returncode != 0, True)
+    p = plan(MINIMAL, "outputs", code="api_version: '66.0`id`'\n", expect_fail=True)
+    check("rejects an api_version with shell characters", p.returncode != 0, True)
+    p = plan(MINIMAL, "outputs", code="node_version: '22; id'\n", expect_fail=True)
+    check("rejects a node_version with shell characters", p.returncode != 0, True)
+    o = plan(MINIMAL, "outputs", code="source_path: force-app/main\nnode_version: lts/*\napi_version: 66\n")
+    check("accepts a nested source_path", o["source_path"], "force-app/main")
+    check("accepts lts/* as node_version", o["node_version"], "lts/*")
+    check("accepts an integer api_version", o["api_version"], "66")
+
+
+def test_outputs_declared():
+    print("\n\033[1mEvery plan.py output is declared by the plan action\033[0m")
+    # An undeclared output reads as "" in every consumer, silently.
+    import yaml
+    with open(os.path.join(ROOT, "sf-pipeline", "plan", "action.yml"), encoding="utf-8") as fh:
+        declared = set((yaml.safe_load(fh).get("outputs") or {}).keys())
+    emitted = set()
+    for args in (("outputs",), ("resolve", "env/tuesday"), ("promote", "wed"), ("prdeploy", "wed")):
+        emitted |= set(plan(WEEKDAYS, *args).keys())
+    check("no emitted key is missing from action.yml", sorted(emitted - declared), [])
+
+
 def test_empty_environments():
     print("\n\033[1mBad config is rejected loudly\033[0m")
     p = plan("baseline_branch: main\nenvironments: []\n", "outputs", expect_fail=True)
@@ -272,6 +356,10 @@ def main():
         test_minimal_config,
         test_gate_defaults,
         test_release_label_override,
+        test_trusted_config,
+        test_self_approval_flag,
+        test_unsafe_values,
+        test_outputs_declared,
         test_empty_environments,
     ):
         fn()

@@ -2,18 +2,22 @@ name: Deploy (on approval → int / qa / stage)
 
 # Approval-driven, diff-vs-target, deploy-then-merge. A developer raises ONE PR
 # per environment (feature → int, feature → qa, feature → stage). When that PR is
-# APPROVED — a native Approve review, or the `approved` label (admin-only on int;
-# the developer's own label on qa/stage) — the change is deployed to that env's
+# APPROVED — a native Approve review from someone with write access, or the
+# `approved` label (on int: a repo admin who isn't the PR's author, unless
+# allow_self_approval is on; on qa/stage: anyone with write access, e.g. the
+# developer) — the change is deployed to that env's
 # org and — only after the deploy succeeds — the PR is merged into the env branch. qa requires a successful int deploy of the
-# same commit; stage requires qa. All behavior is driven by the target branch's
+# same commit; stage requires int and qa. All behavior is driven by the target branch's
 # gate in sf-pipeline/pipeline.config.yml, so this caller lists no branches: the
 # central workflow resolves the PR's base branch and no-ops for anything that
 # isn't a PR-driven stage (feature/main/release bases are ignored here).
+# A push to a PR (opened/synchronize/...) deploys and merges only when its base is
+# a `gate: auto` stage; for an approval-gated base that run is a no-op.
 on:
   pull_request_review:
     types: [submitted]
   pull_request:
-    types: [labeled]
+    types: [labeled, opened, reopened, synchronize, ready_for_review]
 
 permissions:
   contents: write
@@ -26,6 +30,7 @@ jobs:
   deploy:
     if: >-
       (github.event_name == 'pull_request_review' && github.event.review.state == 'approved') ||
-      (github.event_name == 'pull_request' && github.event.label.name == 'approved')
+      (github.event_name == 'pull_request' && github.event.label.name == 'approved') ||
+      (github.event_name == 'pull_request' && github.event.action != 'labeled')
     uses: muraliseelam/sfdx-pipeline-actions/.github/workflows/deploy.yml@v1
     secrets: inherit

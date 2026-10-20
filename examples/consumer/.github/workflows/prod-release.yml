@@ -1,7 +1,8 @@
 name: Prod Release
 
 # Thin caller — ONE production workflow. Logic lives in the central repo.
-#   action: assemble → build/refresh release/<version> from the story branches.
+#   action: assemble → build/refresh release/<version> from the commit each story
+#                      really deployed to every stage (not the branch tips).
 #   action: release  → validate + deploy the release to production, then merge.
 on:
   workflow_dispatch:

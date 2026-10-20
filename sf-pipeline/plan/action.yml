@@ -19,8 +19,24 @@ inputs:
     description: "Path (in the caller repo) to pipeline.config.yml"
     required: false
     default: "sf-pipeline/pipeline.config.yml"
+  config_ref:
+    description: >-
+      Read the gates and environment mapping from this branch instead of the
+      checked-out workspace. Workflows acting on a pull request pass its BASE
+      branch, so a PR can never relax the gates that judge it. The branch must be
+      protected (anyone with write access can create an unprotected one); otherwise
+      the repository's default branch is used. source_path, api_version and
+      node_version still come from the workspace: they describe the code being
+      shipped. Blank = read everything from the workspace.
+    required: false
+    default: ""
+  github_token:
+    description: "Token used to read config_ref (needs contents: read)."
+    required: false
+    default: ${{ github.token }}
 
 outputs:
+  config_source: { description: "Branch the gates were read from, or 'workspace'", value: "${{ steps.run.outputs.config_source }}" }
   # --- outputs mode ---
   source_path: { description: "Metadata root", value: "${{ steps.run.outputs.source_path }}" }
   api_version: { description: "SF API version", value: "${{ steps.run.outputs.api_version }}" }
@@ -44,6 +60,7 @@ outputs:
   profiles_mode: { description: "Profiles/PS mode", value: "${{ steps.run.outputs.profiles_mode }}" }
   bypass_label: { description: "Admin bypass label", value: "${{ steps.run.outputs.bypass_label }}" }
   require_pr_approval: { description: "Require a human PR approval before entry deploy+merge", value: "${{ steps.run.outputs.require_pr_approval }}" }
+  allow_self_approval: { description: "Whether a PR's author may approve its own entry deploy with the approved label", value: "${{ steps.run.outputs.allow_self_approval }}" }
   chat: { description: "Chat notifications enabled", value: "${{ steps.run.outputs.chat }}" }
   jira: { description: "Jira integration enabled", value: "${{ steps.run.outputs.jira }}" }
   # --- resolve / promote mode ---
@@ -70,8 +87,33 @@ runs:
         PLAN_MODE: ${{ inputs.mode }}
         PLAN_ARG: ${{ inputs.arg }}
         PLAN_CONFIG: ${{ inputs.config }}
+        PLAN_CONFIG_REF: ${{ inputs.config_ref }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ github.repository }}
       run: |
         set -euo pipefail
-        CMD=( python3 "$GITHUB_ACTION_PATH/../scripts/plan.py" --config "$PLAN_CONFIG" "$PLAN_MODE" )
+        CFG="$PLAN_CONFIG"; EXTRA=(); SOURCE=workspace
+        if [ -n "$PLAN_CONFIG_REF" ]; then
+          REF="${PLAN_CONFIG_REF#refs/heads/}"
+          # Only a protected branch is a trust anchor; otherwise use the default branch.
+          PROTECTED=$(gh api "repos/$REPO/branches/$REF" --jq .protected 2>/dev/null || echo "")
+          if [ "$PROTECTED" != "true" ]; then
+            DEF=$(gh api "repos/$REPO" --jq .default_branch 2>/dev/null || echo "")
+            [ -n "$DEF" ] || { echo "::error::Could not look up the default branch of $REPO."; exit 1; }
+            echo "::notice::'$REF' is not a protected branch — reading the pipeline config from the default branch '$DEF'."
+            REF="$DEF"
+          fi
+          CFG="$(mktemp)"
+          if ! gh api -X GET "repos/$REPO/contents/$PLAN_CONFIG" -f ref="$REF" \
+                -H "Accept: application/vnd.github.raw" > "$CFG"; then
+            echo "::error::Could not read $PLAN_CONFIG from '$REF'. The gates and environments are read from the branch a PR targets, so the config must exist there."
+            exit 1
+          fi
+          # The PR's own config supplies only the keys describing its code.
+          EXTRA=( --code-config "$PLAN_CONFIG" ); SOURCE="$REF"
+          echo "Pipeline config: gates and environments from '$REF'; source_path/api_version/node_version from the workspace."
+        fi
+        echo "config_source=$SOURCE" >> "$GITHUB_OUTPUT"
+        CMD=( python3 "$GITHUB_ACTION_PATH/../scripts/plan.py" --config "$CFG" "${EXTRA[@]}" "$PLAN_MODE" )
         if [ -n "$PLAN_ARG" ]; then CMD+=( "$PLAN_ARG" ); fi
         "${CMD[@]}"

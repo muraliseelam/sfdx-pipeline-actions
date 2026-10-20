@@ -9,7 +9,13 @@
 #   2. every label the pipeline reads or writes
 #      (approved, hold, <bypass_label>, deploy:<env>, deployed:<env>, and
 #      prod-approved when the config has a production block)
-#   3. every GitHub Environment named in the config
+#   3. every GitHub Environment named in the config, with the production
+#      `deploy_environment` and `validate_environment` restricted to the
+#      production branch, so no other branch's workflow can use the production
+#      secrets (an existing unrestricted one is tightened the same way; its
+#      reviewers and wait timer are kept)
+#   4. with --allow-actions-prs, lets GitHub Actions open pull requests, which
+#      `deploy:<env>` needs when there is no PIPELINE_PAT
 #
 # It is IDEMPOTENT and ADDITIVE: it never deletes a branch, label, environment
 # or secret, and it never moves a branch that already exists. Re-run it after
@@ -18,24 +24,25 @@
 # Dry run is the DEFAULT. Nothing is created until you pass --apply.
 #
 # Usage:
-#   bash init-project.sh --repo owner/repo [--config PATH] [--apply]
+#   bash init-project.sh --repo owner/repo [--config PATH] [--apply] [--allow-actions-prs]
 #
 # Requires: gh (authenticated), python3.
 #
 # Token scopes:
 #   branches + labels  -> a normal repo-write token is enough
-#   environments       -> needs ADMIN on the repo. Without admin the script
-#                         still does branches + labels and tells you which
-#                         environments to add by hand; it does not fail.
+#   environments and   -> need ADMIN on the repo. Without admin the script
+#   Actions settings      still does branches + labels and tells you what to
+#                         set by hand; it does not fail.
 set -uo pipefail
 
-REPO=""; CONFIG="sf-pipeline/pipeline.config.yml"; APPLY=false
+REPO=""; CONFIG="sf-pipeline/pipeline.config.yml"; APPLY=false; ALLOW_ACTIONS_PRS=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo)   REPO="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
     --apply)  APPLY=true; shift ;;
-    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    --allow-actions-prs) ALLOW_ACTIONS_PRS=true; shift ;;
+    -h|--help) sed -n '2,/^set -uo/{/^#/p;}' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -85,9 +92,14 @@ if dupes:
 
 baseline = str(cfg.get("baseline_branch") or prod.get("branch") or "main")
 prod_branch = str(prod.get("branch") or "")
+chain_envs = set(ghenvs)
+prod_envs, shared = [], []
 for v in (prod.get("deploy_environment"), prod.get("validate_environment")):
     if v:
         ghenvs.append(str(v))
+        # A stage that shares a production environment deploys from PR refs,
+        # so that environment cannot be limited to the production branch.
+        (shared if str(v) in chain_envs else prod_envs).append(str(v))
 
 labels = ["approved", "hold", str(cfg.get("bypass_label") or "bypass-quality-gates")]
 for n in names:
@@ -108,12 +120,17 @@ print("BRANCHES\t" + " ".join(all_branches))
 print("GHENVS\t"   + " ".join(dict.fromkeys(ghenvs)))
 print("LABELS\t"   + " ".join(dict.fromkeys(labels)))
 print("NAMES\t"    + " ".join(names))
+print("PRODBRANCH\t" + prod_branch)
+print("PRODENVS\t" + " ".join(dict.fromkeys(prod_envs)))
+print("SHAREDENVS\t" + " ".join(dict.fromkeys(shared)))
 PY
 )" || { echo "::error::$PARSED"; exit 1; }
+PARSED="$(printf '%s\n' "$PARSED" | tr -d '\r')"   # a Windows python3 writes CRLF
 
 field() { printf '%s\n' "$PARSED" | sed -n "s/^$1"$'\t'"//p"; }
 ENTRY="$(field ENTRY)"; BASELINE="$(field BASELINE)"
 BRANCHES="$(field BRANCHES)"; GHENVS="$(field GHENVS)"; NAMES="$(field NAMES)"
+PROD_BRANCH="$(field PRODBRANCH)"; PROD_ENVS="$(field PRODENVS)"; SHARED_ENVS="$(field SHAREDENVS)"
 read -r -a LABELS <<< "$(field LABELS)"
 
 say "Repository   : $REPO"
@@ -127,7 +144,7 @@ $APPLY || say $'\n\033[33mDRY RUN\033[0m — nothing will be created. Re-run wit
 # 1. Branches. Each missing branch is created from the baseline so every
 #    environment starts from the same commit.
 # ---------------------------------------------------------------------------
-step "1/3  Branches"
+step "1/4  Branches"
 BASE_SHA="$(gh api "repos/$REPO/git/ref/heads/$BASELINE" --jq .object.sha 2>/dev/null || echo "")"
 if [[ -z "$BASE_SHA" ]]; then
   DEF="$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || echo "")"
@@ -156,7 +173,7 @@ done
 # 2. Labels. deployed:<env> is also created on demand at deploy time, but the
 #    deploy:<env> triggers must exist up front or nobody can promote.
 # ---------------------------------------------------------------------------
-step "2/3  Labels"
+step "2/4  Labels"
 colour_for() {
   case "$1" in
     deploy:*)   printf '1d76db' ;;   # blue  — an action you take
@@ -192,12 +209,84 @@ done
 # 3. GitHub Environments. Creating one needs repo ADMIN; without it we report
 #    instead of failing, because branches + labels are still worth doing.
 # ---------------------------------------------------------------------------
-step "3/3  GitHub Environments"
+step "3/4  GitHub Environments"
+
+# The production environments hold the production org's credentials. With no
+# deployment branch policy, a workflow pushed to ANY branch can name them and
+# read those secrets. Prod Release runs from the production branch (it is
+# dispatched there), so that branch is the only one allowed. release/* is
+# deliberately NOT allowed: any writer can push a release/ branch.
+restrict_to_prod_branch() {   # <environment>
+  local e="$1" envjson pol body names others
+  envjson="$(gh api "repos/$REPO/environments/$e" 2>/dev/null || echo "")"
+  if [[ -z "$envjson" ]]; then
+    if $APPLY; then warn "environment $e — not found, so deployments could not be limited to '$PROD_BRANCH'"
+    else ok "environment $e — deployments limited to branch '$PROD_BRANCH' (would set)"; fi
+    return
+  fi
+  pol="$(printf '%s' "$envjson" | python3 -c '
+import json, sys
+p = json.load(sys.stdin).get("deployment_branch_policy") or {}
+print("custom" if p.get("custom_branch_policies") else "protected" if p.get("protected_branches") else "any")
+' | tr -d '\r')"
+  case "$pol" in
+    any)
+      # PUT the environment's full current state plus the policy, so existing
+      # reviewers, prevent_self_review, wait timer and admin bypass are kept.
+      body="$(printf '%s' "$envjson" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+body = {"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
+if d.get("can_admins_bypass") is False:   # only carry the non-default value
+    body["can_admins_bypass"] = False
+for r in d.get("protection_rules") or []:
+    if r.get("type") == "wait_timer":
+        body["wait_timer"] = int(r.get("wait_timer") or 0)
+    elif r.get("type") == "required_reviewers":
+        body["prevent_self_review"] = bool(r.get("prevent_self_review"))
+        body["reviewers"] = [{"type": x["type"], "id": x["reviewer"]["id"]} for x in r.get("reviewers") or []]
+print(json.dumps(body))
+')"
+      if run gh api -X PUT "repos/$REPO/environments/$e" --input - <<< "$body" >/dev/null 2>&1 \
+         && run gh api -X POST "repos/$REPO/environments/$e/deployment-branch-policies" \
+              -f name="$PROD_BRANCH" -f type=branch >/dev/null 2>&1; then
+        ok "environment $e — deployments limited to branch '$PROD_BRANCH' ($($APPLY && echo set || echo 'would set'))"
+      else
+        warn "environment $e — could not limit deployments to '$PROD_BRANCH'. Set it by hand:"
+        warn "    Settings → Environments → $e → Deployment branches → Selected branches → add '$PROD_BRANCH'"
+      fi
+      ;;
+    custom)
+      names="$(gh api "repos/$REPO/environments/$e/deployment-branch-policies" --paginate \
+                 --jq '.branch_policies[] | select((.type // "branch") == "branch") | .name' 2>/dev/null | tr -d '\r')"
+      others="$(printf '%s\n' "$names" | grep -vxF -- "$PROD_BRANCH" | grep -v '^$' | tr '\n' ' ' || true)"
+      if printf '%s\n' "$names" | grep -qxF -- "$PROD_BRANCH"; then
+        skip "environment $e — deployments limited to selected branches (has '$PROD_BRANCH')"
+      elif run gh api -X POST "repos/$REPO/environments/$e/deployment-branch-policies" \
+             -f name="$PROD_BRANCH" -f type=branch >/dev/null 2>&1; then
+        ok "environment $e — branch '$PROD_BRANCH' allowed to deploy ($($APPLY && echo added || echo 'would add'))"
+      else
+        warn "environment $e — could not allow branch '$PROD_BRANCH' to deploy"
+      fi
+      [[ -n "$others" ]] && warn "environment $e also allows: ${others}— remove any you do not need; each can read the production secrets."
+      ;;
+    protected)
+      warn "environment $e allows every PROTECTED branch to deploy — that includes the env branches."
+      warn "    Settings → Environments → $e → Deployment branches → Selected branches → add '$PROD_BRANCH'"
+      ;;
+  esac
+}
+
 ADMIN="$(gh api "repos/$REPO" --jq '.permissions.admin // false' 2>/dev/null || echo false)"
+ADMIN="${ADMIN//$'\r'/}"
 if [[ "$ADMIN" != "true" ]]; then
   warn "You do not have admin on $REPO, so Environments cannot be created here."
   warn "Ask an admin to create these under Settings → Environments:"
   for e in $GHENVS; do warn "    $e"; done
+  if [[ -n "$PROD_ENVS" && -n "$PROD_BRANCH" ]]; then
+    warn "and to limit deployments of ${PROD_ENVS% } to the '$PROD_BRANCH' branch"
+    warn "(Deployment branches → Selected branches), so no other branch can use the production secrets."
+  fi
 else
   for e in $GHENVS; do
     if gh api "repos/$REPO/environments/$e" >/dev/null 2>&1; then
@@ -208,6 +297,44 @@ else
       warn "environment $e — could not create"
     fi
   done
+  if [[ -n "$PROD_ENVS" ]]; then
+    if [[ -z "$PROD_BRANCH" ]]; then
+      warn "production.branch is not set, so ${PROD_ENVS% } cannot be limited to it."
+    else
+      for e in $PROD_ENVS; do restrict_to_prod_branch "$e"; done
+    fi
+  fi
+fi
+for e in $SHARED_ENVS; do
+  warn "environment $e is used by a stage AND by production: stages deploy from pull requests, so it"
+  warn "    cannot be limited to '$PROD_BRANCH'. Give production its own environments."
+done
+
+# ---------------------------------------------------------------------------
+# 4. Pull requests opened by Actions. `deploy:<env>` opens the feature→<env> PR
+#    with the workflow token unless PIPELINE_PAT is set, and new repositories
+#    forbid that. Turning it on also lets a workflow APPROVE a PR, which counts
+#    towards required reviews — so it is opt-in, and code-owner reviews matter.
+# ---------------------------------------------------------------------------
+step "4/4  Pull requests opened by GitHub Actions"
+if [[ "$ADMIN" != "true" ]]; then
+  warn "Needs admin to check. Without a PIPELINE_PAT, deploy:<env> needs Settings → Actions → General →"
+  warn "    Workflow permissions → Allow GitHub Actions to create and approve pull requests."
+else
+  WF_PERMS="$(gh api "repos/$REPO/actions/permissions/workflow" \
+                --jq '"\(.default_workflow_permissions) \(.can_approve_pull_request_reviews)"' 2>/dev/null | tr -d '\r' || echo "")"
+  if [[ "${WF_PERMS#* }" == "true" ]]; then
+    skip "Actions may create pull requests (already allowed)"
+  elif ! $ALLOW_ACTIONS_PRS; then
+    warn "Actions may not create pull requests, so deploy:<env> needs a PIPELINE_PAT secret."
+    warn "    Or re-run with --allow-actions-prs (it also lets a workflow approve a PR, so keep code-owner reviews on)."
+  elif run gh api -X PUT "repos/$REPO/actions/permissions/workflow" \
+         -f default_workflow_permissions="$( [[ "${WF_PERMS%% *}" == write ]] && echo write || echo read )" \
+         -F can_approve_pull_request_reviews=true >/dev/null 2>&1; then
+    ok "Actions may create pull requests ($($APPLY && echo enabled || echo 'would enable'))"
+  else
+    warn "Could not allow Actions to create pull requests (an organization policy may forbid it). Use PIPELINE_PAT."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -232,13 +359,21 @@ cat <<EOF
   2. Add required reviewers to '${PROD_DEPLOY:-your production environment}'
      ONLY. That approval click is the production gate. Leave every other
      environment ungated — the PR approval is already the gate.
+     With two or more reviewers, also tick "Prevent self-review" so whoever
+     starts a release cannot approve it. Working alone, leave it off — or
+     nobody can ever approve your releases.
 
   3. Set the entry branch in .github/workflows/pr-validation.yml:
          on: pull_request: branches: [ $ENTRY ]
      This is the only environment name outside pipeline.config.yml.
 
-  4. Apply branch protection:
-         REPO=$REPO bash sf-pipeline/scripts/setup-branch-protection.sh
+  4. Copy examples/consumer/.github/CODEOWNERS to .github/CODEOWNERS and name
+     the people (or team) who own the pipeline wiring in it.
+
+  5. Apply branch protection, from the root of this repo, using your checkout
+     of the central pipeline repo:
+         REPO=$REPO bash <central checkout>/sf-pipeline/scripts/setup-branch-protection.sh
+     Working alone? Prefix it with REQUIRED_REVIEWS=0.
 EOF
 
 if ! $APPLY; then

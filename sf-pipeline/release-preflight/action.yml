@@ -1,9 +1,12 @@
 name: "Release preflight"
 description: >-
   Verify the release is safe to ship to production. There must be an OPEN release
-  PR (release/<version> → prod) that is authorized (a formal Approve review OR the
-  `prod-approved` label — a solo maintainer can't approve their own PR) and whose
-  latest checks are all green. Outputs the PR number for the post-deploy merge.
+  PR (release/<version> → prod) that is authorized (a formal Approve review of its
+  current commit OR the `prod-approved` label — a solo maintainer can't approve
+  their own PR), whose latest checks are all green, and that the pipeline has not
+  already deployed to production (`deployed_label`). Outputs the PR number for the
+  post-deploy merge and the head commit, which is what gets validated, deployed and
+  merged.
 
 inputs:
   head_branch:
@@ -14,12 +17,21 @@ inputs:
     required: true
   version:
     required: true
+  deployed_label:
+    description: >-
+      Label the release train puts on the release PR once production is deployed.
+      A PR carrying it is refused, so re-running a release can't deploy it twice.
+    required: false
+    default: "deployed:prod"
   github_token:
     required: true
 
 outputs:
   pr_number:
     value: ${{ steps.check.outputs.pr_number }}
+  head_sha:
+    description: "The release PR's head commit that preflight authorized and found green."
+    value: ${{ steps.check.outputs.head_sha }}
 
 runs:
   using: composite
@@ -32,6 +44,7 @@ runs:
         BASE_BRANCH: ${{ inputs.base_branch }}
         VERSION: ${{ inputs.version }}
         APPROVAL_LABEL: prod-approved
+        DEPLOYED_LABEL: ${{ inputs.deployed_label }}
       run: |
         set -euo pipefail
         PR_JSON="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$HEAD_BRANCH" --base "$BASE_BRANCH" --state open --json number,reviewDecision,labels --jq '.[0] // empty')"
@@ -41,16 +54,34 @@ runs:
         fi
         NUM="$(echo "$PR_JSON"  | python3 -c "import sys,json;print(json.load(sys.stdin)['number'])")"
         DEC="$(echo "$PR_JSON"  | python3 -c "import sys,json;print(json.load(sys.stdin).get('reviewDecision') or '')")"
-        HAS_LABEL="$(echo "$PR_JSON" | python3 -c "import sys,json;print('yes' if '$APPROVAL_LABEL' in [l['name'] for l in json.load(sys.stdin).get('labels',[])] else 'no')")"
-        echo "Release PR #$NUM — reviewDecision='$DEC', '$APPROVAL_LABEL' label=$HAS_LABEL"
+        LABELS="$(echo "$PR_JSON" | python3 -c "import sys,json;print('\n'.join(l['name'] for l in json.load(sys.stdin).get('labels',[])))")"
+        HAS_LABEL="no"; grep -qxF "$APPROVAL_LABEL" <<< "$LABELS" && HAS_LABEL="yes"
+        SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUM" --jq '.head.sha')"
+        echo "Release PR #$NUM @ ${SHA:0:8} — reviewDecision='$DEC', '$APPROVAL_LABEL' label=$HAS_LABEL"
+        # Already in production? A second run would deploy it again.
+        if grep -qxF "$DEPLOYED_LABEL" <<< "$LABELS"; then
+          echo "::error::Release PR #$NUM carries '$DEPLOYED_LABEL': v$VERSION is already deployed to production, and running the release again would deploy it a second time. Finish the earlier run instead — re-run its failed finalize job, or merge #$NUM, tag v$VERSION and run Sync Env Branches by hand. Remove the label only if you really mean to deploy v$VERSION again."
+          exit 1
+        fi
+        # An approval counts only for the commit it approved: without "dismiss stale
+        # approvals" on the branch, GitHub keeps APPROVED after new commits.
+        if [ "$DEC" = "APPROVED" ] && [ "$HAS_LABEL" != "yes" ]; then
+          APPROVED_AT="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUM/reviews?per_page=100" --paginate \
+                           --jq '.[] | select(.state == "APPROVED") | .commit_id')"
+          if ! grep -qxF "$SHA" <<< "$APPROVED_AT"; then
+            echo "::error::Release PR #$NUM was approved, but not at its current commit ${SHA:0:8} — the release branch changed after the approval. Approve it again (a different user) or add the '$APPROVAL_LABEL' label, then re-run."
+            exit 1
+          fi
+        fi
         if [ "$DEC" != "APPROVED" ] && [ "$HAS_LABEL" != "yes" ]; then
           echo "::error::Release PR #$NUM is not authorized. Approve the PR (a different user) or add the '$APPROVAL_LABEL' label, then re-run."
           exit 1
         fi
         # All checks green — count only the LATEST run per check-run name / status
         # context (a shared head SHA carries superseded historical runs).
-        SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUM" --jq '.head.sha')"
-        CHECK_BAD="$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs" --paginate \
+        # $c is a jq variable, not a shell one.
+        # shellcheck disable=SC2016
+        CHECK_BAD="$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs?per_page=100" --paginate \
           --jq '[ .check_runs[] ] | group_by(.name) | map(sort_by(.started_at) | last)
                  | [ .[] | select(.status != "completed" or (((.conclusion // "") | ascii_upcase) as $c | $c != "SUCCESS" and $c != "NEUTRAL" and $c != "SKIPPED")) ] | length')"
         STATUS_BAD="$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/status" \
@@ -61,5 +92,22 @@ runs:
           echo "::error::Release PR #$NUM has $BAD non-passing/pending check(s) on ${SHA:0:8}."
           exit 1
         fi
+        # The release merges into $BASE_BRANCH AFTER the prod deploy. Refuse now if
+        # branch protection would refuse that merge (e.g. a required review is
+        # missing and only the label authorized it), so production is never
+        # deployed ahead of a release that can't land.
+        MSS=""
+        for _ in 1 2 3 4 5 6; do
+          MSS="$(gh pr view "$NUM" --repo "$GITHUB_REPOSITORY" --json mergeStateStatus -q .mergeStateStatus 2>/dev/null || echo "")"
+          [ -n "$MSS" ] && [ "$MSS" != "UNKNOWN" ] && break
+          sleep 5
+        done
+        case "$MSS" in
+          BLOCKED) echo "::error::Release PR #$NUM can't merge into $BASE_BRANCH yet — branch protection blocks it (usually a required review or an unresolved conversation). Nothing was deployed. Get the required approval(s), then re-run."; exit 1 ;;
+          DIRTY)   echo "::error::Release PR #$NUM conflicts with $BASE_BRANCH. Nothing was deployed. Assemble the release again."; exit 1 ;;
+          CLEAN|HAS_HOOKS|UNSTABLE|BEHIND) ;;
+          *) echo "::warning::Could not tell whether #$NUM can merge into $BASE_BRANCH (mergeStateStatus='${MSS:-unknown}')." ;;
+        esac
         echo "pr_number=$NUM" >> "$GITHUB_OUTPUT"
-        echo "✅ Release PR #$NUM approved and green — proceeding to prod deploy."
+        echo "head_sha=$SHA" >> "$GITHUB_OUTPUT"
+        echo "✅ Release PR #$NUM approved and green at ${SHA:0:8} — proceeding to prod deploy."

@@ -94,6 +94,9 @@ runs:
           const covPerClass = Array.isArray(deployReport.coverage_per_class)
             ? deployReport.coverage_per_class : [];
           const covThreshold = deployReport.coverage_threshold ?? 85;
+          const covWarnings = Number(deployReport.coverage_warnings || 0);
+          const skipped = Array.isArray(deployReport.skipped_deletions)
+            ? deployReport.skipped_deletions : [];
 
           const validateResult = process.env.VALIDATE_RESULT || '';
           const validateSkipped = validateResult === 'skipped';
@@ -148,10 +151,15 @@ runs:
           }
 
           // ==== SECTION 2 — TEST COVERAGE ==================================
+          // "Not run (no Apex)" only when the delta really has no Apex: a deploy
+          // Salesforce rejected before reporting coverage is not the same thing.
           let covCell;
           if (bypassed) covCell = '⚪ Bypassed';
-          else if (covPct == null || !covMeasured) covCell = '⚪ Not run (no Apex)';
-          else covCell = `${covPass ? '🟢' : '🔴'} ${covPct}% (min ${covThreshold}%)`;
+          else if (covMeasured && covPct != null) covCell = `${covPass ? '🟢' : '🔴'} ${covPct}% (min ${covThreshold}%)`;
+          else if (covWarnings > 0) covCell = '🔴 Rejected by Salesforce — see section 3';
+          else if (deployReport.has_apex !== true) covCell = '⚪ Not run (no Apex)';
+          else if (deployReport.test_level === 'NoTestRun') covCell = '⚪ Not run (NoTestRun)';
+          else covCell = deployFailed ? '⚪ Not measured — the deploy failed first' : '⚪ Not measured';
 
           let s2 = '## 2️⃣ Apex test coverage\n\n';
           if (bypassed) {
@@ -197,6 +205,15 @@ runs:
                 + 'Push again and it will run automatically.\n';
           } else {
             s3 += 'ℹ️ Status unavailable.\n';
+          }
+          // On failure the deploy report above already lists them.
+          if (skipped.length && !deployFailed) {
+            s3 += `\n**⏭️ Deletions skipped — not in \`${env}\` (${skipped.length})**\n\n`
+                + '_The org no longer has these, so there was nothing to delete._\n\n'
+                + '| Type | Component |\n|---|---|\n';
+            for (const s of skipped) {
+              s3 += `| \`${s.type}\` | ${String(s.member || '').replace(/\|/g, '\\|')} |\n`;
+            }
           }
 
           // ==== ASSEMBLE ====================================================

@@ -6,16 +6,19 @@ name: Project Init (provision branches, labels, environments)
 # everything the pipeline needs that GitHub will not create by itself:
 #
 #   * every environment branch and the production branch
-#   * every label (approved, hold, <bypass_label>, deploy:<env>, deployed:<env>)
-#   * every GitHub Environment named in the config
+#   * every label (approved, hold, <bypass_label>, deploy:<env>, deployed:<env>,
+#     prod-approved)
+#   * every GitHub Environment named in the config, with the production deploy
+#     and validate environments limited to the production branch, so no other
+#     branch's workflow can read the production secrets
 #
 # Idempotent and additive: it never deletes or moves a branch, label,
 # environment or secret, so it is safe to re-run after adding or renaming an
 # environment. Dry run by default — run once to preview, then with apply=true.
 #
-# Creating GitHub Environments needs a token with repo ADMIN. Pass one as the
-# PIPELINE_PAT secret; without it the run still does branches and labels and
-# prints the environments to add by hand instead of failing.
+# Creating GitHub Environments and their branch rules needs a token with repo
+# ADMIN. Pass one as the PIPELINE_PAT secret; without it the run still does
+# branches and labels and prints what to set by hand instead of failing.
 
 on:
   workflow_call:
@@ -57,7 +60,7 @@ jobs:
             if [ "${{ inputs.apply }}" != "true" ]; then
               echo "Nothing was created. Re-run with **apply = true** once the plan above looks right."
             else
-              echo "Branches, labels and environments are provisioned."
-              echo "Next: add the four \`SF_*\` secrets to each environment, then apply branch protection."
+              echo "Branches, labels and environments are provisioned; check the log for anything to set by hand."
+              echo "Next: add the four \`SF_*\` secrets to each environment, copy \`CODEOWNERS\`, then apply branch protection."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

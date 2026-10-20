@@ -1,34 +1,96 @@
 name: "Squash-merge the PR"
 description: >-
-  Squash-merge the PR into its env branch after a successful deploy. The
-  `deploy-<env>` required status was just set green, so a normal merge is
-  allowed; retry briefly to absorb status propagation. The feature branch is
-  NEVER deleted — the SAME branch feeds the int, qa and stage PRs and is later
-  reused by the weekly release train.
+  Squash-merge the PR into its env branch after a successful deploy — but ONLY
+  while the PR head is still exactly the commit that was deployed. A commit
+  pushed during the deploy was never deployed, so the merge is refused (it is
+  also pinned with `--match-head-commit`, closing the race between the check
+  and the merge). The `deploy-<env>` required status was just set green, so a
+  normal merge is allowed; retry briefly to absorb status propagation. Fails
+  the step, with the reason in the `reason` output, whenever the PR did not end
+  up merged at the deployed commit. The feature branch is NEVER deleted — the
+  SAME branch feeds the int, qa and stage PRs and is later reused by the weekly
+  release train.
 
 inputs:
   pr_number:
     required: true
   base_ref:
     required: true
+  sha:
+    description: >-
+      The commit that was deployed. The PR merges only if its head is still
+      exactly this commit; if the head moved, nothing merges and the step fails.
+    required: true
   github_token:
     required: true
+
+outputs:
+  merged:
+    description: "true when the PR is merged at exactly `sha`."
+    value: ${{ steps.merge.outputs.merged }}
+  reason:
+    description: "Why the PR was not merged (blank when it was)."
+    value: ${{ steps.merge.outputs.reason }}
 
 runs:
   using: composite
   steps:
-    - shell: bash
+    - id: merge
+      shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         REPO: ${{ github.repository }}
         PR: ${{ inputs.pr_number }}
         BASE: ${{ inputs.base_ref }}
+        SHA: ${{ inputs.sha }}
       run: |
         set -uo pipefail
-        echo "Deploy to '$BASE' succeeded — merging PR #$PR."
-        merged=""
-        for i in 1 2 3 4 5 6; do
-          if gh pr merge "$PR" --repo "$REPO" --squash; then merged="yes"; break; fi
-          echo "Merge attempt $i not ready (status propagating) — waiting..."; sleep 10
-        done
-        [ -n "$merged" ] || echo "::notice::Could not complete the merge yet (already merged, or deploy-<env> status still propagating)."
+        merged=""; reason=""
+        if [ -z "$SHA" ]; then
+          reason="no deployed commit was given, so the merge could not be pinned to it"
+        else
+          echo "Deploy of ${SHA:0:8} to '$BASE' succeeded — merging PR #$PR at exactly that commit."
+          for i in 1 2 3 4 5 6; do
+            # Read the live PR first: never merge a head that was not deployed.
+            info=$(gh pr view "$PR" --repo "$REPO" --json state,headRefOid \
+                     -q '.state + " " + .headRefOid' 2>/dev/null || echo "")
+            state="${info%% *}"; head="${info#* }"
+            case "$state" in
+              MERGED)
+                # Idempotent re-run: already merged at the deployed commit.
+                if [ "$head" = "$SHA" ]; then merged="true"; reason=""
+                else reason="it was already merged at \`${head:0:7}\`, not at the deployed \`${SHA:0:7}\`"; fi
+                break ;;
+              CLOSED)
+                reason="it was closed without being merged"; break ;;
+              OPEN) ;;
+              *)
+                reason="its state could not be read from GitHub"
+                echo "Could not read PR #$PR (attempt $i) — retrying..."; sleep 10; continue ;;
+            esac
+            if [ "$head" != "$SHA" ]; then
+              reason="its head moved to \`${head:0:7}\` after \`${SHA:0:7}\` was deployed; the newer commit(s) were never deployed"
+              break
+            fi
+            if out=$(gh pr merge "$PR" --repo "$REPO" --squash --match-head-commit "$SHA" 2>&1); then
+              # Confirm it really merged (a merge queue accepts without merging).
+              st=$(gh pr view "$PR" --repo "$REPO" --json state -q .state 2>/dev/null || echo "")
+              if [ "$st" = "MERGED" ]; then merged="true"; reason=""; break; fi
+              reason="GitHub accepted the merge but the PR is still ${st:-in an unknown state} (merge queue or auto-merge?)"
+              break
+            fi
+            reason="GitHub refused the merge: $(printf '%s' "$out" | tr -d '\r' | head -n1 | sed 's/^X //')"
+            echo "Merge attempt $i not ready ($reason) — waiting..."; sleep 10
+          done
+        fi
+        reason="$(printf '%s' "$reason" | tr '\n' ' ')"
+        {
+          echo "merged=${merged:-false}"
+          echo "reason=$reason"
+        } >> "$GITHUB_OUTPUT"
+        if [ "$merged" = "true" ]; then
+          echo "PR #$PR is merged into '$BASE' at ${SHA:0:8}."
+          exit 0
+        fi
+        echo "::error::PR #$PR was NOT merged into '$BASE': $reason."
+        exit 1

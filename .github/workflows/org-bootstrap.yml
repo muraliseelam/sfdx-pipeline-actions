@@ -7,9 +7,16 @@ name: Org Bootstrap
 # Prerequisites in the CALLER:
 #   secrets:
 #     SFDX_AUTH_URL   - `sf org display --verbose` "Sfdx Auth Url" for an ADMIN
-#                       of the target org (one-time; used only to deploy the app)
-#     BOOTSTRAP_TOKEN  - a PAT with `repo` scope to write Environment secrets
-#                        (GITHUB_TOKEN cannot create environment secrets)
+#                       of the target org (one-time; used only to deploy the app).
+#                       It names ONE org: replace it before bootstrapping the next.
+#     BOOTSTRAP_TOKEN  - a PAT with admin on the caller repo, to write Environment
+#                        secrets (GITHUB_TOKEN cannot). It also checks out the kit
+#                        from this repo, so for a private copy it needs read here.
+#   Any workflow a writer pushes can read repository secrets, so delete both once
+#   the last org is bootstrapped.
+#
+# Orgs that refuse new Connected Apps get the same app as an External Client App
+# (sf-setup/README.md); the four secrets written are the same either way.
 on:
   workflow_call:
     inputs:
@@ -43,8 +50,27 @@ jobs:
   bootstrap:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out central actions repo (for sf-setup)
+      # A reusable workflow runs in the CALLER's workspace: a plain checkout
+      # fetches the consumer repo, which has no sf-setup/. Check the kit out of
+      # this repo instead, at the ref the caller pinned. SELF is an internal
+      # reference like every `uses:` here, so cut-release.sh rewrites its @ref to
+      # the release tag and a consumer on @v1 runs the v1 kit.
+      - name: Locate the central bootstrap kit
+        id: kit
+        env:
+          SELF: muraliseelam/sfdx-pipeline-actions/.github/workflows/org-bootstrap.yml@main
+        run: |
+          echo "repo=${SELF%%/.github/*}" >> "$GITHUB_OUTPUT"
+          echo "ref=${SELF##*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the bootstrap kit
         uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.kit.outputs.repo }}
+          ref: ${{ steps.kit.outputs.ref }}
+          path: .sf-bootstrap-kit
+          token: ${{ secrets.BOOTSTRAP_TOKEN }}
+          persist-credentials: false
 
       - name: Install Salesforce CLI
         run: npm install --global @salesforce/cli
@@ -53,13 +79,18 @@ jobs:
         env:
           SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
           GH_TOKEN: ${{ secrets.BOOTSTRAP_TOKEN }}
+          INSTANCE_URL: ${{ inputs.instance_url }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          TARGET_ENV: ${{ inputs.environment }}
+          INT_USERNAME: ${{ inputs.integration_username }}
+          CONTACT_EMAIL: ${{ inputs.contact_email }}
         run: |
-          chmod +x sf-setup/scripts/*.sh
-          sf-setup/scripts/bootstrap-org.sh \
+          bash .sf-bootstrap-kit/sf-setup/scripts/bootstrap-org.sh \
             --org-alias bootstrap-target \
-            --instance-url "${{ inputs.instance_url }}" \
-            --repo "${{ inputs.target_repo }}" \
-            --env "${{ inputs.environment }}" \
-            --int-username "${{ inputs.integration_username }}" \
-            --contact-email "${{ inputs.contact_email }}" \
+            --instance-url "$INSTANCE_URL" \
+            --repo "$TARGET_REPO" \
+            --env "$TARGET_ENV" \
+            --int-username "$INT_USERNAME" \
+            --contact-email "$CONTACT_EMAIL" \
+            --key-dir "$RUNNER_TEMP/sf-bootstrap-keys" \
             --login jwt

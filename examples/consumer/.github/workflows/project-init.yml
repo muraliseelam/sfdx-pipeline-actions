@@ -3,7 +3,9 @@ name: Project Init
 # Thin caller — run this ONCE when setting up the repo, from the Actions tab.
 #
 # It reads sf-pipeline/pipeline.config.yml and creates the environment
-# branches, the pipeline labels and the GitHub Environments for you.
+# branches, the pipeline labels and the GitHub Environments for you, and lets
+# only the production branch use the production environments. Environments
+# need an admin token: add one as the PIPELINE_PAT secret.
 #
 # Run it with apply unchecked first to preview, then re-run with apply checked.
 # It is safe to re-run any time you add or rename an environment.

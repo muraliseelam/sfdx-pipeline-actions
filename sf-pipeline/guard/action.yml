@@ -1,11 +1,14 @@
 name: "Pre-deploy guards"
 description: >-
   Block a deploy that shouldn't happen. Three checks, each fatal:
-    1. Merge-conflict — the PR must merge cleanly into its target env branch.
+    1. PR state + merge-conflict — the PR must be open, its head must still be
+       the commit being deployed, and it must merge cleanly into its env branch.
     2. Ordering — every earlier stage (require_envs, else require_env) must
        already be deployed for THIS commit (qa needs int; stage needs int AND qa).
     3. Validation — the entry stage requires a green `pr-validation` status
        (skipped when an admin bypass is active).
+  Checks 2 and 3 trust only commit statuses written by the pipeline itself
+  (creator github-actions[bot]); anyone with write access can POST a status.
   On any failure the action comments on the PR and fails the job.
 
 inputs:
@@ -39,7 +42,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Merge-conflict precheck
+    - name: PR state + merge-conflict precheck
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
@@ -47,10 +50,29 @@ runs:
         PR: ${{ inputs.pr_number }}
         ENVN: ${{ inputs.env_name }}
         BASE: ${{ inputs.base_ref }}
+        SHA: ${{ inputs.head_sha }}
       run: |
         set -uo pipefail
+        # Only an OPEN PR whose head is still the commit being deployed. A merged
+        # PR re-labelled `approved` would otherwise redeploy stale code over newer
+        # changes, and a head that moved would merge commits that never deployed
+        # (or reached the earlier stages) behind this deploy.
+        info=$(gh pr view "$PR" --repo "$REPO" --json state,headRefOid -q '.state + " " + .headRefOid' 2>/dev/null || echo "")
+        pr_state="${info%% *}"; pr_head="${info#* }"
+        if [ "$pr_state" != "OPEN" ]; then
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "⛔ **Cannot deploy to \`$ENVN\`** — PR #$PR is \`${pr_state:-unknown}\`, and only an open PR is deployed. To deploy this change again, use the *Redeploy Feature Branch* runbook or open a new PR." || true
+          echo "::error::PR #$PR is '${pr_state:-unknown}', not OPEN."
+          exit 1
+        fi
+        if [ "$pr_head" != "$SHA" ]; then
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "⛔ **Cannot deploy to \`$ENVN\`** — this PR's head is now \`${pr_head:0:8}\`, but the commit approved for this deploy is \`${SHA:0:8}\`. Commits added since then were never validated or deployed to the earlier stages, so they can't ride along. Approve the new head, or — for a promotion — get the new commits into the entry stage first (a new PR into it), then promote from that PR." || true
+          echo "::error::PR #$PR head moved: ${pr_head:-unknown} != $SHA."
+          exit 1
+        fi
         state=""
-        for i in 1 2 3 4 5 6 7 8; do
+        for _ in 1 2 3 4 5 6 7 8; do
           state=$(gh pr view "$PR" --repo "$REPO" --json mergeable -q .mergeable 2>/dev/null || echo "")
           case "$state" in MERGEABLE|CONFLICTING) break ;; esac
           echo "mergeable='$state' (still computing) — retrying..."; sleep 5
@@ -59,6 +81,13 @@ runs:
           gh pr comment "$PR" --repo "$REPO" --body \
             "⛔ **Cannot deploy to \`$ENVN\`** — this PR has **merge conflicts** with \`$BASE\`. Merge/rebase \`$BASE\` into your feature branch, resolve, then re-approve."
           echo "::error::PR #$PR conflicts with $BASE."
+          exit 1
+        fi
+        # UNKNOWN is not a pass: a PR that can't merge would only fail AFTER the deploy.
+        if [ "$state" != "MERGEABLE" ]; then
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "⛔ **Cannot deploy to \`$ENVN\`** — GitHub has not finished checking whether this PR can merge into \`$BASE\` (\`mergeable\`=\`${state:-unknown}\`). Nothing was deployed. Try again in a minute." || true
+          echo "::error::PR #$PR mergeability is '${state:-unknown}'."
           exit 1
         fi
         echo "No merge conflicts with $BASE (mergeable='$state')."
@@ -80,10 +109,15 @@ runs:
         # Check-only PR validation never sets it, so a lingering phantom
         # "deployment" record from a validation run can't satisfy this guard.
         # Every earlier stage must have it: stage needs int AND qa, not just qa.
+        # Only the newest status the PIPELINE wrote counts (the status action
+        # posts with GITHUB_TOKEN, i.e. as github-actions[bot]); a status POSTed
+        # by a person or a PAT is ignored, so it can't fake a deploy.
         missing=""
         for REQ_ENV in ${NEEDED_ENVS//,/ }; do
-          state=$(gh api "repos/$REPO/commits/$SHA/status" \
-            --jq '.statuses[] | select(.context=="deploy-'"$REQ_ENV"'") | .state' 2>/dev/null | tail -n1 || echo "")
+          state=$(gh api --paginate "repos/$REPO/commits/$SHA/statuses?per_page=100" 2>/dev/null \
+            | jq -r --arg c "deploy-$REQ_ENV" \
+                '.[] | select(.context == $c and .creator.login == "github-actions[bot]") | .state' \
+            | head -n1 || echo "")
           if [ "$state" = "success" ]; then
             echo "Ordering guard: '$REQ_ENV' really deployed for ${SHA:0:8} (deploy-$REQ_ENV=success)."
           else
@@ -111,8 +145,10 @@ runs:
         PR: ${{ inputs.pr_number }}
       run: |
         set -uo pipefail
-        state=$(gh api "repos/$REPO/commits/$SHA/status" \
-          --jq '.statuses[] | select(.context=="pr-validation") | .state' 2>/dev/null | tail -n1 || echo "")
+        # Newest pr-validation status written by the pipeline (github-actions[bot]).
+        state=$(gh api --paginate "repos/$REPO/commits/$SHA/statuses?per_page=100" 2>/dev/null \
+          | jq -r '.[] | select(.context == "pr-validation" and .creator.login == "github-actions[bot]") | .state' \
+          | head -n1 || echo "")
         if [ "$state" != "success" ]; then
           gh pr comment "$PR" --repo "$REPO" --body \
             "⛔ **Cannot deploy to \`$ENVN\`** — PR Validation isn't green for \`${SHA:0:8}\` (\`pr-validation\`=\`${state:-missing}\`). Wait for the validation report, then re-approve."

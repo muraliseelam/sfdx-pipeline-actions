@@ -50,7 +50,10 @@ inputs:
     required: false
     default: "22"
   coverage_gate:
-    description: "true = enforce the Apex coverage threshold when Apex changed"
+    description: >-
+      true = enforce the Apex coverage threshold when Apex changed. A real deploy
+      is then validated with its tests first and quick-deployed only if the gate
+      passes, so a failing gate deploys nothing.
     required: false
     default: "false"
   coverage_threshold:
@@ -89,8 +92,18 @@ inputs:
 
 outputs:
   deploy_id:
-    description: "The Salesforce deploy job id (for later quick-deploy)"
-    value: ${{ steps.run.outputs.deploy_id }}
+    description: >-
+      check_only=true: the validation id to pass as quick_deploy_id later — blank
+      when the validation ran no Apex tests, which Salesforce cannot quick-deploy.
+      check_only=false: the id of the deploy job that changed the org (for a quick
+      deploy, the quick deploy's own id, not the validation's). Blank when nothing
+      was deployed.
+    value: ${{ steps.quick.outputs.deploy_id || steps.run.outputs.deploy_id }}
+  validation_id:
+    description: >-
+      The check-only validation behind this run, quick-deployable or not (for a
+      quick deploy, the validated job it promoted). Blank for a plain deploy.
+    value: ${{ steps.run.outputs.validation_id }}
   has_changes:
     description: "Whether the delta contained deployable changes"
     value: ${{ steps.delta.outputs.has_changes }}
@@ -130,6 +143,32 @@ runs:
         SF_API_VERSION: ${{ inputs.api_version }}
       run: bash "$GITHUB_ACTION_PATH/../scripts/delta.sh"
 
+    # Diffs against the ref the delta really came from (the merge-base in
+    # three-dot mode), not the baseline's tip, so a baseline that moved on is not
+    # mistaken for this branch's change.
+    - name: Dependency lint (destructive safety)
+      if: steps.delta.outputs.has_changes == 'true'
+      shell: bash
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../scripts/dependency_lint.py" \
+          --dir .sgd \
+          --source-root "${{ inputs.source_path }}" \
+          --baseline "${{ steps.delta.outputs.from_ref || format('origin/{0}', inputs.baseline_branch) }}"
+
+    # Salesforce fails the whole deploy on a deletion of something the org no
+    # longer has. Drop those (listed in the report), after the lint has checked
+    # the branch's own deletions and before anything reads the manifest. A quick
+    # deploy promotes an already validated package, so nothing local is deployed.
+    - name: Skip deletions the org no longer has
+      id: prune
+      if: ${{ steps.delta.outputs.has_changes == 'true' && inputs.quick_deploy_id == '' }}
+      shell: bash
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../scripts/prune_destructive.py" \
+          --dir .sgd \
+          --target-org "${{ inputs.environment }}" \
+          --api-version "${{ inputs.api_version }}"
+
     - name: Detect Apex in the delta
       id: scope
       if: steps.delta.outputs.has_changes == 'true'
@@ -152,22 +191,16 @@ runs:
         echo "has_apex=$HAS_APEX" >> "$GITHUB_OUTPUT"
         echo "apex_destructive=$APEX_DESTRUCTIVE" >> "$GITHUB_OUTPUT"
 
-    - name: Dependency lint (destructive safety)
-      if: steps.delta.outputs.has_changes == 'true'
-      shell: bash
-      run: |
-        python3 "$GITHUB_ACTION_PATH/../scripts/dependency_lint.py" \
-          --dir .sgd \
-          --source-root "${{ inputs.source_path }}" \
-          --baseline "origin/${{ inputs.baseline_branch }}"
-
     - name: Render component manifest
       if: steps.delta.outputs.has_changes == 'true'
       shell: bash
+      env:
+        # Passed through env: a title can carry a branch name with shell characters.
+        MANIFEST_TITLE: ${{ inputs.manifest_title }} — ${{ inputs.environment }}
       run: |
         python3 "$GITHUB_ACTION_PATH/../scripts/manifest_to_md.py" \
           --dir .sgd \
-          --title "${{ inputs.manifest_title }} — ${{ inputs.environment }}" \
+          --title "$MANIFEST_TITLE" \
           --out manifest-${{ inputs.environment }}.md
 
     - name: Upload manifest artifact
@@ -187,6 +220,10 @@ runs:
       shell: bash
       run: python3 "$GITHUB_ACTION_PATH/../scripts/specified_tests.py" --dir .sgd --source-root "${{ inputs.source_path }}"
 
+    # Incremental mode self-diffs each profile against the ref the delta came from.
+    # Against the baseline's TIP, an entry another change updated there (the
+    # target env branch, or main after a hotfix) would look "changed" here and
+    # be deployed back to this branch's older value.
     - name: Apply Profile / Permission Set mode (REQ-006)
       if: steps.delta.outputs.has_changes == 'true'
       shell: bash
@@ -195,12 +232,15 @@ runs:
           --package .sgd/package/package.xml \
           --source-root "${{ inputs.source_path }}" \
           --mode "${{ inputs.profiles_mode }}" \
-          --baseline "origin/${{ inputs.baseline_branch }}"
+          --baseline "${{ steps.delta.outputs.from_ref || format('origin/{0}', inputs.baseline_branch) }}"
 
     - name: Deploy / validate / quick-deploy
       id: run
-      if: steps.delta.outputs.has_changes == 'true'
+      # A quick deploy promotes the validated job whatever the local delta says.
+      if: ${{ steps.delta.outputs.has_changes == 'true' || inputs.quick_deploy_id != '' }}
       shell: bash
+      env:
+        COVERAGE_GATE: ${{ inputs.coverage_gate }}
       run: |
         set -euo pipefail
         ALIAS="${{ inputs.environment }}"
@@ -213,12 +253,30 @@ runs:
         APEX_DESTRUCTIVE="${{ steps.scope.outputs.apex_destructive }}"
         BYPASS="${{ inputs.bypass }}"
         CANARY_TESTS="${{ inputs.destructive_test_names }}"
+        PKG=".sgd/package/package.xml"
+        DSTR=".sgd/destructiveChanges/destructiveChanges.xml"
+        IS_PROD="false"
+        case "$ALIAS" in prod|prod-validate|prod-*) IS_PROD="true" ;; esac
 
-        # Quick-deploy path: promote a previously validated deployment.
+        # The job id in an sf --json result: result.id, or data.id in the error envelope.
+        job_id() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); r=d.get("result") or d.get("data") or {}; print(r.get("id", "") if isinstance(r, dict) else "")' "$1" 2>/dev/null || true; }
+        # When sf printed no JSON (e.g. it crashed), give the report the message instead.
+        result_or() { python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' deploy-result.json 2>/dev/null || DEPLOY_MSG="$1" python3 -c 'import json,os; json.dump({"status":1,"result":{},"message":os.environ["DEPLOY_MSG"]}, open("deploy-result.json","w"))'; }
+
+        # Quick-deploy path: promote a previously validated deployment. The
+        # "Quick-deploy the validated job" step below does it.
         if [ -n "$QUICK_ID" ]; then
-          echo "Quick-deploying validated job $QUICK_ID to $ALIAS"
-          sf project deploy quick --job-id "$QUICK_ID" --target-org "$ALIAS" --wait 120
-          echo "deploy_id=$QUICK_ID" >> "$GITHUB_OUTPUT"
+          echo "Quick deploy requested: validated job $QUICK_ID → $ALIAS"
+          { echo "mode=quick"; echo "validation_id=$QUICK_ID"; echo "quick_job=$QUICK_ID"; } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Every change in the delta was a deletion the org no longer has (dropped
+        # by "Skip deletions the org no longer has"): the org already matches.
+        if ! grep -q "<types>" "$PKG" && ! { [ -f "$DSTR" ] && grep -q "<types>" "$DSTR"; }; then
+          echo "Nothing left to deploy to $ALIAS: the delta only deletes components the org no longer has."
+          echo '{"status":0,"result":{"id":"","success":true,"skipped":"nothing-left"}}' > deploy-result.json
+          { echo "mode=nothing-left"; echo "deploy_id="; } >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
@@ -250,8 +308,15 @@ runs:
                       echo "Apex deletion targeting production ($ALIAS) — using RunLocalTests."
                       LEVEL="RunLocalTests"
                     fi
+                  elif [ "$CHECK" = "true" ] && [ -n "$CANARY_TESTS" ]; then
+                    # Salesforce quick-deploys only a validation that ran tests.
+                    # With a canary, the approved release quick-deploys exactly
+                    # what was validated; without one it is deployed again.
+                    echo "Config-only change, production validation ($ALIAS) — RunSpecifiedTests with canary so it can be quick-deployed: $CANARY_TESTS"
+                    LEVEL="RunSpecifiedTests"
+                    TESTS="$CANARY_TESTS"
                   else
-                    echo "Config-only change (no Apex added or deleted), production ($ALIAS) — using NoTestRun."
+                    echo "Config-only change (no Apex added or deleted), production ($ALIAS) — no Apex tests."
                     LEVEL="NoTestRun"
                   fi ;;
                 *)
@@ -278,40 +343,55 @@ runs:
           fi
         fi
 
-        # Skip the check-only ORG validation for a no-Apex delta (destructive-only or
-        # metadata-only, LEVEL=NoTestRun). `sf project deploy validate` does NOT accept
-        # NoTestRun and, when a test level is omitted, DEFAULTS to RunLocalTests — i.e.
-        # the entire org test suite — which is irrelevant to a no-Apex change and not
-        # viable in an org with pre-existing failing tests. The delta manifest still
-        # documents the PR, and the real deploy on merge runs `deploy start --test-level
-        # NoTestRun`, which sandboxes accept for destructive/metadata-only changes.
-        if [ "$CHECK" = "true" ] && [ "$LEVEL" = "NoTestRun" ]; then
-          echo "No Apex in the delta — skipping check-only org validation (nothing to test)."
-          echo '{"status":0,"result":{"id":"","success":true,"skipped":"no-apex-validate"}}' > deploy-result.json
-          echo "deploy_id=" >> "$GITHUB_OUTPUT"
-          exit 0
+        # How this run talks to the org:
+        #   validate  check-only WITH Apex tests (`sf project deploy validate`): a
+        #             validation id Salesforce can quick-deploy later.
+        #   dry-run   check-only with NoTestRun. `deploy validate` rejects NoTestRun
+        #             (and without a level runs the whole org suite), so this is
+        #             `deploy start --dry-run`: every component is still checked
+        #             against the org, but Salesforce can't quick-deploy a
+        #             validation that ran no tests, so no deploy_id is returned.
+        #   gated     a REAL deploy whose coverage gate must pass: validate with the
+        #             tests, let "Apex coverage gate" judge that result, then
+        #             "Quick-deploy the validated job" — a failing gate never
+        #             leaves the change in the org.
+        #   deploy    a real deploy (`deploy start`).
+        if [ "$CHECK" = "true" ]; then
+          if [ "$LEVEL" = "NoTestRun" ]; then MODE="dry-run"; else MODE="validate"; fi
+        elif [ "$COVERAGE_GATE" = "true" ] && [ "$BYPASS" != "true" ] && [ "$HAS_APEX" = "true" ] && [ "$LEVEL" != "NoTestRun" ]; then
+          MODE="gated"
+        else
+          MODE="deploy"
         fi
+        { echo "mode=$MODE"; echo "level=$LEVEL"; } >> "$GITHUB_OUTPUT"
 
-        ARGS=(project deploy
-              --manifest .sgd/package/package.xml
+        ARGS=(--manifest "$PKG"
               --target-org "$ALIAS"
               --wait 180
               --verbose
               --json)
+        case "$MODE" in
+          validate) CMD=(project deploy validate)
+                    echo "Validation-only deploy to $ALIAS (test level $LEVEL)" ;;
+          dry-run)  CMD=(project deploy start --dry-run --ignore-conflicts)
+                    echo "Check-only deploy to $ALIAS (no Apex tests to run)" ;;
+          gated)    CMD=(project deploy validate)
+                    echo "Validating for $ALIAS first (test level $LEVEL) — the coverage gate decides before anything is deployed" ;;
+          *)        CMD=(project deploy start --ignore-conflicts)
+                    echo "Deploying to $ALIAS (test level $LEVEL)" ;;
+        esac
 
-        # `validate` produces a quick-deployable validation id; `start` really deploys.
-        # By here, a check-only run always has a real Run*Tests level (the NoTestRun
-        # case is handled by the skip guard above), so --test-level is always valid.
-        if [ "$CHECK" = "true" ]; then
-          ARGS=(project deploy validate "${ARGS[@]:2}" --test-level "$LEVEL")
-          echo "Validation-only deploy to $ALIAS (test level $LEVEL)"
+        # NoTestRun is accepted only by development orgs (sandbox, scratch,
+        # Developer Edition). Production runs no tests for a package without Apex
+        # by default, so leave the flag out there instead of having it refused.
+        if [ "$LEVEL" = "NoTestRun" ] && [ "$IS_PROD" = "true" ] && [ "$HAS_APEX" != "true" ] && [ "$APEX_DESTRUCTIVE" != "true" ]; then
+          echo "Production, no Apex in the delta: no --test-level (Salesforce runs no tests for it)."
         else
-          ARGS=(project deploy start "${ARGS[@]:2}" --ignore-conflicts --test-level "$LEVEL")
-          echo "Deploying to $ALIAS (test level $LEVEL)"
+          ARGS+=(--test-level "$LEVEL")
         fi
 
-        if [ -f .sgd/destructiveChanges/destructiveChanges.xml ] && grep -q "<types>" .sgd/destructiveChanges/destructiveChanges.xml; then
-          ARGS+=(--post-destructive-changes .sgd/destructiveChanges/destructiveChanges.xml)
+        if [ -f "$DSTR" ] && grep -q "<types>" "$DSTR"; then
+          ARGS+=(--post-destructive-changes "$DSTR")
         fi
 
         if [ "$LEVEL" = "RunSpecifiedTests" ] && [ -n "$TESTS" ]; then
@@ -320,34 +400,107 @@ runs:
         fi
 
         set +e
-        sf "${ARGS[@]}" > deploy-result.json
+        sf "${CMD[@]}" "${ARGS[@]}" > deploy-result.json
         STATUS=$?
         set -e
-        cat deploy-result.json | python3 -c "import sys,json; d=json.load(sys.stdin); r=(d.get('result') or d.get('data') or {}); print('deploy_id=%s'%r.get('id',''))" >> "$GITHUB_OUTPUT" || true
+        ID="$(job_id deploy-result.json)"
+        case "$MODE" in
+          validate) { echo "deploy_id=$ID"; echo "validation_id=$ID"; } >> "$GITHUB_OUTPUT" ;;
+          dry-run)  { echo "deploy_id="; echo "validation_id=$ID"; } >> "$GITHUB_OUTPUT" ;;
+          gated)    echo "validation_id=$ID" >> "$GITHUB_OUTPUT" ;;
+          *)        echo "deploy_id=$ID" >> "$GITHUB_OUTPUT" ;;
+        esac
         if [ $STATUS -ne 0 ]; then
-          echo "::error::Deployment/validation to $ALIAS failed — see the PR comment / job summary for the specific errors."
+          if [ $STATUS -eq 69 ]; then
+            # The CLI's exit code for a job still running when --wait ran out.
+            MSG="The deploy job ${ID:-?} to $ALIAS was still running in Salesforce when the wait ran out and may yet complete. Check Setup → Deployment Status before running it again."
+          elif [ "$MODE" = "deploy" ]; then
+            MSG="Deployment to $ALIAS failed — see the PR comment / job summary for the specific errors."
+          else
+            MSG="Validation against $ALIAS failed (check-only, nothing was deployed) — see the PR comment / job summary for the specific errors."
+          fi
+          echo "::error::$MSG"
+          result_or "$MSG"
           exit $STATUS
         fi
+        if [ "$MODE" = "gated" ]; then
+          if [ -z "$ID" ]; then
+            MSG="The validation against $ALIAS passed but returned no job id, so it can't be quick-deployed. Nothing was deployed."
+            echo "::error::$MSG"
+            exit 1
+          fi
+          echo "quick_job=$ID" >> "$GITHUB_OUTPUT"
+          echo "Validated $ID; it is deployed only if the coverage gate passes."
+        elif [ "$MODE" = "validate" ] && [ -z "$ID" ]; then
+          echo "::warning::The validation against $ALIAS passed but returned no job id; a later quick deploy is not possible."
+        fi
 
+    # Judges the validation in `gated` mode (before anything is deployed) and the
+    # check-only result in PR validation. When Salesforce already rejected the
+    # deploy, it only records the coverage it measured, so the report shows it.
     - name: Apex coverage gate
       id: coverage
-      if: ${{ inputs.coverage_gate == 'true' && inputs.bypass != 'true' && steps.scope.outputs.has_apex == 'true' && steps.run.outcome == 'success' }}
+      if: ${{ always() && inputs.coverage_gate == 'true' && inputs.bypass != 'true' && inputs.quick_deploy_id == '' && steps.scope.outputs.has_apex == 'true' && (steps.run.outcome == 'success' || steps.run.outcome == 'failure') }}
       shell: bash
       env:
         COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
         ENVIRONMENT: ${{ inputs.environment }}
+        COVERAGE_MEASURE_ONLY: ${{ steps.run.outcome == 'failure' && 'true' || 'false' }}
       run: python3 "$GITHUB_ACTION_PATH/../coverage/coverage-gate.py"
+
+    # Promotes a validated job: the release's approved validation
+    # (quick_deploy_id), or a `gated` deploy whose coverage gate just passed.
+    - name: Quick-deploy the validated job
+      id: quick
+      if: ${{ steps.run.outputs.quick_job != '' && (inputs.quick_deploy_id != '' || steps.coverage.outcome == 'success') }}
+      shell: bash
+      env:
+        ALIAS: ${{ inputs.environment }}
+        JOB: ${{ steps.run.outputs.quick_job }}
+      run: |
+        set -euo pipefail
+        echo "Quick-deploying validated job $JOB to $ALIAS"
+        set +e
+        sf project deploy quick --job-id "$JOB" --target-org "$ALIAS" --wait 120 --verbose --json > deploy-result.json
+        STATUS=$?
+        set -e
+        ID="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); r=d.get("result") or d.get("data") or {}; print(r.get("id", "") if isinstance(r, dict) else "")' deploy-result.json 2>/dev/null || true)"
+        # The quick deploy's own job id — not the validation's.
+        echo "deploy_id=$ID" >> "$GITHUB_OUTPUT"
+        if [ $STATUS -ne 0 ]; then
+          if [ $STATUS -eq 69 ]; then
+            MSG="The quick deploy ${ID:-?} of validated job $JOB to $ALIAS was still running in Salesforce when the wait ran out and may yet complete. Check Setup → Deployment Status before running it again."
+          else
+            MSG="Salesforce refused the quick deploy of validated job $JOB to $ALIAS, so nothing was deployed. A validation can be quick-deployed once, within 10 days, if it ran Apex tests and the org has not changed under it since. Run the deploy again to validate afresh."
+          fi
+          echo "::error::$MSG"
+          python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' deploy-result.json 2>/dev/null \
+            || DEPLOY_MSG="$MSG" python3 -c 'import json,os; json.dump({"status":1,"result":{},"message":os.environ["DEPLOY_MSG"]}, open("deploy-result.json","w"))'
+          exit $STATUS
+        fi
+        [ -n "$ID" ] || echo "::warning::The quick deploy to $ALIAS succeeded but returned no job id."
+        echo "Quick deploy ${ID:-?} of validated job $JOB to $ALIAS succeeded."
 
     # ---- Turn the SF result into a readable report + upload it ---------------
     - name: Build deployment report
       id: report
       if: ${{ always() && steps.delta.conclusion == 'success' }}
       shell: bash
+      env:
+        QUICK_ID: ${{ inputs.quick_deploy_id }}
+        HAS_CHANGES: ${{ steps.delta.outputs.has_changes }}
+        RUN_OUTCOME: ${{ steps.run.outcome }}
+        COVERAGE_OUTCOME: ${{ steps.coverage.outcome }}
+        QUICK_JOB: ${{ steps.run.outputs.quick_job }}
+        QUICK_OUTCOME: ${{ steps.quick.outcome }}
       run: |
         set -uo pipefail
-        if [ "${{ steps.delta.outputs.has_changes }}" != "true" ]; then
+        # A validated job handed to "Quick-deploy the validated job" (quick or
+        # gated mode) succeeded only if that quick deploy did.
+        if [ -z "$QUICK_ID" ] && [ "$HAS_CHANGES" != "true" ]; then
           STATUS_STR="no_changes"
-        elif [ "${{ steps.run.outcome }}" = "success" ] && [ "${{ steps.coverage.outcome }}" != "failure" ]; then
+        elif [ "$RUN_OUTCOME" = "success" ] && [ "$COVERAGE_OUTCOME" != "failure" ] \
+             && { [ -z "$QUICK_JOB" ] || [ "$QUICK_OUTCOME" = "success" ]; }; then
           STATUS_STR="success"
         else
           STATUS_STR="failure"
@@ -358,6 +511,9 @@ runs:
           --status "$STATUS_STR" \
           --environment "${{ inputs.environment }}" \
           --check-only "${{ inputs.check_only }}" \
+          --mode "${{ steps.run.outputs.mode }}" \
+          --has-apex "${{ steps.scope.outputs.has_apex }}" \
+          --test-level "${{ steps.run.outputs.level }}" \
           --out-md .deploy/errors.md \
           --out-json .deploy/report.json
 
@@ -374,7 +530,8 @@ runs:
         AUDIT_REF: ${{ inputs.ref }}
         AUDIT_SHA: ${{ github.sha }}
         AUDIT_PR: ${{ github.event.pull_request.number }}
-        AUDIT_DEPLOY_ID: ${{ steps.run.outputs.deploy_id }}
+        AUDIT_DEPLOY_ID: ${{ steps.quick.outputs.deploy_id || steps.run.outputs.deploy_id }}
+        AUDIT_VALIDATION_ID: ${{ steps.run.outputs.validation_id }}
         AUDIT_RUN_ID: ${{ github.run_id }}
         AUDIT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         AUDIT_REPO: ${{ github.repository }}
@@ -391,13 +548,14 @@ runs:
           .deploy/report.json
           .deploy/coverage.json
           .deploy/audit-record.json
+          .deploy/skipped-deletions.json
         if-no-files-found: ignore
 
     # Durable, queryable audit trail: append the record to the audit-log branch.
     # Only for REAL deploys/promotions (not the many check-only validations) to
     # keep the branch clean. Best-effort — never fails the deploy.
     - name: Append to audit-log branch (REQ-018)
-      if: ${{ always() && steps.audit.conclusion == 'success' && inputs.check_only != 'true' && steps.delta.outputs.has_changes == 'true' }}
+      if: ${{ always() && steps.audit.conclusion == 'success' && inputs.check_only != 'true' && (steps.delta.outputs.has_changes == 'true' || inputs.quick_deploy_id != '') }}
       continue-on-error: true
       shell: bash
       env:
@@ -408,6 +566,9 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/../scripts/audit-append.sh"
 
     - name: No changes to deploy
-      if: steps.delta.outputs.has_changes != 'true'
+      if: ${{ steps.delta.outputs.has_changes != 'true' && inputs.quick_deploy_id == '' }}
       shell: bash
-      run: echo "No deployable delta between origin/${{ inputs.baseline_branch }} and ${{ inputs.ref }} — nothing to do."
+      env:
+        BASELINE: ${{ inputs.baseline_branch }}
+        REF: ${{ inputs.ref }}
+      run: echo "No deployable delta between origin/$BASELINE and $REF — nothing to do."

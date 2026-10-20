@@ -9,8 +9,13 @@
 #   2. every shell script is syntactically valid
 #   3. every Python script compiles
 #   4. every internal `uses:` points at a path that actually exists
-#   5. no reusable workflow calls sf-pipeline/scripts/ directly
+#   5. no reusable workflow calls sf-pipeline/scripts/ or sf-setup/ directly
 #   6. internal references all use the same owner/repo and the same ref
+#   7-10. portability suite, example consumer vs example config, doc links,
+#         an example caller for every reusable workflow
+#  11. every composite-action output a workflow or action reads is declared
+#  12. branch protection leaves no pipeline branch open
+#  13. the example CODEOWNERS covers the caller workflows and the config
 #
 # Usage: ./scripts/validate.sh
 
@@ -91,13 +96,23 @@ done <<< "$SELF"
 head2 "5. Reusable workflows do not call scripts/ directly"
 # ---------------------------------------------------------------------------
 # A reusable workflow executes in the CONSUMER's checkout, where this repo's
-# sf-pipeline/scripts/ does not exist. Scripts must be reached via a composite
-# action using $GITHUB_ACTION_PATH.
-LEAK=$(grep -rnE '^\s*(run:|-\s*run:).*sf-pipeline/scripts/' .github/workflows/*.yml 2>/dev/null || true)
+# sf-pipeline/scripts/ and sf-setup/ do not exist. Scripts must be reached via a
+# composite action using $GITHUB_ACTION_PATH (or an explicit checkout of this
+# repo into its own path). Any relative path to them is a leak, on a `run:` line
+# or inside a multi-line run block; comments are ignored.
+Q="'"
+LEAK=""
+for f in .github/workflows/*.yml; do
+  grep -q 'workflow_call' "$f" || continue
+  HIT=$(grep -nE "(^|[[:space:]\"${Q}=(])(\./)?sf-(pipeline/scripts|setup)/" "$f" 2>/dev/null \
+          | grep -vE '^[0-9]+:[[:space:]]*#' | sed "s|^|$f:|" || true)
+  [[ -n "$HIT" ]] && LEAK="${LEAK}${HIT}"$'\n'
+done
+LEAK="${LEAK%$'\n'}"
 if [[ -n "$LEAK" ]]; then
   while IFS= read -r l; do fail "direct script call: $l"; done <<< "$LEAK"
 else
-  pass "no reusable workflow calls sf-pipeline/scripts/ directly"
+  pass "no reusable workflow calls sf-pipeline/scripts/ or sf-setup/ directly"
 fi
 
 # ---------------------------------------------------------------------------
@@ -132,6 +147,22 @@ if [[ -f tests/test_config_matrix.py ]]; then
   fi
 else
   fail "tests/test_config_matrix.py is missing"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "7b. Deploy engine scripts"
+# What reaches the org and what the report says: skipped deletions, the job id,
+# the coverage gate. Offline — no Salesforce org involved.
+# ---------------------------------------------------------------------------
+if [[ -f tests/test_deploy_engine.py ]]; then
+  if OUT=$(python3 tests/test_deploy_engine.py 2>&1); then
+    pass "$(grep -oE 'All [0-9]+ checks passed' <<< "$OUT" || echo 'deploy engine suite passed')"
+  else
+    fail "deploy engine suite failed:"
+    grep -E '✗' <<< "$OUT" | sed 's/^/    /'
+  fi
+else
+  fail "tests/test_deploy_engine.py is missing"
 fi
 
 # ---------------------------------------------------------------------------
@@ -200,13 +231,163 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 11. Personalisation placeholders (informational only)
+head2 "11. Composite-action outputs are declared"
+# A composite action only exposes what its action.yml `outputs:` declares; any
+# other `steps.<id>.outputs.<x>` silently reads ''. actionlint cannot see these
+# actions (they are referenced by full slug, as a remote action), so plan.py
+# once emitted r_require_envs, plan/action.yml never declared it, and the
+# ordering guard got an empty list. Checked here:
+#   * every key plan.py emit()s is declared in plan/action.yml, and every
+#     plan output is wired to a key plan.py really emits;
+#   * every steps.<id>.outputs.<x> in a reusable workflow or composite action
+#     names a real step and, when that step uses one of this repo's composite
+#     actions, an output that action declares.
+# ---------------------------------------------------------------------------
+if ! python3 -c 'import yaml' 2>/dev/null; then
+  echo "  (skipped — PyYAML not installed: pip install pyyaml)"
+elif OUT=$(python3 - <<'PY' 2>&1
+import ast, glob, os, re, sys, yaml
+
+STEP_REF = re.compile(r"\bsteps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)")
+LOCAL = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(sf-pipeline/[^@\s]+)@")
+problems, refs = [], 0
+cache = {}
+
+def load(path):
+    with open(path, encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+def declared(action_dir):
+    if action_dir not in cache:
+        cache[action_dir] = set((load(os.path.join(action_dir, "action.yml")).get("outputs") or {}))
+    return cache[action_dir]
+
+def strings(node):
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for v in node.values():
+            yield from strings(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from strings(v)
+
+def check_scope(where, steps, scope):
+    global refs
+    uses = {s["id"]: s.get("uses") or "" for s in steps or [] if isinstance(s, dict) and s.get("id")}
+    for text in strings(scope):
+        for sid, out in STEP_REF.findall(text):
+            refs += 1
+            if sid not in uses:
+                problems.append(f"{where}: steps.{sid}.outputs.{out} — no step has id '{sid}'")
+                continue
+            m = LOCAL.match(uses[sid])
+            if not m or not os.path.isfile(os.path.join(m.group(1), "action.yml")):
+                continue   # a run: step or a third-party action — outputs are dynamic
+            if out not in declared(m.group(1)):
+                problems.append(f"{where}: steps.{sid}.outputs.{out} — {m.group(1)}/action.yml "
+                                f"declares no output '{out}', so this reads ''")
+
+# plan.py <-> plan/action.yml, both ways.
+emitted = set()
+for node in ast.walk(ast.parse(open("sf-pipeline/scripts/plan.py", encoding="utf-8").read())):
+    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "emit":
+        for arg in node.args:
+            if isinstance(arg, ast.Dict):
+                emitted |= {k.value for k in arg.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+for key in sorted(emitted - declared("sf-pipeline/plan")):
+    problems.append(f"sf-pipeline/scripts/plan.py emits '{key}' but sf-pipeline/plan/action.yml "
+                    f"does not declare it, so every workflow reading it gets ''")
+# The action's own run block writes a few keys itself (e.g. config_source).
+for s in (load("sf-pipeline/plan/action.yml").get("runs") or {}).get("steps") or []:
+    emitted |= set(re.findall(r'echo "([a-z_]+)=', str(s.get("run", ""))))
+for name, spec in (load("sf-pipeline/plan/action.yml").get("outputs") or {}).items():
+    for _, out in STEP_REF.findall(str((spec or {}).get("value", ""))):
+        if out not in emitted:
+            problems.append(f"sf-pipeline/plan/action.yml output '{name}' reads '{out}', which plan.py never emits")
+
+for wf in sorted(p.replace(os.sep, "/") for p in glob.glob(".github/workflows/*.yml")):
+    for job_id, job in ((load(wf).get("jobs")) or {}).items():
+        if isinstance(job, dict):
+            check_scope(f"{wf} ({job_id})", job.get("steps"), job)
+for act in sorted(p.replace(os.sep, "/") for p in glob.glob("sf-pipeline/*/action.yml")):
+    doc = load(act)
+    check_scope(act, (doc.get("runs") or {}).get("steps"), doc)
+
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+print(f"{len(emitted)} plan.py keys declared; {refs} step-output references resolve")
+PY
+); then
+  pass "$OUT"
+else
+  fail "undeclared composite-action outputs:"; echo "$OUT" | sed 's/^/    /'
+fi
+
+# ---------------------------------------------------------------------------
+head2 "12. Branch protection leaves no pipeline branch open"
+# A branch the protection script leaves without a pull-request requirement is
+# one any writer can push to, skipping every deploy and guard. The suite
+# dry-runs the script and also checks the post-release realign restores it.
+# ---------------------------------------------------------------------------
+if [[ -f tests/test_branch_protection.py ]]; then
+  if OUT=$(python3 tests/test_branch_protection.py 2>&1); then
+    pass "$(grep -oE 'All [0-9]+ checks passed|skipped.*' <<< "$OUT" | head -1 || echo 'branch protection suite passed')"
+  else
+    fail "branch protection suite failed:"
+    grep -E '✗|expected|actual' <<< "$OUT" | sed 's/^/    /'
+  fi
+else
+  fail "tests/test_branch_protection.py is missing"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "13. Example CODEOWNERS covers the pipeline wiring"
+# A pull request that edits a caller workflow or pipeline.config.yml changes how
+# every deploy runs. The example CODEOWNERS a consumer copies must name an owner
+# for both, or "Require review from Code Owners" protects nothing.
+# ---------------------------------------------------------------------------
+if OUT=$(python3 - <<'PY' 2>&1
+import fnmatch, sys
+PATHS = [".github/workflows/pr-validation.yml", ".github/CODEOWNERS", "sf-pipeline/pipeline.config.yml"]
+try:
+    lines = open("examples/consumer/.github/CODEOWNERS", encoding="utf-8").read().splitlines()
+except FileNotFoundError:
+    sys.exit("examples/consumer/.github/CODEOWNERS is missing")
+rules = [l.split() for l in lines if l.strip() and not l.lstrip().startswith("#")]
+
+def covers(pattern, path):
+    p = pattern.lstrip("/")
+    if p in ("*", "**"):
+        return True
+    if p.endswith("/"):
+        return path.startswith(p)
+    return fnmatch.fnmatch(path, p) or path.startswith(p + "/")
+
+bad = []
+for path in PATHS:
+    last = [r for r in rules if covers(r[0], path)]   # the last matching line wins
+    if not last or len(last[-1]) < 2:
+        bad.append(path)
+if bad:
+    sys.exit("no owner for: " + ", ".join(bad))
+print("owners cover " + ", ".join(PATHS))
+PY
+); then
+  pass "$OUT"
+else
+  fail "example CODEOWNERS: $OUT"
+fi
+
+# ---------------------------------------------------------------------------
+# 14. Personalisation placeholders (informational only)
 # ---------------------------------------------------------------------------
 # The shipped template legitimately still contains these, so this must never
 # fail — it exists so that a personalised copy gets told what it missed.
 # Tokens are assembled at run time so this script does not match itself.
 echo
-echo "11. Personalisation (informational)"
+echo "14. Personalisation (informational)"
 L='<'; R='>'
 PH=$(grep -rlE "${L}COPYRIGHT HOLDER${R}|${L}SECURITY CONTACT${R}|${L}CONDUCT CONTACT${R}" \
        . --exclude-dir=.git 2>/dev/null | grep -v '^\./scripts/personalize\.sh$' || true)

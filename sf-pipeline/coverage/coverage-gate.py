@@ -9,6 +9,8 @@ and a job-summary line, and exits non-zero if coverage is below the threshold.
 Env:
   COVERAGE_THRESHOLD  minimum aggregate coverage % (default 85)
   ENVIRONMENT         environment label for the summary
+  COVERAGE_MEASURE_ONLY  "true" = Salesforce already rejected the deploy: record
+                      the coverage it measured for the report, never fail
   GITHUB_STEP_SUMMARY (provided by CI) file to append the summary to
 """
 import json
@@ -31,6 +33,7 @@ def find_all(obj, key, out):
 def main():
     threshold = float(os.environ.get("COVERAGE_THRESHOLD", "85") or 85)
     env = os.environ.get("ENVIRONMENT", "")
+    measure_only = os.environ.get("COVERAGE_MEASURE_ONLY", "").lower() == "true"
     try:
         data = json.load(open("deploy-result.json", encoding="utf-8"))
     except Exception:
@@ -89,8 +92,12 @@ def main():
 
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if pct is None:
-        msg = "No Apex coverage data returned — coverage gate could not measure (passing)."
-        print("::warning::" + msg)
+        if measure_only:
+            msg = "No Apex coverage data returned — Salesforce rejected the deploy before reporting coverage."
+            print(msg)
+        else:
+            msg = "No Apex coverage data returned — coverage gate could not measure (passing)."
+            print("::warning::" + msg)
         if summary:
             open(summary, "a", encoding="utf-8").write(f"\n### 📊 Apex coverage — {env}\n\n{msg}\n")
         sys.exit(0)
@@ -99,6 +106,11 @@ def main():
     print(line)
     if summary:
         open(summary, "a", encoding="utf-8").write(f"\n### 📊 Apex coverage — {env}\n\n{line}\n")
+    if measure_only:
+        # The deploy already failed; this run only records what was measured.
+        if pct + 1e-9 < threshold:
+            print(f"Apex code coverage {pct:.2f}% is also below the required {threshold:.0f}%.")
+        sys.exit(0)
     if pct + 1e-9 < threshold:
         print(f"::error::Apex code coverage {pct:.2f}% is below the required {threshold:.0f}%.")
         sys.exit(1)

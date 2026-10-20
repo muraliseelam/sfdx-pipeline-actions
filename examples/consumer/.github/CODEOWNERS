@@ -1,0 +1,21 @@
+# CODEOWNERS — who must approve a change to the pipeline wiring.
+#
+# Copy this to .github/CODEOWNERS in your Salesforce repo and replace the owner
+# with real GitHub users or a team (@org/team) — ideally two or more people,
+# because GitHub never counts a PR author's own approval. GitHub ignores a line
+# whose owner it does not know, so check the file on GitHub for errors after
+# you push it.
+#
+# setup-branch-protection.sh turns on "Require review from Code Owners" for the
+# entry and production branches (REQUIRE_CODE_OWNER_REVIEWS, on by default with
+# REQUIRED_REVIEWS >= 1), so a PR touching a path below cannot merge until one
+# of these owners approves it.
+#
+# Why these paths: the caller workflows decide what runs with your org
+# credentials, and pipeline.config.yml decides every gate, test level and
+# environment. A change to either changes how every deploy runs.
+#
+# The last matching line wins, so add any broader rules ABOVE these.
+
+/.github/                         @your-org/pipeline-owners
+/sf-pipeline/pipeline.config.yml  @your-org/pipeline-owners

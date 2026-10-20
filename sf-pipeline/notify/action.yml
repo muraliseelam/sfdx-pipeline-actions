@@ -40,4 +40,6 @@ runs:
         CHAT_API_TOKEN: ${{ inputs.api_token }}
         CHAT_CHANNEL_ID: ${{ inputs.channel_id }}
         CHAT_PROVIDER: ${{ inputs.provider }}
-      run: bash "$GITHUB_ACTION_PATH/../scripts/notify.sh" "${{ inputs.message }}"
+        # Through env: a message can carry a PR title or branch name.
+        CHAT_MESSAGE: ${{ inputs.message }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/notify.sh" "$CHAT_MESSAGE"

@@ -3,8 +3,9 @@ name: Prod Release
 # ONE production file. Two actions, selected by the `action` input:
 #
 #   action: assemble  → build/refresh release/<version> from the prod branch and
-#                       merge in the selected story branches. A human then opens
-#                       the release → prod PR.
+#                       merge in the commit each story really deployed to every
+#                       stage (proven by the pipeline's deploy-<env> statuses).
+#                       A human then opens the release → prod PR.
 #   action: release   → preflight (release PR authorized + green) → validate
 #                       (check-only against prod-validate) → [prod reviewer gate]
 #                       → quick-deploy to prod → merge the PR, tag, GitHub Release,
@@ -26,7 +27,7 @@ on:
         required: false
         default: ""
       stories:
-        description: "Assemble only: explicit space/comma-separated story branches (else auto-gather)."
+        description: "Assemble only: explicit space/comma-separated story branches (else auto-gather). Each must still be proven deployed to every stage."
         type: string
         required: false
         default: ""
@@ -57,6 +58,7 @@ jobs:
       prod_destructive_tests: ${{ steps.cfg.outputs.prod_destructive_tests }}
       release_prefix:     ${{ steps.cfg.outputs.release_prefix }}
       release_label:      ${{ steps.cfg.outputs.release_label }}
+      chain_statuses:     ${{ steps.ref.outputs.chain_statuses }}
       env_branches:       ${{ steps.cfg.outputs.env_branches }}
       chat:               ${{ steps.cfg.outputs.chat }}
     steps:
@@ -64,8 +66,19 @@ jobs:
       - id: cfg
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with: { mode: outputs }
+      # Every earlier stage of the last env: a release candidate must have really
+      # deployed to each one, not only to the last.
+      - id: last
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
+        with: { mode: prdeploy, arg: "${{ steps.cfg.outputs.last_env }}" }
       - id: ref
-        run: echo "ref=${{ steps.cfg.outputs.release_prefix }}${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+        env:
+          EARLIER: ${{ steps.last.outputs.r_require_envs }}
+          LAST_ENV: ${{ steps.cfg.outputs.last_env }}
+        run: |
+          echo "ref=${{ steps.cfg.outputs.release_prefix }}${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          S=""; for e in ${EARLIER//,/ } $LAST_ENV; do S="${S:+$S,}deploy-$e"; done
+          echo "chain_statuses=$S" >> "$GITHUB_OUTPUT"
 
   # ===========================================================================
   #  action: assemble — build the release branch
@@ -74,6 +87,11 @@ jobs:
     if: ${{ inputs.action == 'assemble' }}
     needs: plan
     runs-on: ubuntu-latest
+    # statuses: read — release-gather proves each story by its deploy-<env> statuses.
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,57 +107,91 @@ jobs:
           echo "branch=${RELEASE_PREFIX}$V" >> "$GITHUB_OUTPUT"
           git config user.name  "sf-release-bot"
           git config user.email "sf-release-bot@users.noreply.github.com"
-      - name: Gather stories (PRs promoted to the last environment)
+      # An explicit `stories` list only narrows the gather: every story, named or
+      # not, must be proven deployed to every stage by the pipeline itself.
+      - name: Gather stories (proven deployed to every environment)
         id: gather
-        if: ${{ inputs.stories == '' }}
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/release-gather@main
         with:
           label: ${{ needs.plan.outputs.release_label }}
           baseline: ${{ needs.plan.outputs.prod_branch }}
+          stories: ${{ inputs.stories }}
+          require_statuses: ${{ needs.plan.outputs.chain_statuses }}
           github_token: ${{ github.token }}
       - name: Build release branch + merge stories
+        id: build
         env:
           PROD_BRANCH: ${{ needs.plan.outputs.prod_branch }}
           BR: ${{ steps.ver.outputs.branch }}
-          MANUAL: ${{ inputs.stories }}
-          GATHERED: ${{ steps.gather.outputs.stories }}
+          STORIES: ${{ steps.gather.outputs.stories }}
+          SHAS: ${{ steps.gather.outputs.shas }}
         run: |
           set -euo pipefail
-          LIST="${MANUAL:-}"; [ -z "$LIST" ] && LIST="${GATHERED:-}"
-          LIST="$(echo "${LIST//,/ }" | xargs || true)"
-          echo "Release will include: ${LIST:-<none>}"
+          read -ra S <<< "${STORIES:-}"; read -ra H <<< "${SHAS:-}"
+          if [ "${#S[@]}" -eq 0 ] || [ "${#S[@]}" -ne "${#H[@]}" ]; then
+            echo "::error::release-gather returned no stories, or stories and commits that don't line up."; exit 1
+          fi
+          echo "Release will include:"
+          for i in "${!S[@]}"; do echo "  ${S[$i]} @ ${H[$i]:0:8}"; done
           git fetch origin --prune
-          # Preflight: every named story branch must exist.
-          for s in $LIST; do
-            git ls-remote --exit-code --heads origin "$s" >/dev/null 2>&1 || \
-              { echo "::error::Story branch '$s' does not exist on origin."; exit 1; }
-          done
           # Create or refresh release/<version> from the prod branch.
+          OLD=""
           if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+            OLD="$(git rev-parse "origin/$BR")"
             git checkout -B "$BR" "origin/$BR"; git merge --no-edit "origin/$PROD_BRANCH"
           else
             git checkout -B "$BR" "origin/$PROD_BRANCH"
           fi
-          for s in $LIST; do
-            git fetch origin "$s"
-            git merge --no-edit "origin/$s" || \
+          # Merge the commit each story deployed, not its branch: a commit pushed
+          # after the promotions never ran in any environment.
+          for i in "${!S[@]}"; do
+            s="${S[$i]}"; sha="${H[$i]}"
+            git cat-file -e "${sha}^{commit}" 2>/dev/null || git fetch --quiet origin "$sha"
+            git merge --no-edit -m "Merge $s at ${sha:0:8}" "$sha" || \
               { echo "::error::Merge conflict merging $s — rebase it on $PROD_BRANCH and re-run."; exit 1; }
           done
+          # Nothing but those commits may ship. An existing release branch can hold
+          # older content: a story since put on hold or not proven, or a hand push.
+          EXCL=("^origin/$PROD_BRANCH"); for h in "${H[@]}"; do EXCL+=("^$h"); done
+          EXTRA="$(git rev-list --no-merges --abbrev-commit HEAD "${EXCL[@]}")"
+          if [ -n "$EXTRA" ]; then
+            echo "::error::$BR contains commits that no story proven deployed to every stage accounts for: $(echo "$EXTRA" | xargs). Assemble a new version, or delete $BR and re-run."
+            exit 1
+          fi
+          if [ "$(git rev-list --count "origin/$PROD_BRANCH..HEAD")" = "0" ]; then
+            echo "::error::Nothing to release: $BR would be identical to $PROD_BRANCH."; exit 1
+          fi
           git push origin "HEAD:$BR"
+          if [ "$OLD" = "$(git rev-parse HEAD)" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+          {
+            echo "| Story | Deployed commit released |"
+            echo "|---|---|"
+            for i in "${!S[@]}"; do echo "| \`${S[$i]}\` | \`${H[$i]:0:8}\` |"; done
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Summarize + release PR link
         env:
           GH_TOKEN: ${{ github.token }}
           PROD_BRANCH: ${{ needs.plan.outputs.prod_branch }}
           BR: ${{ steps.ver.outputs.branch }}
           VERSION: ${{ steps.ver.outputs.version }}
+          CHANGED: ${{ steps.build.outputs.changed }}
         run: |
           set -euo pipefail
           EXISTING="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BR" --base "$PROD_BRANCH" --state open --json number --jq '.[0].number' || true)"
           COMPARE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${PROD_BRANCH}...${BR}?expand=1"
+          # An authorization was given for the old content: take it back.
+          REAUTH=""
+          if [ -n "$EXISTING" ] && [ "$CHANGED" = "true" ] && \
+             gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$EXISTING/labels/prod-approved" >/dev/null 2>&1; then
+            REAUTH="yes"
+            gh pr comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "🔄 Re-assembled with new content — \`prod-approved\` was removed. Review the change set again, then re-authorize." || true
+          fi
           {
             echo "## Release v${VERSION} assembled on \`${BR}\`"
             if [ -n "$EXISTING" ]; then echo "➡️ Release PR already open: #${EXISTING}"
             else echo "➡️ **Open the release PR:** [${BR} → ${PROD_BRANCH}](${COMPARE})"; fi
+            if [ -n "$REAUTH" ]; then echo ""; echo "⚠️ The release PR changed, so its \`prod-approved\` label was removed."; fi
             echo ""
             echo "Next: add the \`prod-approved\` label (or get an Approve review), then run **Prod Release** with action \`release\` and version \`${VERSION}\`."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -158,6 +210,7 @@ jobs:
       statuses: read
     outputs:
       pr_number: ${{ steps.pf.outputs.pr_number }}
+      head_sha:  ${{ steps.pf.outputs.head_sha }}
     steps:
       - id: pf
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/release-preflight@main
@@ -165,9 +218,12 @@ jobs:
           head_branch: ${{ needs.plan.outputs.ref }}
           base_branch: ${{ needs.plan.outputs.prod_branch }}
           version: ${{ inputs.version }}
+          deployed_label: deployed:${{ needs.plan.outputs.prod_deploy_env }}
           github_token: ${{ github.token }}
 
   # Validation-only deploy to prod (captures a validated deploy id to quick-deploy).
+  # Validate, deploy and merge all use the commit preflight authorized, so a push
+  # to the release branch meanwhile can't slip into production or into main.
   validate:
     if: ${{ inputs.action == 'release' }}
     needs: [plan, preflight]
@@ -175,6 +231,8 @@ jobs:
     environment: ${{ needs.plan.outputs.prod_validate_env }}
     outputs:
       deploy_id: ${{ steps.deploy.outputs.deploy_id }}
+      validated: ${{ steps.what.outputs.validated }}
+      quick:     ${{ steps.what.outputs.quick }}
     steps:
       - name: Chat — validation starting
         if: ${{ needs.plan.outputs.chat == 'true' }}
@@ -186,7 +244,7 @@ jobs:
           api_token:   ${{ secrets.CHAT_API_TOKEN }}
           channel_id:  ${{ secrets.CHAT_CHANNEL_ID }}
       - uses: actions/checkout@v4
-        with: { ref: "${{ needs.plan.outputs.ref }}", fetch-depth: 0 }
+        with: { ref: "${{ needs.preflight.outputs.head_sha }}", fetch-depth: 0 }
       - id: deploy
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
         with:
@@ -205,6 +263,34 @@ jobs:
           sf_username: ${{ secrets.SF_USERNAME }}
           sf_instance_url: ${{ secrets.SF_INSTANCE_URL }}
           sf_jwt_key: ${{ secrets.SF_JWT_KEY }}
+      # A delta without Apex is validated with a check-only deploy that runs no
+      # tests (validation_id). Salesforce can't quick-deploy that, so after
+      # approval the same delta is deployed again in full: say so to the reviewer.
+      - name: Record what was validated
+        id: what
+        env:
+          DEPLOY_ID: ${{ steps.deploy.outputs.deploy_id }}
+          VALIDATION_ID: ${{ steps.deploy.outputs.validation_id }}
+          HAS_CHANGES: ${{ steps.deploy.outputs.has_changes }}
+          SHA: ${{ needs.preflight.outputs.head_sha }}
+        run: |
+          if [ -n "$DEPLOY_ID" ]; then
+            { echo "validated=true"; echo "quick=true"; } >> "$GITHUB_OUTPUT"
+            echo "✅ Validated ${SHA:0:8} against production — job \`$DEPLOY_ID\` is what gets quick-deployed after approval." >> "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$VALIDATION_ID" ]; then
+            { echo "validated=true"; echo "quick=false"; } >> "$GITHUB_OUTPUT"
+            MSG="Validated ${SHA:0:8} against production with a check-only deploy (job $VALIDATION_ID, no Apex tests). Salesforce can't quick-deploy a validation that ran no tests, so after approval the same delta is deployed again with a FULL deploy (atomic: if it fails, production is unchanged)."
+            echo "::notice::$MSG"
+            echo "✅ $MSG" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$HAS_CHANGES" = "true" ]; then
+            { echo "validated=false"; echo "quick=false"; } >> "$GITHUB_OUTPUT"
+            MSG="Not validated against production: no check-only deploy ran. After approval, ${SHA:0:8} is deployed with a FULL deploy (atomic: if it fails, production is unchanged), not a quick deploy."
+            echo "::warning::$MSG"
+            echo "⚠️ $MSG" >> "$GITHUB_STEP_SUMMARY"
+          else
+            { echo "validated=true"; echo "quick=false"; } >> "$GITHUB_OUTPUT"
+            echo "✅ Nothing to deploy for ${SHA:0:8}." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   validate-notify:
     if: ${{ always() && inputs.action == 'release' && needs.plan.outputs.chat == 'true' }}
@@ -213,45 +299,81 @@ jobs:
     steps:
       - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@main
         with:
-          message: ${{ needs.validate.result == 'success' && format('✅ **Prod validation PASSED** for v{0} — awaiting deploy approval.', inputs.version) || format('❌ **Prod validation FAILED** for v{0}. {1}/{2}/actions/runs/{3}', inputs.version, github.server_url, github.repository, github.run_id) }}
+          message: ${{ needs.validate.result == 'success' && (needs.validate.outputs.validated == 'false' && format('⚠️ **Prod validation SKIPPED** for v{0} — awaiting deploy approval; the deploy will be a full deploy.', inputs.version) || format('✅ **Prod validation PASSED** for v{0} — awaiting deploy approval{1}.', inputs.version, needs.validate.outputs.quick == 'false' && ' (check-only, no Apex tests; the deploy will be a full deploy)' || '')) || format('❌ **Prod validation FAILED** for v{0}. {1}/{2}/actions/runs/{3}', inputs.version, github.server_url, github.repository, github.run_id) }}
           webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}
           api_url:     ${{ secrets.CHAT_API_URL }}
           api_token:   ${{ secrets.CHAT_API_TOKEN }}
           channel_id:  ${{ secrets.CHAT_CHANNEL_ID }}
 
   # Quick-deploy the validated id — gated by the prod environment reviewer.
+  # No automatic fallback when Salesforce refuses the quick deploy: a client
+  # timeout looks the same while the org keeps deploying, and a second deploy on
+  # top would not be the artifact the reviewer approved. The run stops; see the
+  # job summary for the safe retry.
   deploy:
     if: ${{ inputs.action == 'release' }}
-    needs: [plan, validate]
+    needs: [plan, preflight, validate]
     runs-on: ubuntu-latest
     environment: ${{ needs.plan.outputs.prod_deploy_env }}
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ needs.plan.outputs.ref }}", fetch-depth: 0 }
+        with: { ref: "${{ needs.preflight.outputs.head_sha }}", fetch-depth: 0 }
+      # Same test settings as the validation, for the full deploy that runs when
+      # there is no validated job (a delta without Apex).
       - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
         with:
           environment: prod
           ref: ${{ needs.plan.outputs.ref }}
           check_only: "false"
           quick_deploy_id: ${{ needs.validate.outputs.deploy_id }}
+          test_level: ${{ needs.plan.outputs.prod_test_level }}
+          destructive_test_names: ${{ needs.plan.outputs.prod_destructive_tests }}
           manifest_title: "Prod deploy"
           baseline_branch: ${{ needs.plan.outputs.baseline_branch }}
           source_path: ${{ needs.plan.outputs.source_path }}
           api_version: ${{ needs.plan.outputs.api_version }}
           node_version: ${{ needs.plan.outputs.node_version }}
+          profiles_mode: ${{ needs.plan.outputs.profiles_mode }}
           sf_consumer_key: ${{ secrets.SF_CONSUMER_KEY }}
           sf_username: ${{ secrets.SF_USERNAME }}
           sf_instance_url: ${{ secrets.SF_INSTANCE_URL }}
           sf_jwt_key: ${{ secrets.SF_JWT_KEY }}
+      # Production now runs this release: mark the PR so preflight refuses to
+      # deploy it a second time if the run is repeated before finalize finishes.
+      - name: Mark the release PR deployed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.preflight.outputs.pr_number }}
+          LABEL: deployed:${{ needs.plan.outputs.prod_deploy_env }}
+        run: |
+          gh label create "$LABEL" --repo "$GITHUB_REPOSITORY" --color 0e8a16 \
+            --description "Deployed to production by the release train" >/dev/null 2>&1 || true
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/labels" -f "labels[]=$LABEL" >/dev/null \
+            || echo "::warning::Could not add '$LABEL' to release PR #$PR — a repeated run of this release would not be refused."
+      - name: Explain a failed production deploy
+        if: ${{ failure() }}
+        env:
+          VERSION: ${{ inputs.version }}
+          DEPLOY_ID: ${{ needs.validate.outputs.deploy_id }}
+          LABEL: deployed:${{ needs.plan.outputs.prod_deploy_env }}
+        run: |
+          {
+            echo "### ❌ Production deploy failed for v${VERSION} — nothing was merged or tagged"
+            echo ""
+            echo "Look at **Setup → Deployment Status** in production before retrying."
+            echo ""
+            echo "- **Nothing was deployed** (e.g. Salesforce refused the quick deploy of \`${DEPLOY_ID:-<none>}\`: older than 10 days, already used, or production changed since): run **Prod Release** again with action \`release\` and version \`${VERSION}\`. It validates again and asks for approval again. Re-running only this job reuses the old validation."
+            echo "- **The deploy completed** in production anyway (e.g. the CLI timed out while Salesforce kept deploying): do **not** deploy again. Add \`${LABEL}\` to the release PR, merge it, tag \`v${VERSION}\` and run **Sync Env Branches** by hand."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   deploy-notify:
     if: ${{ always() && inputs.action == 'release' && needs.plan.outputs.chat == 'true' && needs.deploy.result != 'skipped' }}
-    needs: [plan, deploy]
+    needs: [plan, validate, deploy]
     runs-on: ubuntu-latest
     steps:
       - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@main
         with:
-          message: ${{ needs.deploy.result == 'success' && format('✅ **Prod VALIDATED & DEPLOYED** — v{0} is live. Deployed by @{1}.', inputs.version, github.actor) || format('❌ **Prod DEPLOY FAILED** for v{0} (validation had passed). {1}/{2}/actions/runs/{3}', inputs.version, github.server_url, github.repository, github.run_id) }}
+          message: ${{ needs.deploy.result == 'success' && format('✅ **Prod {0}** — v{1} is live. Deployed by @{2}.', needs.validate.outputs.validated == 'false' && 'DEPLOYED (full deploy, no prior validation)' || 'VALIDATED & DEPLOYED', inputs.version, github.actor) || format('❌ **Prod DEPLOY FAILED** for v{0} ({1}). {2}/{3}/actions/runs/{4}', inputs.version, needs.validate.outputs.validated == 'false' && 'no prior validation, no Apex' || 'validation had passed', github.server_url, github.repository, github.run_id) }}
           webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}
           api_url:     ${{ secrets.CHAT_API_URL }}
           api_token:   ${{ secrets.CHAT_API_TOKEN }}
@@ -267,6 +389,7 @@ jobs:
       VERSION: ${{ inputs.version }}
       BASELINE: ${{ needs.plan.outputs.baseline_branch }}
       PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
+      HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -274,11 +397,20 @@ jobs:
         run: |
           git config user.name  "sf-release-bot"
           git config user.email "sf-release-bot@users.noreply.github.com"
+      # Re-runnable: an already-merged PR is not merged again.
       - name: Merge release PR (post-deploy), tag + GitHub Release
+        id: publish
         run: |
           set -euo pipefail
           [ -n "${PR_NUMBER:-}" ] || { echo "::error::No release PR number from preflight."; exit 1; }
-          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --merge --delete-branch
+          if [ "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq .state)" = "MERGED" ]; then
+            echo "Release PR #$PR_NUMBER is already merged."
+          # main must get exactly the commit production runs: GitHub refuses the
+          # merge if the release branch moved after preflight.
+          elif ! gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --merge --delete-branch --match-head-commit "$HEAD_SHA"; then
+            echo "::error::Could not merge release PR #$PR_NUMBER at ${HEAD_SHA:0:8}, the commit now in production (see above). If the release branch changed after preflight, merge only ${HEAD_SHA:0:8} into $BASELINE."
+            exit 1
+          fi
           git fetch origin --prune --tags
           git checkout "$BASELINE"; git pull --ff-only origin "$BASELINE"
           if ! git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
@@ -295,7 +427,7 @@ jobs:
           pipeline_pat: ${{ secrets.PIPELINE_PAT }}
           github_token: ${{ github.token }}
       - name: Chat — released
-        if: ${{ needs.plan.outputs.chat == 'true' }}
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' && needs.plan.outputs.chat == 'true' }}
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@main
         with:
           message: "🎉 **Prod RELEASE published** — v${{ inputs.version }} is live, merged to `${{ needs.plan.outputs.baseline_branch }}`, tagged, and released. ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ inputs.version }}"

@@ -79,9 +79,12 @@ jobs:
 
           # Resolve the commit to revert.
           if [ -n "$PR_NUMBER" ]; then
+            # An open or closed-unmerged PR also has a merge_commit_sha (GitHub's
+            # test merge): reverting it would "roll back" a change that never landed.
+            MERGED="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.merged')"
             SHA="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.merge_commit_sha')"
-            if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
-              echo "::error::PR #$PR_NUMBER has no merge commit (not merged?)."; exit 1
+            if [ "$MERGED" != "true" ] || [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
+              echo "::error::PR #$PR_NUMBER is not merged — there is nothing to roll back."; exit 1
             fi
             SRC_DESC="PR #$PR_NUMBER"
           elif [ -n "$REF_IN" ]; then

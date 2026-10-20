@@ -67,11 +67,14 @@ runs:
     - name: Render component manifest
       if: ${{ inputs.manifest_title != '' && steps.delta.outputs.has_changes == 'true' }}
       shell: bash
+      env:
+        TITLE: ${{ inputs.manifest_title }}
+        ENV_NAME: ${{ inputs.env_name }}
       run: |
         python3 "$GITHUB_ACTION_PATH/../scripts/manifest_to_md.py" \
           --dir .sgd \
-          --title "${{ inputs.manifest_title }} — ${{ inputs.env_name }}" \
-          --out "manifest-${{ inputs.env_name }}.md"
+          --title "$TITLE — $ENV_NAME" \
+          --out "manifest-$ENV_NAME.md"
 
     - name: Upload PR change manifest
       if: ${{ inputs.manifest_title != '' && steps.delta.outputs.has_changes == 'true' }}
@@ -98,11 +101,14 @@ runs:
     - name: Render comparison manifest
       if: ${{ inputs.compare_branch != '' && inputs.compare_branch != inputs.baseline_branch && steps.cmp.outputs.has_changes == 'true' }}
       shell: bash
+      env:
+        COMPARE_BRANCH: ${{ inputs.compare_branch }}
+        ENV_NAME: ${{ inputs.env_name }}
       run: |
         python3 "$GITHUB_ACTION_PATH/../scripts/manifest_to_md.py" \
           --dir .sgd-cmp \
-          --title "Comparison vs \`${{ inputs.compare_branch }}\` (informational — not deployed)" \
-          --out "envcompare-${{ inputs.env_name }}.md"
+          --title "Comparison vs \`$COMPARE_BRANCH\` (informational — not deployed)" \
+          --out "envcompare-$ENV_NAME.md"
 
     - name: Upload comparison manifest
       if: ${{ inputs.compare_branch != '' && inputs.compare_branch != inputs.baseline_branch && steps.cmp.outputs.has_changes == 'true' }}

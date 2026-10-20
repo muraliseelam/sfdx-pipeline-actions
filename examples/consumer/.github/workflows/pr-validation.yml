@@ -21,6 +21,9 @@ on:
       # Also validate PRs into a release branch. The production release train
       # cuts these, and plan.py validates them against `prod-validate` (the
       # check-only environment). Match `production.release_branch_prefix`.
+      # Project Init lets only the production branch use `prod-validate`, so
+      # such a validation is refused at that environment (User Guide, Part 5);
+      # the release train validates production itself.
       - "release/**"
       # The entry stage is the ONLY stage that runs check-only validation plus
       # the coverage gate. Later stages deploy on approval with no re-validation

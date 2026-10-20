@@ -23,11 +23,11 @@ on:
         default: true
         type: boolean
       profiles_mode:
-        description: "Profile/PS mode override (blank = use config)"
+        description: "Profile/PS mode override (config = use pipeline.config.yml)"
         required: false
-        default: ""
+        default: config
         type: choice
-        options: ["", "full", "incremental"]
+        options: ["config", "full", "incremental"]
 
 permissions:
   contents: read
@@ -40,4 +40,4 @@ jobs:
       feature_ref: ${{ inputs.feature_ref }}
       environment: ${{ inputs.environment }}
       dry_run: ${{ inputs.dry_run }}
-      profiles_mode: ${{ inputs.profiles_mode }}
+      profiles_mode: ${{ inputs.profiles_mode != 'config' && inputs.profiles_mode || '' }}

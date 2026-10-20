@@ -1,9 +1,11 @@
 name: Sync Environment Branches
 
-# Replays the production baseline onto every environment branch so the chain
-# never drifts behind production. The production release train already does this
-# automatically after go-live; this caller exists so you can also run it on a
-# schedule, or by hand after a hotfix that landed straight on the baseline.
+# Merges the production baseline into every environment branch so the chain
+# never drifts behind production; a branch that conflicts gets a PR cut from the
+# baseline instead. The production release train realigns the branches itself
+# after go-live; this caller exists so you can also run it on a schedule, by hand
+# after a hotfix that landed straight on the baseline, or to resolve a branch the
+# release left as is because of conflicts.
 #
 # Branch names come from pipeline.config.yml — nothing to configure here.
 

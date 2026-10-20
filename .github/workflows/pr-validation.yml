@@ -50,14 +50,20 @@ jobs:
       test_level:         ${{ steps.resolve.outputs.r_test_level }}
     steps:
       - uses: actions/checkout@v4
+      # Gates and environments come from the PR's BASE branch: the PR's own copy
+      # of pipeline.config.yml must not relax the gates that judge it. A manual
+      # (workflow_dispatch) run writes no status and reads the dispatched ref.
       - id: cfg
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
-        with: { mode: outputs }
+        with:
+          mode: outputs
+          config_ref: ${{ github.base_ref || github.event.pull_request.base.ref }}
       - id: resolve
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with:
           mode: resolve
           arg: "${{ github.base_ref || github.event.pull_request.base.ref || steps.cfg.outputs.entry_branch }}"
+          config_ref: ${{ github.base_ref || github.event.pull_request.base.ref }}
       - id: guard
         env:
           IS_STAGE: ${{ steps.resolve.outputs.r_is_stage }}
@@ -98,7 +104,29 @@ jobs:
     outputs:
       active: ${{ steps.b.outputs.active }}
     steps:
+      # A bypass covers the commits an admin saw. New commits drop it, like a
+      # stale review, so nothing can be pushed in under an earlier bypass.
+      - name: Drop a bypass granted before this push
+        id: stale
+        if: ${{ github.event.action == 'synchronize' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          LABEL: ${{ needs.plan.outputs.bypass_label }}
+        run: |
+          set -uo pipefail
+          if gh pr view "$PR" --repo "$REPO" --json labels -q '.labels[].name' 2>/dev/null | grep -qxF -- "$LABEL"; then
+            # Not honoured for this run even if the label can't be removed.
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            if gh pr edit "$PR" --repo "$REPO" --remove-label "$LABEL" >/dev/null 2>&1; then
+              gh pr comment "$PR" --repo "$REPO" --body \
+                "🔒 **Admin bypass removed** — new commits were pushed after \`$LABEL\` was added, so the quality gates apply to them. An admin can re-add the label for the new head." >/dev/null 2>&1 || true
+            fi
+            echo "::notice::'$LABEL' predates this push — the quality gates apply."
+          fi
       - id: b
+        if: ${{ steps.stale.outputs.stale != 'true' }}
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/bypass@main
         with:
           pr_number: ${{ github.event.pull_request.number }}

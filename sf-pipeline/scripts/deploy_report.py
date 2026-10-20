@@ -25,14 +25,26 @@ import os
 import sys
 
 
-def load(path):
+def load(path, default=None):
+    default = {} if default is None else default
     if not path or not os.path.isfile(path):
-        return {}
+        return default
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
+            data = json.load(fh)
     except (ValueError, OSError):
-        return {}
+        return default
+    return data if isinstance(data, type(default)) else default
+
+
+def job_id(data):
+    """The deploy job id: `result.id` on success, `data.id` in the CLI's error
+    envelope. Not a recursive search — `details` holds component ids too."""
+    for key in ("result", "data"):
+        v = data.get(key) if isinstance(data, dict) else None
+        if isinstance(v, dict) and isinstance(v.get("id"), str) and v["id"].strip():
+            return v["id"].strip()
+    return ""
 
 
 def find_all(obj, key):
@@ -90,6 +102,13 @@ def main():
     ap.add_argument("--environment", default="")
     ap.add_argument("--check-only", default="false")
     ap.add_argument("--coverage-file", default=".deploy/coverage.json")
+    ap.add_argument("--skipped-file", default=".deploy/skipped-deletions.json",
+                    help="deletions dropped because the org no longer has them")
+    ap.add_argument("--mode", default="",
+                    help="how the deploy step talked to the org: validate | dry-run "
+                         "| gated | deploy | quick | nothing-left (blank = unknown)")
+    ap.add_argument("--has-apex", default="", help="true when the delta adds/changes Apex")
+    ap.add_argument("--test-level", default="", help="the test level the deploy used")
     ap.add_argument("--out-md", default=".deploy/errors.md")
     ap.add_argument("--out-json", default=".deploy/report.json")
     args = ap.parse_args()
@@ -97,6 +116,7 @@ def main():
     data = load(args.result)
     check_only = str(args.check_only).lower() == "true"
     verb = "Validation" if check_only else "Deployment"
+    skipped = [s for s in load(args.skipped_file, []) if isinstance(s, dict)]
 
     # --- Apex coverage (written by the deploy action's coverage gate) --------
     cov = load(args.coverage_file)
@@ -111,7 +131,7 @@ def main():
         and float(cov_pct) + 1e-9 < float(cov_threshold)
     )
 
-    deploy_id = first_str(data, "id")
+    deploy_id = job_id(data)
 
     # --- Component (compile / metadata) failures ----------------------------
     comp_failures = collect(data, "componentFailures")
@@ -161,6 +181,13 @@ def main():
     if args.status == "failure":
         md.append(f"**❗ {verb} failed** for `{args.environment}`. "
                   "Here is what needs to be fixed before this can be merged:\n")
+        if args.mode == "gated":
+            md.append(f"> Nothing was deployed to `{args.environment}`: the change is "
+                      "validated with its tests and coverage-gated before it is "
+                      "deployed, and it stopped there.\n")
+        elif args.mode == "quick":
+            md.append(f"> Nothing was deployed to `{args.environment}`: Salesforce "
+                      "refused the quick deploy of the validated job.\n")
         if comp_rows:
             md.append(f"#### 🧩 Code / metadata problems ({len(comp_rows)})\n")
             md.append("| Component | Type | Line | Problem |")
@@ -202,9 +229,23 @@ def main():
     elif args.status == "no_changes":
         md.append("_No deployable Salesforce changes were detected against "
                   "the baseline — nothing to validate._\n")
+    elif args.mode == "nothing-left":
+        md.append(f"✅ Nothing to deploy to `{args.environment}`: the change only "
+                  "deletes components the org no longer has.\n")
     else:  # success
         detail = "validated against" if check_only else "deployed to"
-        md.append(f"✅ Successfully {detail} `{args.environment}`.\n")
+        note = " (check-only; no Apex tests to run)" if args.mode == "dry-run" else ""
+        md.append(f"✅ Successfully {detail} `{args.environment}`{note}.\n")
+
+    if skipped:
+        md.append(f"#### ⏭️ Deletions skipped — not in `{args.environment}` ({len(skipped)})\n")
+        md.append("The org no longer has these components (already deleted, or never "
+                  "deployed there), so there was nothing to delete.\n")
+        md.append("| Type | Component |")
+        md.append("|---|---|")
+        for s in skipped:
+            md.append(f"| {esc(s.get('type'))} | {esc(s.get('member'))} |")
+        md.append("")
 
     md_text = "\n".join(md).rstrip() + "\n"
 
@@ -222,6 +263,10 @@ def main():
         "coverage_measured": cov_measured,
         "coverage_pass": (cov_measured and not cov_failed),
         "coverage_per_class": cov_per_class,
+        "has_apex": str(args.has_apex).lower() == "true",
+        "test_level": args.test_level,
+        "mode": args.mode,
+        "skipped_deletions": skipped,
         "message": top_message,
     }
 

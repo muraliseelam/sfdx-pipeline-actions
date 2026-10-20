@@ -4,8 +4,11 @@ description: >-
   branch after a release lands. Env branches diverge because PRs are squash-
   merged into them (new SHAs) while the release merges the original commits —
   same content, different history. Realigning keeps a clean base so the next
-  feature PR shows only its own diff. Env branches are protected, so this
-  snapshots protection, lifts it, force-pushes, and restores it byte-for-byte.
+  feature PR shows only its own diff. A branch that still carries changes the
+  baseline lacks (stories deployed there but not released yet) is never reset:
+  the baseline is merged into it instead, and on a conflict it is left as is.
+  Env branches are protected, so this snapshots protection, lifts it, pushes,
+  and restores it; the step fails if protection could not be restored.
 
 inputs:
   baseline_branch:
@@ -39,13 +42,22 @@ runs:
         PUSH_URL="https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
         # Turn a GET-protection payload into a PUT-compatible one for restore.
+        # MINIMAL=1 drops the newer settings, as a fallback if GitHub rejects them.
         read -r -d '' XFORM <<'PY' || true
-        import sys, json
+        import os, sys, json
         d = json.load(sys.stdin)
+        full = os.environ.get("MINIMAL") != "1"
+        names = lambda r: {"users": [u["login"] for u in r.get("users", [])],
+                           "teams": [t["slug"] for t in r.get("teams", [])],
+                           "apps":  [a["slug"] for a in r.get("apps", [])]}
         rsc = d.get("required_status_checks")
         out = {
+          # `checks` keeps each context's app pin (only the GitHub Actions app may
+          # satisfy deploy-<env>); a context with no pin stays unpinned.
           "required_status_checks": ({"strict": rsc.get("strict", False),
-                                      "contexts": rsc.get("contexts", [])} if rsc else None),
+                                      "checks": [dict({"context": c["context"]}, **({"app_id": c["app_id"]} if c.get("app_id") is not None else {}))
+                                                 for c in (rsc.get("checks") or [{"context": x} for x in rsc.get("contexts", [])])]}
+                                     if rsc else None),
           "enforce_admins": bool((d.get("enforce_admins") or {}).get("enabled")),
           "required_pull_request_reviews": None,
           "restrictions": None,
@@ -57,46 +69,91 @@ runs:
               "require_code_owner_reviews": pr.get("require_code_owner_reviews", False),
               "required_approving_review_count": pr.get("required_approving_review_count", 0),
             }
+            if full:
+                out["required_pull_request_reviews"]["require_last_push_approval"] = pr.get("require_last_push_approval", False)
+                for k in ("dismissal_restrictions", "bypass_pull_request_allowances"):
+                    if pr.get(k):
+                        out["required_pull_request_reviews"][k] = names(pr[k])
         r = d.get("restrictions")
         if r:
-            out["restrictions"] = {
-              "users": [u["login"] for u in r.get("users", [])],
-              "teams": [t["slug"] for t in r.get("teams", [])],
-              "apps":  [a["slug"] for a in r.get("apps", [])],
-            }
-        for k in ("allow_force_pushes","allow_deletions","required_linear_history",
-                  "required_conversation_resolution","block_creations"):
+            out["restrictions"] = names(r)
+        keys = ["allow_force_pushes","allow_deletions","required_linear_history",
+                "required_conversation_resolution","block_creations"]
+        if full:
+            keys += ["lock_branch", "allow_fork_syncing"]
+        for k in keys:
             v = d.get(k)
             if isinstance(v, dict):
                 out[k] = bool(v.get("enabled"))
         json.dump(out, sys.stdout)
         PY
 
+        RESTORE_FAILED=""
         for b in $(echo "$ENV_BRANCHES" | python3 -c "import sys,json;print(' '.join(json.load(sys.stdin)))"); do
           [ "$b" = "$BASELINE" ] && continue
           echo "::group::Syncing $b -> ${TIP:0:8}"
+          # Reset only when that loses nothing: if $b holds changes the baseline
+          # lacks (deployed there, not released yet), merge the baseline in instead.
+          CUR="$(git rev-parse -q --verify "origin/$b" || true)"
+          LEASE="--force-with-lease=refs/heads/$b:$CUR"
+          if [ -z "$CUR" ]; then
+            NEW="$TIP"
+          elif MT="$(git merge-tree --write-tree "$CUR" "$TIP" 2>/dev/null)"; then
+            if [ "${MT%%$'\n'*}" = "$(git rev-parse "$TIP^{tree}")" ]; then
+              NEW="$TIP"
+            else
+              NEW="$(GIT_AUTHOR_NAME=sf-release-bot GIT_AUTHOR_EMAIL=sf-release-bot@users.noreply.github.com \
+                     GIT_COMMITTER_NAME=sf-release-bot GIT_COMMITTER_EMAIL=sf-release-bot@users.noreply.github.com \
+                     git commit-tree "${MT%%$'\n'*}" -p "$CUR" -p "$TIP" -m "Sync $BASELINE into $b after release")"
+              echo "$b carries changes not in $BASELINE yet — merging $BASELINE into it instead of resetting."
+            fi
+          else
+            echo "::warning::$b has changes not in $BASELINE that conflict with it — left as is, nothing discarded. Resolve with Sync Env Branches."
+            echo "::endgroup::"; continue
+          fi
+          if [ "$NEW" = "$CUR" ]; then
+            echo "$b is already at ${TIP:0:8}."; echo "::endgroup::"; continue
+          fi
+
           # Branch names may contain '/' (e.g. env/qa); keep the temp files flat.
           SAFE="${b//\//__}"
-          RAW="/tmp/prot-raw-$SAFE.json"; SNAP="/tmp/prot-$SAFE.json"; HAD_PROT=""
+          RAW="/tmp/prot-raw-$SAFE.json"; SNAP="/tmp/prot-$SAFE.json"; SNAP_MIN="/tmp/prot-min-$SAFE.json"; HAD_PROT=""; SIGNED=""
           if GH_TOKEN="$PUSH_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/branches/$b/protection" >"$RAW" 2>/dev/null; then
             HAD_PROT="yes"
             python3 -c "$XFORM" <"$RAW" >"$SNAP"
+            MINIMAL=1 python3 -c "$XFORM" <"$RAW" >"$SNAP_MIN"
+            SIGNED="$(python3 -c "import sys,json;print('yes' if (json.load(sys.stdin).get('required_signatures') or {}).get('enabled') else '')" <"$RAW")"
             GH_TOKEN="$PUSH_TOKEN" gh api -X DELETE "repos/${GITHUB_REPOSITORY}/branches/$b/protection" >/dev/null 2>&1 \
               && echo "protection lifted on $b"
           fi
           restore() {
-            if [ -n "$HAD_PROT" ] && [ -s "$SNAP" ]; then
-              GH_TOKEN="$PUSH_TOKEN" gh api -X PUT "repos/${GITHUB_REPOSITORY}/branches/$b/protection" --input "$SNAP" >/dev/null 2>&1 \
-                && echo "protection restored on $b" \
-                || echo "::error::Failed to restore protection on $b — restore manually from $SNAP"
+            if [ -z "$HAD_PROT" ] || [ ! -s "$SNAP" ]; then return 0; fi
+            if GH_TOKEN="$PUSH_TOKEN" gh api -X PUT "repos/${GITHUB_REPOSITORY}/branches/$b/protection" --input "$SNAP" >/dev/null 2>&1; then
+              echo "protection restored on $b"
+            elif GH_TOKEN="$PUSH_TOKEN" gh api -X PUT "repos/${GITHUB_REPOSITORY}/branches/$b/protection" --input "$SNAP_MIN" >/dev/null 2>&1; then
+              echo "::warning::Protection on $b restored without last-push approval, dismissal/bypass lists, lock and fork syncing — re-check them in Settings."
+            else
+              echo "::error::Failed to restore protection on $b — it is UNPROTECTED. Restore it from the snapshot below."
+              cat "$RAW"; echo
+              RESTORE_FAILED="$RESTORE_FAILED $b"
+              return 0
+            fi
+            if [ -n "$SIGNED" ] && ! GH_TOKEN="$PUSH_TOKEN" gh api -X POST "repos/${GITHUB_REPOSITORY}/branches/$b/protection/required_signatures" >/dev/null 2>&1; then
+              echo "::error::Could not re-enable required signed commits on $b."
+              RESTORE_FAILED="$RESTORE_FAILED $b"
             fi
           }
           trap restore EXIT
-          if git push "$PUSH_URL" "$TIP:refs/heads/$b" --force; then
-            echo "synced $b -> ${TIP:0:8}"
+          # The lease refuses the push if $b moved since it was checked above.
+          if git push "$PUSH_URL" "$NEW:refs/heads/$b" "$LEASE"; then
+            echo "synced $b -> ${NEW:0:8}"
           else
             echo "::warning::Could not realign $b — sync it manually."
           fi
           restore; trap - EXIT
           echo "::endgroup::"
         done
+        if [ -n "$RESTORE_FAILED" ]; then
+          echo "::error::Branch protection was not fully restored on:$RESTORE_FAILED. The release itself is done; fix the protection now."
+          exit 1
+        fi

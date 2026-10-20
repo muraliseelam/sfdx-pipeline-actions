@@ -1,11 +1,16 @@
 name: "SF Pipeline Release Gather"
 description: >-
-  Resolve the set of story branches for a weekly release from the pipeline's own
+  Resolve the set of stories for a weekly release from the pipeline's own
   deployment state — NO Jira required. Gathers every MERGED pull request that has
   been promoted all the way to the LAST environment in the promotion chain (label
   `deployed:<last env>`) and is targeting the
-  production baseline branch, then emits the space-separated list of their head
-  branches. A PR can opt OUT of the release by adding the `hold` label. Merged or
+  production baseline branch. The label is only the index: a story is gathered
+  only when its commit carries a `deploy-<env>` = success commit status for EVERY
+  stage, written by the pipeline's own token (anyone with triage can add a label,
+  and anyone with write can post a status under their own name). Emits the story
+  branches AND the exact commit that was deployed, so the release ships what the
+  stages run — never commits pushed to the branch afterwards. A PR can opt OUT of
+  the release by adding the `hold` label. Merged or
   closed PRs drop out naturally. Fails fast with a readable message when nothing
   qualifies.
 
@@ -27,16 +32,37 @@ inputs:
     default: ""
   baseline:
     description: >-
-      The production baseline branch. A story whose tip is already in it shipped in an
-      earlier release and is skipped. Empty = only skip stories whose branch was deleted.
+      The production baseline branch. A story whose deployed commit is already in it
+      shipped in an earlier release and is skipped. Empty = only skip stories whose
+      branch was deleted.
     required: false
     default: ""
+  stories:
+    description: >-
+      Optional explicit story branches (space/comma-separated). Restricts the release
+      to these branches, whatever their labels; each must still be proven deployed to
+      every stage, and a named story that isn't fails the run. Empty = every ready story.
+    required: false
+    default: ""
+  require_statuses:
+    description: >-
+      Comma-separated commit-status contexts that prove a real deploy, one per stage
+      (e.g. `deploy-int,deploy-qa,deploy-stage`). Every one must be `success` on the
+      story's commit. Empty = only `deploy-<label without the "deployed:" prefix>`.
+    required: false
+    default: ""
+  status_creator:
+    description: >-
+      Login whose commit statuses are trusted. The pipeline writes `deploy-<env>` with
+      the workflow token, so its statuses are created by `github-actions[bot]`.
+    required: false
+    default: "github-actions[bot]"
   repo:
     description: "owner/repo to query. Defaults to the current repository."
     required: false
     default: ""
   github_token:
-    description: "Token used to query PRs."
+    description: "Token used to query PRs and commit statuses (needs `statuses: read`)."
     required: false
     default: ""
 
@@ -47,6 +73,11 @@ outputs:
   keys:
     description: "Space-separated PR numbers gathered for the release."
     value: ${{ steps.gather.outputs.keys }}
+  shas:
+    description: >-
+      Space-separated deployed commit of each story, aligned with `stories`. Merge
+      these, not the branches: a branch can move after its promotions.
+    value: ${{ steps.gather.outputs.shas }}
 
 runs:
   using: composite
@@ -59,14 +90,24 @@ runs:
         EXCLUDE_LABEL: ${{ inputs.exclude_label }}
         BASE: ${{ inputs.base }}
         BASELINE: ${{ inputs.baseline }}
+        ONLY: ${{ inputs.stories }}
+        REQUIRE: ${{ inputs.require_statuses }}
+        STATUS_CREATOR: ${{ inputs.status_creator }}
         REPO: ${{ inputs.repo }}
       run: |
         set -euo pipefail
         [ -n "$REPO" ] || REPO="$GITHUB_REPOSITORY"
         [ -n "${GH_TOKEN:-}" ] || GH_TOKEN="${GITHUB_TOKEN:-}"
         export GH_TOKEN
+        [ -n "$REQUIRE" ] || REQUIRE="deploy-${LABEL#deployed:}"
+        ONLY="$(echo "${ONLY//,/ }" | xargs || true)"
 
-        echo "::group::Gathering release stories (merged PRs labeled '$LABEL', base='${BASE:-any}', excluding '$EXCLUDE_LABEL')"
+        if [ -n "$ONLY" ]; then
+          echo "::group::Gathering the named release stories ($ONLY), excluding '$EXCLUDE_LABEL'"
+        else
+          echo "::group::Gathering release stories (merged PRs labeled '$LABEL', base='${BASE:-any}', excluding '$EXCLUDE_LABEL')"
+        fi
+        echo "Proof of deploy: ${REQUIRE//,/, } = success, created by $STATUS_CREATOR"
 
         BASE_ARGS=()
         [ -n "$BASE" ] && BASE_ARGS=(--base "$BASE")
@@ -76,22 +117,34 @@ runs:
         # so the release set is the collection of MERGED PRs carrying $LABEL.
         # The control PR people work on and the env PRs the pipeline opens share
         # one head branch, so a hold on ANY of them holds the story, and each story
-        # is listed once, under its lowest PR number.
+        # is listed once, under its lowest PR number. An explicit list looks up the
+        # named branches instead: the commit statuses below decide, not the label.
         HELD="$(gh pr list --repo "$REPO" --state all --label "$EXCLUDE_LABEL" \
                   --json headRefName --limit 200 --jq '[.[].headRefName] | unique | join(" ")')"
-        ALL="$(gh pr list --repo "$REPO" --state merged --label "$LABEL" "${BASE_ARGS[@]}" \
-                 --json number,headRefName --limit 200)"
+        if [ -n "$ONLY" ]; then
+          ALL="[]"
+          for s in $ONLY; do
+            ONE="$(gh pr list --repo "$REPO" --state merged --head "$s" "${BASE_ARGS[@]}" \
+                     --json number,headRefName,headRefOid --limit 100)"
+            ALL="$(A="$ALL" B="$ONE" python3 -c 'import json,os; print(json.dumps(json.loads(os.environ["A"]) + json.loads(os.environ["B"])))')"
+          done
+        else
+          ALL="$(gh pr list --repo "$REPO" --state merged --label "$LABEL" "${BASE_ARGS[@]}" \
+                   --json number,headRefName,headRefOid --limit 200)"
+        fi
+        # Every PR of a story is a candidate commit (its head when it merged),
+        # newest PR first: the control PR's head is what the pipeline deployed.
         RAW="$(ALL="$ALL" HELD="$HELD" python3 -c '
         import json, os, sys
         held = set(os.environ["HELD"].split())
-        seen, out = set(), []
+        groups = {}
         for p in sorted(json.loads(os.environ["ALL"]), key=lambda p: p["number"]):
             if p["headRefName"] in held:
                 print("  hold #%s -> %s" % (p["number"], p["headRefName"]), file=sys.stderr)
-            elif p["headRefName"] not in seen:
-                seen.add(p["headRefName"])
-                out.append(p)
-        print(json.dumps(out))
+                continue
+            g = groups.setdefault(p["headRefName"], {"number": p["number"], "headRefName": p["headRefName"], "cands": []})
+            g["cands"] = ["%s:%s" % (p["number"], p["headRefOid"])] + [c for c in g["cands"] if not c.endswith(":" + p["headRefOid"])]
+        print(json.dumps(list(groups.values())))
         ')"
 
         STORIES="$(echo "$RAW" | python3 -c 'import sys,json;print(" ".join(p["headRefName"] for p in json.load(sys.stdin)))')"
@@ -101,8 +154,24 @@ runs:
         echo "$RAW" | python3 -c 'import sys,json; [print("  ok #%s -> %s" % (p["number"], p["headRefName"])) for p in json.load(sys.stdin)]'
         echo "::endgroup::"
 
+        # A named story with no merged PR (or on hold) is a mistake worth stopping for.
+        PROBLEMS=""
+        for s in $ONLY; do
+          case " $STORIES " in
+            *" $s "*) ;;
+            *) case " $HELD " in
+                 *" $s "*) PROBLEMS="$PROBLEMS"$'\n'"  - $s: on '$EXCLUDE_LABEL'" ;;
+                 *)        PROBLEMS="$PROBLEMS"$'\n'"  - $s: no merged PR from this branch" ;;
+               esac ;;
+          esac
+        done
+
         if [ -z "$STORIES" ]; then
-          echo "::error::No merged PRs are labeled '$LABEL'${BASE:+ (base $BASE)}. Promote at least one branch through the full chain (the final promotion PR gets '$LABEL' and merges automatically), or remove a '$EXCLUDE_LABEL' hold, then re-run."
+          if [ -n "$ONLY" ]; then
+            echo "::error::None of the named stories can be released:${PROBLEMS}"
+          else
+            echo "::error::No merged PRs are labeled '$LABEL'${BASE:+ (base $BASE)}. Promote at least one branch through the full chain (the final promotion PR gets '$LABEL' and merges automatically), or remove a '$EXCLUDE_LABEL' hold, then re-run."
+          fi
           exit 1
         fi
 
@@ -113,28 +182,90 @@ runs:
         # re-appearing here and aborts once its branch is deleted.) Skip the missing
         # ones with a notice and rebuild the aligned STORIES/KEYS from the
         # survivors; only fail if nothing live remains.
+        #
+        # For a live story, release the newest candidate commit that is not in
+        # the baseline yet and that the pipeline really deployed to every stage:
+        # each `deploy-<env>` status must be `success` and created by
+        # $STATUS_CREATOR. A label, or a status somebody posted by hand, is not
+        # proof — that is how a story deployed to int only reached a release.
         git fetch origin --prune --quiet || true
-        LIVE=""
         [ -n "$BASELINE" ] && git fetch origin "+refs/heads/$BASELINE:refs/remotes/origin/$BASELINE" --quiet || true
-        for s in $STORIES; do
+        OUT=""
+        while IFS=$'\t' read -r s key cands; do
           if ! git ls-remote --exit-code --heads origin "$s" >/dev/null 2>&1; then
             echo "::notice::Skipping '$s' — its branch no longer exists on origin (already released / cleaned up)."
-          elif [ -n "$BASELINE" ] && git fetch origin "+refs/heads/$s:refs/remotes/origin/$s" --quiet \
-               && git merge-base --is-ancestor "origin/$s" "origin/$BASELINE" 2>/dev/null; then
-            echo "::notice::Skipping '$s' — it is already in '$BASELINE' (shipped in an earlier release)."
-          else
-            LIVE="$LIVE $s"
+            [ -n "$ONLY" ] && PROBLEMS="$PROBLEMS"$'\n'"  - $s: the branch no longer exists on origin"
+            continue
           fi
-        done
-        LIVE="$(echo "$LIVE" | xargs || true)"
-        RAW="$(echo "$RAW" | LIVE="$LIVE" python3 -c 'import os,sys,json; live=set(os.environ["LIVE"].split()); print(json.dumps([p for p in json.load(sys.stdin) if p["headRefName"] in live]))')"
-        STORIES="$(echo "$RAW" | python3 -c 'import sys,json;print(" ".join(p["headRefName"] for p in json.load(sys.stdin)))')"
-        KEYS="$(echo "$RAW"    | python3 -c 'import sys,json;print(" ".join(str(p["number"]) for p in json.load(sys.stdin)))')"
+          git fetch origin "+refs/heads/$s:refs/remotes/origin/$s" --quiet || true
+          PICK=""; PICK_PR=""; SHIPPED=""; UNPROVEN=""
+          for c in $cands; do
+            n="${c%%:*}"; sha="${c#*:}"
+            git cat-file -e "${sha}^{commit}" 2>/dev/null || git fetch --quiet origin "$sha" 2>/dev/null || true
+            if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              UNPROVEN="$UNPROVEN"$'\n'"    #$n @ ${sha:0:8}: commit not found on origin"
+              continue
+            fi
+            # Shipped: older candidates are superseded work (e.g. before a rebase).
+            if [ -n "$BASELINE" ] && git merge-base --is-ancestor "$sha" "origin/$BASELINE" 2>/dev/null; then
+              SHIPPED="#$n @ ${sha:0:8}"
+              break
+            fi
+            # Newest first, so the first line per context is its current status.
+            if ! ST="$(gh api "repos/$REPO/commits/$sha/statuses?per_page=100" --paginate \
+                         --jq '.[] | [.context, (.creator.login // ""), .state] | @tsv')"; then
+              echo "::error::Could not read the commit statuses of ${sha:0:8} (the job needs 'statuses: read')."
+              exit 1
+            fi
+            MISS=""
+            for ctx in ${REQUIRE//,/ }; do
+              mine="$(awk -F'\t' -v c="$ctx" -v u="$STATUS_CREATOR" '$1==c && $2==u {print $3; exit}' <<< "$ST")"
+              [ "$mine" = "success" ] && continue
+              other="$(awk -F'\t' -v c="$ctx" -v u="$STATUS_CREATOR" '$1==c && $2!=u {print $2; exit}' <<< "$ST")"
+              MISS="${MISS:+$MISS, }$ctx=${mine:-missing}${other:+ (the one set by @$other is not trusted)}"
+            done
+            if [ -z "$MISS" ]; then PICK="$sha"; PICK_PR="$n"; break; fi
+            UNPROVEN="$UNPROVEN"$'\n'"    #$n @ ${sha:0:8}: $MISS"
+          done
+
+          if [ -n "$UNPROVEN" ] && [ -z "$ONLY" ]; then
+            echo "::warning::'$s' carries '$LABEL' on a commit the pipeline never deployed to every stage — a label is not proof, that commit is NOT released:${UNPROVEN}"
+          elif [ -n "$UNPROVEN" ] && [ -n "$PICK" ]; then
+            echo "::notice::'$s': newer commits not deployed to every stage are left out:${UNPROVEN}"
+          fi
+          if [ -z "$PICK" ]; then
+            if [ -n "$UNPROVEN" ]; then
+              [ -n "$ONLY" ] && PROBLEMS="$PROBLEMS"$'\n'"  - $s: not deployed to every stage by the pipeline:${UNPROVEN}"
+            elif [ -n "$SHIPPED" ]; then
+              echo "::notice::Skipping '$s' — its deployed commit ($SHIPPED) is already in '$BASELINE' (shipped in an earlier release)."
+            fi
+            continue
+          fi
+
+          # Release the deployed commit, never the branch tip.
+          TIP="$(git rev-parse -q --verify "origin/$s" || true)"
+          if [ -n "$TIP" ] && [ "$TIP" != "$PICK" ]; then
+            if git merge-base --is-ancestor "$PICK" "$TIP"; then
+              echo "::warning::'$s' has $(git rev-list --count "$PICK..$TIP") commit(s) after ${PICK:0:8}, the commit the pipeline deployed. They never went through the stages and are NOT in this release."
+            else
+              echo "::warning::'$s' was rewritten after ${PICK:0:8} was deployed — releasing ${PICK:0:8}, not the branch tip ${TIP:0:8}."
+            fi
+          fi
+          echo "  ✓ $s @ ${PICK:0:8} (#$PICK_PR)"
+          OUT="$OUT$s $key $PICK"$'\n'
+        done < <(echo "$RAW" | python3 -c 'import sys,json; [print("%s\t%s\t%s" % (p["headRefName"], p["number"], " ".join(p["cands"]))) for p in json.load(sys.stdin)]')
+
+        if [ -n "$PROBLEMS" ]; then
+          echo "::error::Some named stories can't be released — each must be proven deployed to every stage (${REQUIRE//,/, }):${PROBLEMS}"
+          exit 1
+        fi
+        STORIES="$(awk 'NF {print $1}' <<< "$OUT" | xargs || true)"
+        KEYS="$(awk 'NF {print $2}' <<< "$OUT" | xargs || true)"
+        SHAS="$(awk 'NF {print $3}' <<< "$OUT" | xargs || true)"
         if [ -z "$STORIES" ]; then
-          echo "::error::No live release branches remain after skipping already-shipped ones. Promote at least one branch to stage (its stage PR gets '$LABEL' and merges automatically), then re-run."
+          echo "::error::No live release branches remain after skipping already-shipped ones and ones not proven deployed to every stage (${REQUIRE//,/, }). Promote at least one branch to the last stage (its PR gets '$LABEL' and merges automatically), then re-run."
           exit 1
         fi
 
-        echo "stories=$STORIES" >> "$GITHUB_OUTPUT"
-        echo "keys=$KEYS" >> "$GITHUB_OUTPUT"
+        { echo "stories=$STORIES"; echo "keys=$KEYS"; echo "shas=$SHAS"; } >> "$GITHUB_OUTPUT"
         echo "Resolved release stories: $STORIES"

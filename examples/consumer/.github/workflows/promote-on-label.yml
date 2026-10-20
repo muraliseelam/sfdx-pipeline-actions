@@ -3,10 +3,11 @@ name: Promote on label
 # Thin caller — label-driven promotion, orchestrated FROM the entry-environment
 # PR (the control surface).
 #
-# After a change is deployed to the entry environment, a developer adds a
-# `deploy:<env>` label to that same PR for each later hop. This hands off to the
-# central orchestrator, which auto-creates the feature→<env> PR, deploys the
-# delta to that org, and merges it ONLY after a clean deploy — stamping
+# After a change is deployed to the entry environment and its PR merged, a
+# developer adds a `deploy:<env>` label to that same PR for each later hop.
+# This hands off to the central orchestrator, which auto-creates the
+# feature→<env> PR, deploys the delta to that org, and merges it ONLY after a
+# clean deploy — stamping
 # `deployed:<env>` back on the control PR. Merge conflicts and deploy failures
 # are surfaced right here on the control PR with a link to the env PR, and the
 # `deploy:<env>` label is removed so it can be re-added once resolved.
@@ -16,7 +17,8 @@ name: Promote on label
 # A label naming an unconfigured environment fails fast in the central workflow
 # with the list of valid names.
 #
-# Labeling a merged or closed PR still fires `pull_request: labeled`.
+# Labeling a merged or closed PR still fires `pull_request: labeled`; the
+# central workflow promotes only from a MERGED control PR.
 on:
   pull_request:
     types: [labeled]

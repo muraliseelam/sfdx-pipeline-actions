@@ -1,8 +1,10 @@
 name: Sync Env Branches
 
-# After a production go-live, merge the production branch into each promotion-chain
-# environment branch so their delta-vs-prod sheds the just-shipped stories. Merges
-# cleanly when possible, otherwise opens a PR for manual conflict resolution.
+# Merge the production branch into each promotion-chain environment branch so
+# their delta-vs-prod sheds the shipped stories. Merges cleanly when possible,
+# otherwise opens a PR (cut from the production branch) for manual conflict
+# resolution. Run it by hand; Prod Release realigns the branches itself with
+# the sync-branches action after go-live.
 #
 # Fully config-driven: the environment branch list and the production branch are
 # read from sf-pipeline/pipeline.config.yml — nothing here is hardcoded.
@@ -84,7 +86,9 @@ jobs:
             echo "::warning::Merge conflict syncing $PROD_BRANCH into $BR — opening a PR."
             git merge --abort
             SYNC_BR="sync/${PROD_BRANCH}-into-${BR}-${{ github.run_id }}"
-            git checkout -B "$SYNC_BR" "origin/$BR"
+            # The PR carries $PROD_BRANCH's commits, so GitHub shows the conflicts
+            # to resolve. (Cut from $BR it would have no commits and never open.)
+            git checkout -B "$SYNC_BR" "origin/$PROD_BRANCH"
             git push origin "HEAD:$SYNC_BR" || true
             gh pr create --base "$BR" --head "$SYNC_BR" \
               --title "Sync $PROD_BRANCH into $BR" \

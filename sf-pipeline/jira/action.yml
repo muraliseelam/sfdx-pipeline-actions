@@ -45,15 +45,22 @@ runs:
         JIRA_BASE_URL: ${{ inputs.jira_base_url }}
         JIRA_EMAIL: ${{ inputs.jira_email }}
         JIRA_API_TOKEN: ${{ inputs.jira_api_token }}
+        # Through env, never interpolated into the script: ref is a branch name
+        # and a branch name can contain shell syntax.
+        STORY_KEY: ${{ inputs.story_key }}
+        REF: ${{ inputs.ref }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        STATUS: ${{ inputs.status }}
+        RUN_URL: ${{ inputs.run_url }}
       run: |
         set -euo pipefail
         SCRIPT="$GITHUB_ACTION_PATH/../scripts/jira.py"
-        KEY="${{ inputs.story_key }}"
+        KEY="$STORY_KEY"
         if [ -z "$KEY" ]; then
-          KEY="$(python3 "$SCRIPT" extract-key "${{ inputs.ref }}")"
+          KEY="$(python3 "$SCRIPT" extract-key "$REF")"
         fi
         if [ -z "$KEY" ]; then
-          echo "[jira] no issue key from story_key or ref '${{ inputs.ref }}' — skipping."
+          echo "[jira] no issue key from story_key or ref '$REF' — skipping."
           exit 0
         fi
-        python3 "$SCRIPT" deploy "$KEY" "${{ inputs.environment }}" "${{ inputs.status }}" "${{ inputs.run_url }}"
+        python3 "$SCRIPT" deploy "$KEY" "$ENVIRONMENT" "$STATUS" "$RUN_URL"

@@ -43,6 +43,8 @@ def render_table(rows, action):
         return f"_No components to {action}._\n"
     out = [f"| # | Type | Component |", "|---|------|-----------|"]
     for i, (t, m) in enumerate(rows, start=1):
+        # A '|' in a member name would split the table cell.
+        m = m.replace("|", "\\|")
         out.append(f"| {i} | `{t}` | {m} |")
     return "\n".join(out) + "\n"
 

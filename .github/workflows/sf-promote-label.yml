@@ -4,15 +4,18 @@ name: Promote on label (deploy:<env>)
 # control surface).
 #
 # When a `deploy:<env>` label is added to a PR, this:
-#   prepare  → ensure a feature→<env> PR exists; if it CONFLICTS with the env
-#              branch, comment the error + link back on the CONTROL PR and
-#              stop (nothing deploys, no branch moves).
-#   deploy   → ordering guard (predecessor deployed for THIS commit) → real
-#              deploy of the delta to the <env> org.
-#   merge    → squash-merge the <env> PR ONLY after the deploy succeeds, then
-#              stamp `deployed:<env>` on both the <env> PR and the control PR and
-#              clear the `deploy:<env>` trigger label.
-#   report   → on any failure, surface a ❌ note + run link on the control PR.
+#   prepare  → refuse unless the control PR is MERGED and every earlier stage
+#              deployed (deploy-<env>) AND merged (deployed:<env>) its commit;
+#              then ensure a feature→<env> PR exists whose head is EXACTLY that
+#              commit and that merges cleanly. Any refusal is explained on the
+#              CONTROL PR (nothing deploys, no branch moves, no stray PR).
+#   deploy   → ordering guard (every earlier stage deployed THIS commit) → real
+#              deploy of the same package (main vs the commit) to the <env> org.
+#   merge    → squash-merge the <env> PR ONLY after the deploy succeeds and ONLY
+#              at the deployed commit, then stamp `deployed:<env>` on both the
+#              <env> PR and the control PR and clear the `deploy:<env>` label.
+#   report   → on any failure, explain WHY on the control PR, remove the label so
+#              it can be re-added, and close the env PR if this run opened it.
 #
 # Deploys driven by a PR into an environment branch are unchanged (handled by
 # deploy.yml). This only drives label-based promotion from the control PR.
@@ -86,6 +89,9 @@ jobs:
         id: envn
         shell: bash
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          CONTROL_PR: ${{ inputs.control_pr }}
           TARGET: ${{ inputs.target_env }}
           LABEL: ${{ inputs.label_name }}
         run: |
@@ -94,19 +100,28 @@ jobs:
           # label by stripping the `deploy:` prefix. Deriving it means a consumer
           # caller never has to name its environments.
           N="${TARGET:-}"
-          if [ -z "$N" ] && [ -n "${LABEL:-}" ]; then N="${LABEL#deploy:}"; fi
+          if [ -z "$N" ] && [ -n "${LABEL:-}" ]; then
+            N="${LABEL#deploy:}"
+            # Exactly `deploy:<env>`: `deploy: qa` would dodge the per-label concurrency group.
+            case "$N" in *[[:space:]]*) echo "::error::'$LABEL' is not a 'deploy:<env>' label (no spaces)."; exit 1 ;; esac
+          fi
           if [ -z "$N" ]; then
             echo "::error::Pass either target_env or label_name (a 'deploy:<env>' label)."
             exit 1
           fi
           echo "name=$N" >> "$GITHUB_OUTPUT"
           echo "Promotion target environment: $N"
+          # Gates and environments come from the control PR's base branch (the
+          # entry branch), never from the PR's own copy of the config.
+          BASE=$(gh pr view "$CONTROL_PR" --repo "$REPO" --json baseRefName -q .baseRefName)
+          [ -n "$BASE" ] || { echo "::error::Could not read the base branch of control PR #$CONTROL_PR."; exit 1; }
+          echo "config_ref=$BASE" >> "$GITHUB_OUTPUT"
       - id: cfg
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
-        with: { mode: outputs }
+        with: { mode: outputs, config_ref: "${{ steps.envn.outputs.config_ref }}" }
       - id: pd
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
-        with: { mode: prdeploy, arg: "${{ steps.envn.outputs.name }}" }
+        with: { mode: prdeploy, arg: "${{ steps.envn.outputs.name }}", config_ref: "${{ steps.envn.outputs.config_ref }}" }
       # Same delta as the entry deploy: delta_baseline=prod (default) diffs the
       # feature against the production baseline, so every stage gets the same
       # package; delta_baseline=target diffs against this stage's own branch.
@@ -125,9 +140,11 @@ jobs:
     needs: plan
     runs-on: ubuntu-latest
     outputs:
-      env_pr:     ${{ steps.ensure.outputs.env_pr }}
-      env_pr_url: ${{ steps.ensure.outputs.env_pr_url }}
-      skip:       ${{ steps.ensure.outputs.skip }}
+      env_pr:         ${{ steps.ensure.outputs.env_pr }}
+      env_pr_url:     ${{ steps.ensure.outputs.env_pr_url }}
+      env_pr_created: ${{ steps.ensure.outputs.env_pr_created }}
+      skip:           ${{ steps.ensure.outputs.skip }}
+      reported:       ${{ steps.ensure.outputs.reported }}
     steps:
       - name: Ensure feature→${{ needs.plan.outputs.env_name }} PR + check mergeability
         id: ensure
@@ -140,17 +157,127 @@ jobs:
           ENVN: ${{ needs.plan.outputs.env_name }}
           ENVBR: ${{ needs.plan.outputs.env_branch }}
           HEAD: ${{ inputs.head_ref }}
+          SHA: ${{ inputs.head_sha }}
+          IS_ENTRY: ${{ needs.plan.outputs.is_entry }}
+          NEEDED_ENVS: ${{ needs.plan.outputs.require_envs || needs.plan.outputs.require_env }}
         run: |
           set -uo pipefail
 
-          # Already promoted? (control PR carries deployed:<env>) → no-op.
-          if gh pr view "$CONTROL_PR" --repo "$REPO" --json labels \
-               -q '.labels[].name' 2>/dev/null | grep -qx "deployed:$ENVN"; then
-            echo "Control PR #$CONTROL_PR already deployed:$ENVN — nothing to do."
+          # Every refusal below is explained on the CONTROL PR, removes the
+          # trigger label (so re-adding it retries) and marks the failure as
+          # reported so report_failure doesn't post a second, vaguer comment.
+          refuse() {  # $1 = markdown body file, $2 = log line
+            gh pr comment "$CONTROL_PR" --repo "$REPO" --body-file "$1" || true
+            gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true
+            echo "reported=true" >> "$GITHUB_OUTPUT"
+            echo "::error::$2"; exit 1
+          }
+          # Nothing to do: say so and clear the instruction label.
+          noop() {  # $1 = message
+            gh pr comment "$CONTROL_PR" --repo "$REPO" --body "ℹ️ **\`deploy:$ENVN\`: nothing to do** — $1" >/dev/null 2>&1 || true
+            gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true
             echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          }
+          deploy_state() {  # newest deploy-<env> status for $SHA written by the pipeline
+            # Only github-actions[bot] counts: anyone with write access can POST a status.
+            gh api --paginate "repos/$REPO/commits/$SHA/statuses?per_page=100" 2>/dev/null \
+              | jq -r --arg c "deploy-$1" '.[] | select(.context == $c and .creator.login == "github-actions[bot]") | .state' \
+              | head -n1 || true
+          }
+          # Close an env PR this run opened, so a refusal leaves no stray PR.
+          close_created() {
+            [ "${created:-}" = "true" ] || return 0
+            gh pr close "$pr" --repo "$REPO" --comment "Closed by the pipeline: the \`deploy:$ENVN\` promotion from #$CONTROL_PR did not start (see there). Re-adding the label opens a fresh PR." >/dev/null 2>&1 || true
+            closed_note=" The auto-created #$pr was closed."
+          }
+          closed_note=""
+          ENTRY="${NEEDED_ENVS%%,*}"; ENTRY="${ENTRY:-the entry stage}"
+
+          # The entry stage deploys on APPROVAL (deploy.yml). A label must never
+          # deploy and merge an unapproved entry PR.
+          if [ "$IS_ENTRY" = "true" ]; then
+            printf '%s\n' \
+              "❌ **\`deploy:$ENVN\` is not a promotion.** \`$ENVN\` is the entry stage: it deploys when its PR is approved, never by a label. Nothing was deployed and no branch moved." > /tmp/prfail.md
+            refuse /tmp/prfail.md "'$ENVN' is the entry stage — promotions start after it."
           fi
 
+          # One read: line 1 state, line 2 head SHA, then one label per line.
+          J=$(gh pr view "$CONTROL_PR" --repo "$REPO" --json state,headRefOid,labels \
+                -q '([.state, .headRefOid] + [.labels[].name]) | .[]' 2>/dev/null || echo "")
+          if [ -z "$J" ]; then echo "::error::Could not read control PR #$CONTROL_PR."; exit 1; fi
+          cstate=$(sed -n 1p <<< "$J"); chead=$(sed -n 2p <<< "$J")
+          LABELS=$(sed -n '3,$p' <<< "$J")
+          has_label() { printf '%s\n' "$LABELS" | grep -qxF "$1"; }
+
+          # Already promoted? Trust the pipeline's label only together with the
+          # real deploy's commit status — a hand-added label is not a deploy.
+          if has_label "deployed:$ENVN"; then
+            if [ "$(deploy_state "$ENVN")" = "success" ]; then
+              noop "\`${SHA:0:7}\` is already deployed to \`$ENVN\` and merged (\`deployed:$ENVN\`)."
+            fi
+            echo "::notice::#$CONTROL_PR carries deployed:$ENVN but ${SHA:0:8} has no deploy-$ENVN=success — label not trusted; promoting."
+          fi
+
+          # Promote only what the entry stage approved, deployed AND merged.
+          if [ "$cstate" != "MERGED" ]; then
+            case "$cstate" in
+              OPEN) what="still open — it has not been deployed and merged into \`$ENTRY\` yet" ;;
+              *)    what="closed without being merged" ;;
+            esac
+            printf '%s\n' \
+              "❌ **Promotion to \`$ENVN\` refused** — #$CONTROL_PR is $what." \
+              "" \
+              "A promotion starts from the PR **after** it has been approved, deployed and merged into \`$ENTRY\`, so \`$ENVN\` only ever receives the commit \`$ENTRY\` deployed. Nothing was deployed and no branch moved." > /tmp/prfail.md
+            refuse /tmp/prfail.md "Control PR #$CONTROL_PR is $cstate, not MERGED."
+          fi
+          if [ "$chead" != "$SHA" ]; then
+            printf '%s\n' \
+              "❌ **Promotion to \`$ENVN\` refused** — it was asked to promote \`${SHA:0:7}\`, but #$CONTROL_PR merged \`${chead:0:7}\`. Nothing was deployed and no branch moved." > /tmp/prfail.md
+            refuse /tmp/prfail.md "head_sha ${SHA:0:8} is not control PR #$CONTROL_PR's head ${chead:0:8}."
+          fi
+
+          # Every earlier stage must have DEPLOYED this commit (deploy-<env>,
+          # written only by a real deploy) and MERGED it (deployed:<env>, stamped
+          # only after the merge). Checked before opening the env PR, so a
+          # refused promotion leaves no stray PR. The deploy job's ordering
+          # guard re-checks the statuses right before the deploy.
+          missing=""
+          for e in ${NEEDED_ENVS//,/ }; do
+            st=$(deploy_state "$e")
+            if [ "$st" != "success" ]; then
+              missing="${missing:+$missing, }\`$e\` (\`deploy-$e\`=${st:-missing})"
+            elif ! has_label "deployed:$e"; then
+              missing="${missing:+$missing, }\`$e\` (deployed, but \`deployed:$e\` is not on #$CONTROL_PR — its promotion is still running or was not merged)"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            printf '%s\n' \
+              "❌ **Promotion to \`$ENVN\` refused** — \`${SHA:0:7}\` must be deployed **and** merged in every earlier stage first (\`${NEEDED_ENVS//,/, }\`)." \
+              "" \
+              "Not yet: $missing." \
+              "" \
+              "Nothing was deployed and no branch moved. Finish the earlier stage(s), then re-add \`deploy:$ENVN\`." > /tmp/prfail.md
+            refuse /tmp/prfail.md "'$ENVN' blocked — ${SHA:0:8} not deployed+merged in: $missing"
+          fi
+
+          # The env PR's head is the feature branch TIP, so the tip must be
+          # exactly the commit the earlier stages deployed: anything pushed since
+          # was never deployed, and merging it would put undeployed code on
+          # $ENVBR. Checked before an env PR is opened, so no stray PR is left.
+          moved_on() {  # $1 = the commit the branch / env PR is at now
+            printf '%s\n' \
+              "❌ **Promotion to \`$ENVN\` refused — \`$HEAD\` has moved on.**" \
+              "" \
+              "#$CONTROL_PR deployed \`${SHA:0:7}\` to the earlier stages, but \`$HEAD\` is now at \`${1:0:7}\`. Its \`$ENVBR\` PR would merge commit(s) that were never deployed anywhere. Nothing was deployed and no branch moved.$closed_note" \
+              "" \
+              "**To proceed:** take the new commit(s) through \`$ENTRY\` first — open a new PR from \`$HEAD\` into the \`$ENTRY\` branch and promote from that PR once it is deployed and merged — or, if they don't belong, reset \`$HEAD\` to \`${SHA:0:7}\` and re-add \`deploy:$ENVN\` here." > /tmp/prfail.md
+            refuse /tmp/prfail.md "$HEAD is at ${1:0:8}, not the deployed ${SHA:0:8}."
+          }
+          tip=$(gh api "repos/$REPO/git/ref/heads/$HEAD" --jq .object.sha 2>/dev/null || echo "")
+          if [ -n "$tip" ] && [ "$tip" != "$SHA" ]; then moved_on "$tip"; fi
+
           # Find an existing open feature→env PR, else create one.
+          created=""
           pr=$(gh pr list --repo "$REPO" --head "$HEAD" --base "$ENVBR" --state open \
                  --json number -q '.[0].number' 2>/dev/null || echo "")
           if [ -z "$pr" ]; then
@@ -168,7 +295,7 @@ jobs:
               # check while nothing moves. Fail loudly instead.
               if printf '%s' "$err" | grep -qi "No commits between"; then
                 echo "::notice::$HEAD is already in $ENVBR — nothing to promote."
-                echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+                noop "\`$HEAD\` is already in \`$ENVBR\`."
               fi
 
               printf '%s\n' \
@@ -183,16 +310,22 @@ jobs:
                 "A \`Bad credentials\` error here means the **\`PIPELINE_PAT\`** repository secret has expired or been revoked; it must be rotated before any \`deploy:<env>\` label will work." \
                 "" \
                 "**Nothing was deployed and no branch moved.** Re-add the \`deploy:$ENVN\` label once it is fixed." > /tmp/prfail.md
-              gh pr comment "$CONTROL_PR" --repo "$REPO" --body-file /tmp/prfail.md || true
-              gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true
-              echo "::error::Could not open feature→$ENVN PR: $err"
-              exit 1
+              refuse /tmp/prfail.md "Could not open feature→$ENVN PR: $err"
             fi
-            pr=$(basename "$url")
+            pr=$(basename "$url"); created="true"
           fi
           url=$(gh pr view "$pr" --repo "$REPO" --json url -q .url)
-          echo "env_pr=$pr" >> "$GITHUB_OUTPUT"
-          echo "env_pr_url=$url" >> "$GITHUB_OUTPUT"
+          {
+            echo "env_pr=$pr"
+            echo "env_pr_url=$url"
+            echo "env_pr_created=${created:-false}"
+          } >> "$GITHUB_OUTPUT"
+
+          # Re-check on the PR itself (the branch could move between the tip
+          # check above and the PR being opened).
+          ehead=$(gh pr view "$pr" --repo "$REPO" --json headRefOid -q .headRefOid 2>/dev/null || echo "")
+          if [ -z "$ehead" ]; then echo "::error::Could not read env PR #$pr."; exit 1; fi
+          [ "$ehead" = "$SHA" ] || { close_created; moved_on "$ehead"; }
 
           # Mergeability — GitHub computes this async.
           state=""
@@ -203,18 +336,25 @@ jobs:
           done
 
           if [ "$state" = "CONFLICTING" ]; then
+            # Resolving means a new commit on $HEAD, which must go through the
+            # entry stage first — so this env PR can never be used: close it.
+            close_created
             printf '%s\n' \
               "❌ **Promotion to \`$ENVN\` is blocked — merge conflicts.**" \
               "" \
-              "The auto-created PR **[#$pr]($url)** (\`$HEAD\` → \`$ENVBR\`) conflicts with the \`$ENVBR\` branch." \
+              "The PR **[#$pr]($url)** (\`$HEAD\` → \`$ENVBR\`) conflicts with the \`$ENVBR\` branch. Nothing was deployed and no branch moved.$closed_note" \
               "" \
-              "**To proceed:** resolve the conflicts on **[#$pr]($url)**, then re-add the \`deploy:$ENVN\` label here. Nothing was deployed and no branch moved." > /tmp/conflict-body.md
-            gh pr comment "$CONTROL_PR" --repo "$REPO" --body-file /tmp/conflict-body.md
-            gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true
-            echo "::error::feature→$ENVBR PR #$pr conflicts with $ENVBR — surfaced on control PR #$CONTROL_PR."
-            exit 1
+              "**To proceed:** a promotion merges only the commit \`$ENTRY\` deployed (\`${SHA:0:7}\`), so the conflict fix is a new commit: merge \`$ENVBR\` into \`$HEAD\`, take it through \`$ENTRY\` (a new PR into the \`$ENTRY\` branch) and promote from that PR." > /tmp/conflict-body.md
+            refuse /tmp/conflict-body.md "feature→$ENVBR PR #$pr conflicts with $ENVBR — surfaced on control PR #$CONTROL_PR."
           fi
-          echo "feature→$ENVN PR #$pr is mergeable (state='$state')."
+          # UNKNOWN is not a pass: a PR that can't merge would fail AFTER the deploy.
+          if [ "$state" != "MERGEABLE" ]; then
+            close_created
+            printf '%s\n' \
+              "❌ **Promotion to \`$ENVN\` did not start** — GitHub has not finished checking whether [#$pr]($url) can merge into \`$ENVBR\` (\`mergeable\`=\`${state:-unknown}\`). Nothing was deployed and no branch moved.$closed_note Re-add \`deploy:$ENVN\` in a minute." > /tmp/prfail.md
+            refuse /tmp/prfail.md "feature→$ENVBR PR #$pr mergeability is '${state:-unknown}'."
+          fi
+          echo "feature→$ENVN PR #$pr is at ${SHA:0:8} and mergeable."
 
   # ---- Real deploy of the delta to the <env> org ------------------------------
   deploy:
@@ -224,6 +364,9 @@ jobs:
     environment: ${{ needs.plan.outputs.gh_environment }}
     outputs:
       outcome: ${{ steps.deploy.outputs.outcome }}
+      reason:  ${{ steps.why.outputs.reason }}
+      note:    ${{ steps.why.outputs.note }}
+      errors:  ${{ steps.why.outputs.errors }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -231,6 +374,7 @@ jobs:
           fetch-depth: 0
 
       - name: Ordering guard — predecessor deployed for this commit
+        id: guard
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/guard@main
         with:
           pr_number: ${{ needs.prepare.outputs.env_pr }}
@@ -242,6 +386,35 @@ jobs:
           is_entry: ${{ needs.plan.outputs.is_entry }}
           bypass_active: "false"
           github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # prepare checked this moments ago; re-check right before the org is
+      # touched (the job may have waited on the GitHub Environment).
+      - name: Refuse if the env PR moved
+        id: fresh
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ENV_PR: ${{ needs.prepare.outputs.env_pr }}
+          SHA: ${{ inputs.head_sha }}
+          HEAD: ${{ inputs.head_ref }}
+        run: |
+          set -uo pipefail
+          info=$(gh pr view "$ENV_PR" --repo "$REPO" --json state,headRefOid \
+                   -q '.state + " " + .headRefOid' 2>/dev/null || echo "")
+          state="${info%% *}"; cur="${info#* }"
+          why=""
+          if [ -z "$info" ]; then
+            echo "::warning::Could not read #$ENV_PR — the merge is still pinned to ${SHA:0:8}."
+          elif [ "$state" != "OPEN" ]; then
+            why="#$ENV_PR is no longer open (\`$state\`)"
+          elif [ "$cur" != "$SHA" ]; then
+            why="\`$HEAD\` moved to \`${cur:0:7}\` after the promotion of \`${SHA:0:7}\` started; the newer commit(s) were never deployed"
+          fi
+          [ -z "$why" ] && { echo "#$ENV_PR is still at ${SHA:0:8}."; exit 0; }
+          echo "reason=$why" >> "$GITHUB_OUTPUT"
+          echo "::error::$why."
+          exit 1
 
       - id: deploy
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
@@ -288,16 +461,86 @@ jobs:
           environment: ${{ needs.plan.outputs.env_name }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Turn "the job failed" into the actual reason for the control PR. The
+      # guard comments on the env PR, which report_failure may close, so its
+      # finding is re-derived here; a Salesforce failure carries the readable
+      # errors the deploy action wrote to .deploy/.
+      - name: Record why the promotion stopped
+        id: why
+        if: ${{ failure() || cancelled() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.head_sha }}
+          ENVN: ${{ needs.plan.outputs.env_name }}
+          NEEDED_ENVS: ${{ needs.plan.outputs.require_envs || needs.plan.outputs.require_env }}
+          ENVBR: ${{ needs.plan.outputs.env_branch }}
+          JOB_STATUS: ${{ job.status }}
+          GUARD: ${{ steps.guard.outcome }}
+          FRESH: ${{ steps.fresh.outcome }}
+          FRESH_REASON: ${{ steps.fresh.outputs.reason }}
+          DEPLOY: ${{ steps.deploy.outcome }}
+        run: |
+          set -uo pipefail
+          note="Nothing was deployed and no branch moved."
+          errs=""
+          if [ "$GUARD" = "failure" ]; then
+            missing=""
+            for e in ${NEEDED_ENVS//,/ }; do
+              st=$(gh api --paginate "repos/$REPO/commits/$SHA/statuses?per_page=100" 2>/dev/null \
+                     | jq -r --arg c "deploy-$e" '.[] | select(.context == $c and .creator.login == "github-actions[bot]") | .state' \
+                     | head -n1 || true)
+              [ "$st" = "success" ] || missing="${missing:+$missing, }\`$e\` (\`deploy-$e\`=${st:-missing})"
+            done
+            if [ -n "$missing" ]; then
+              reason="the ordering guard blocked it: \`${SHA:0:7}\` is not deployed to every earlier stage — missing $missing."
+            else
+              reason="the pre-deploy guard blocked it: the env PR is not open, has moved past \`${SHA:0:7}\`, or does not merge cleanly into \`$ENVBR\`."
+            fi
+          elif [ "$FRESH" = "failure" ]; then
+            reason="${FRESH_REASON:-the env PR changed before the deploy}."
+          elif [ "$DEPLOY" = "failure" ]; then
+            reason="the \`$ENVN\` org deploy failed."
+            note="Nothing was merged."
+            if [ -f .deploy/report.json ] && jq -e '.coverage_measured == true and .coverage_pass != true' .deploy/report.json >/dev/null 2>&1; then
+              if jq -e '.mode == "gated"' .deploy/report.json >/dev/null 2>&1; then
+                # gated: validated with the tests first, so the gate stopped it before the org changed.
+                note="The coverage gate failed on the validation, so nothing was deployed or merged — the \`$ENVN\` org and \`$ENVBR\` still agree."
+              else
+                note="Salesforce accepted the deploy before the coverage gate failed, so the \`$ENVN\` org has the change but nothing was merged — the org and \`$ENVBR\` disagree until this is fixed."
+              fi
+            fi
+            [ -s .deploy/errors.md ] && errs="$(head -c 6000 .deploy/errors.md)"
+          elif [ "$JOB_STATUS" = "cancelled" ]; then
+            reason="the run was cancelled."
+            note="If it was cancelled during the Salesforce deploy, that deploy may still complete in the \`$ENVN\` org; nothing was merged."
+          else
+            reason="the deploy job failed before reaching Salesforce (checkout, setup or login) — see the run log."
+          fi
+          {
+            echo "reason=$reason"
+            echo "note=$note"
+            echo "errors<<SF_PIPELINE_ERRORS_EOF"
+            printf '%s\n' "$errs"
+            echo "SF_PIPELINE_ERRORS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
   # ---- Merge the <env> PR + stamp deployed:<env> on both PRs -------------------
   merge:
     needs: [plan, prepare, deploy]
     if: ${{ needs.deploy.result == 'success' }}
     runs-on: ubuntu-latest
+    outputs:
+      reason: ${{ steps.merge.outputs.reason }}
     steps:
-      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/merge-pr@main
+      # Pinned to the deployed SHA: the env PR merges exactly what was deployed.
+      - id: merge
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/merge-pr@main
         with:
           pr_number: ${{ needs.prepare.outputs.env_pr }}
           base_ref: ${{ needs.plan.outputs.env_branch }}
+          sha: ${{ inputs.head_sha }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Stamp deployed:<env> + notify control PR
@@ -309,6 +552,7 @@ jobs:
           ENV_PR: ${{ needs.prepare.outputs.env_pr }}
           ENV_PR_URL: ${{ needs.prepare.outputs.env_pr_url }}
           CONTROL_PR: ${{ inputs.control_pr }}
+          SHA: ${{ inputs.head_sha }}
         run: |
           set -uo pipefail
           gh label create "deployed:$ENVN" --repo "$REPO" --color 0e8a16 \
@@ -317,12 +561,15 @@ jobs:
             gh pr edit "$pr" --repo "$REPO" --add-label "deployed:$ENVN" >/dev/null 2>&1 || true
           done
           gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true
-          gh pr comment "$CONTROL_PR" --repo "$REPO" --body "✅ **Deployed to \`$ENVN\` and merged** — [#$ENV_PR]($ENV_PR_URL). Status: \`deployed:$ENVN\`."
+          gh pr comment "$CONTROL_PR" --repo "$REPO" --body "✅ **Deployed \`${SHA:0:7}\` to \`$ENVN\` and merged** — [#$ENV_PR]($ENV_PR_URL). Status: \`deployed:$ENVN\`."
 
-  # ---- On any failure past prepare, surface a ❌ on the control PR --------------
+  # ---- On any failure, explain WHY on the control PR ---------------------------
+  # prepare explains its own refusals (reported=true); everything else lands
+  # here: an unresolvable label (plan), an unexpected prepare error, a blocked
+  # or failed deploy, a refused merge, or a cancelled run.
   report_failure:
     needs: [plan, prepare, deploy, merge]
-    if: ${{ always() && needs.prepare.outputs.skip != 'true' && (needs.deploy.result == 'failure' || needs.merge.result == 'failure') }}
+    if: ${{ always() && needs.prepare.outputs.skip != 'true' && (needs.plan.result == 'failure' || (needs.prepare.result == 'failure' && needs.prepare.outputs.reported != 'true') || needs.deploy.result == 'failure' || needs.deploy.result == 'cancelled' || needs.merge.result == 'failure' || needs.merge.result == 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
       - name: Comment failure on control PR
@@ -331,11 +578,72 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           ENVN: ${{ needs.plan.outputs.env_name }}
+          ENVBR: ${{ needs.plan.outputs.env_branch }}
+          TARGET_ENV: ${{ inputs.target_env }}
+          LABEL_NAME: ${{ inputs.label_name }}
+          HEAD: ${{ inputs.head_ref }}
+          SHA: ${{ inputs.head_sha }}
+          NEEDED_ENVS: ${{ needs.plan.outputs.require_envs || needs.plan.outputs.require_env }}
           ENV_PR: ${{ needs.prepare.outputs.env_pr }}
           ENV_PR_URL: ${{ needs.prepare.outputs.env_pr_url }}
+          ENV_PR_CREATED: ${{ needs.prepare.outputs.env_pr_created }}
           CONTROL_PR: ${{ inputs.control_pr }}
+          PLAN: ${{ needs.plan.result }}
+          PREP: ${{ needs.prepare.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          MERGE: ${{ needs.merge.result }}
+          DEPLOY_REASON: ${{ needs.deploy.outputs.reason }}
+          DEPLOY_NOTE: ${{ needs.deploy.outputs.note }}
+          DEPLOY_ERRORS: ${{ needs.deploy.outputs.errors }}
+          MERGE_REASON: ${{ needs.merge.outputs.reason }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
-          gh pr comment "$CONTROL_PR" --repo "$REPO" --body "❌ **Promotion to \`$ENVN\` failed** on [#$ENV_PR]($ENV_PR_URL). Nothing was merged. See the run log: $RUN_URL — fix, then re-add \`deploy:$ENVN\`."
-          gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/deploy:$ENVN" >/dev/null 2>&1 || true
+          [ -n "$ENVN" ] || ENVN="${TARGET_ENV:-${LABEL_NAME#deploy:}}"
+          LABEL="${LABEL_NAME:-deploy:$ENVN}"
+          ENTRY="${NEEDED_ENVS%%,*}"; ENTRY="${ENTRY:-the entry stage}"
+          on=""; [ -n "$ENV_PR" ] && on=" on [#$ENV_PR]($ENV_PR_URL)"
+          errors=""
+          if [ "$PLAN" = "failure" ]; then
+            why="\`$LABEL\` could not be resolved to an environment: it must be \`deploy:<name>\` for a \`name:\` in \`sf-pipeline/pipeline.config.yml\` (the run log lists the valid names), and the config must be readable."
+            note="Nothing was deployed and no branch moved."
+          elif [ "$PREP" = "failure" ]; then
+            why="the promotion could not be prepared (an unexpected GitHub error — see the run log)."
+            note="Nothing was deployed and no branch moved."
+          elif [ "$MERGE" = "failure" ] || [ "$MERGE" = "cancelled" ]; then
+            why="the PR was **not merged**: ${MERGE_REASON:-the merge did not complete}."
+            note="The \`$ENVN\` org has \`${SHA:0:7}\` (\`deploy-$ENVN\` = success), but this run merged nothing into \`$ENVBR\` and did not add \`deployed:$ENVN\`."
+          elif [ -n "$DEPLOY_REASON" ]; then
+            why="$DEPLOY_REASON"; note="${DEPLOY_NOTE:-Nothing was merged.}"; errors="$DEPLOY_ERRORS"
+          elif [ "$DEPLOY" = "cancelled" ]; then
+            why="the run was cancelled before the deploy finished."
+            note="If the Salesforce deploy had started, it may still complete in the \`$ENVN\` org; nothing was merged."
+          else
+            why="the deploy job failed — see the run log."; note="Nothing was merged."
+          fi
+
+          # Has the feature branch moved past the commit being promoted?
+          hint="Fix the cause, then re-add \`$LABEL\` here."
+          if [ -n "$ENV_PR" ]; then
+            ehead=$(gh pr view "$ENV_PR" --repo "$REPO" --json headRefOid -q .headRefOid 2>/dev/null || echo "")
+            if [ -n "$ehead" ] && [ "$ehead" != "$SHA" ]; then
+              hint="\`$HEAD\` now has commit(s) after \`${SHA:0:7}\` that were never deployed: take them through \`$ENTRY\` first (a new PR into the \`$ENTRY\` branch, then promote from that PR), or reset \`$HEAD\` to \`${SHA:0:7}\` and re-add \`$LABEL\` here."
+            fi
+          fi
+
+          # Leave no stray env PR behind: close the one THIS run opened.
+          closed=""
+          if [ "$ENV_PR_CREATED" = "true" ] && [ -n "$ENV_PR" ] && \
+             [ "$(gh pr view "$ENV_PR" --repo "$REPO" --json state -q .state 2>/dev/null || echo "")" = "OPEN" ]; then
+            gh pr close "$ENV_PR" --repo "$REPO" --comment "Closed by the pipeline: the \`$LABEL\` promotion from #$CONTROL_PR failed (see there). Re-adding the label opens a fresh PR." >/dev/null 2>&1 \
+              && closed=" The auto-created [#$ENV_PR]($ENV_PR_URL) was closed; re-adding the label opens a fresh one."
+          fi
+
+          {
+            printf '%s\n' "❌ **Promotion to \`$ENVN\` failed**$on — $why" ""
+            printf '%s\n' "$note$closed" ""
+            [ -n "${errors//[[:space:]]/}" ] && printf '%s\n' "$errors" ""
+            printf '%s\n' "**Next:** $hint Run log: $RUN_URL"
+          } > /tmp/promote-fail.md
+          gh pr comment "$CONTROL_PR" --repo "$REPO" --body-file /tmp/promote-fail.md || true
+          gh api -X DELETE "repos/$REPO/issues/$CONTROL_PR/labels/$LABEL" >/dev/null 2>&1 || true

@@ -6,6 +6,12 @@
 #
 #  See sf-pipeline/README.md for the full setup checklist (branches, GitHub
 #  Environments, secrets). Change the values below to match your project.
+#
+#  For a pull request, the gates and environments below are read from the
+#  branch the PR targets (if it is protected; otherwise the default branch),
+#  never from the PR itself — so a change to this file applies to PRs into a
+#  branch once it has merged there. Only source_path, api_version and
+#  node_version come from the change being shipped.
 # ============================================================================
 
 # ---- Project basics --------------------------------------------------------
@@ -43,13 +49,16 @@ org:
 # that org's secrets (SF_CONSUMER_KEY / SF_USERNAME / SF_INSTANCE_URL / SF_JWT_KEY).
 #
 # `gate:` controls how each stage is driven (optional; sensible defaults below):
-#   * auto      — a PR into this branch runs a real deploy to its org and
-#                 auto-merges with NO approval. Use for a low-friction dev entry.
+#   * auto      — every push to a PR into this branch runs a real deploy to its
+#                 org and auto-merges with NO approval (and no PR Validation).
+#                 Use for a low-friction dev entry. Needs the example deploy.yml
+#                 caller's pull_request triggers (setup-branch-protection.sh gives
+#                 an auto entry 0 required reviews so it can merge unattended).
 #   * approval  — a PR into this branch runs a CHECK-ONLY validation + posts the
 #                 component/coverage report; a reviewer APPROVING the PR then
 #                 triggers the real deploy + auto-merge. Use for gated stages.
-#   * on_demand — NOT PR-driven; deployed whenever you want via the manual
-#                 "Promote" workflow (Actions tab). Use for qa/stage.
+#   * on_demand — NOT PR-driven; deployed when someone adds a `deploy:<name>`
+#                 label to the merged entry PR. Use for qa/stage.
 # Defaults when `gate:` is omitted: the FIRST env falls back to the global
 # `require_pr_approval` flag (approval if true, auto if false); every later env
 # defaults to on_demand.
@@ -76,12 +85,12 @@ environments:
   - name: qa
     branch: qa
     gh_environment: qa
-    gate: on_demand                 # deploy via the manual Promote workflow
+    gate: on_demand                 # deployed by a deploy:qa label
     jira_status: In QA
   - name: stage
     branch: stage
     gh_environment: stage
-    gate: on_demand                 # deploy via the manual Promote workflow
+    gate: on_demand                 # deployed by a deploy:stage label
     jira_status: In Stage
 
 # ---- Production (isolated, manual, reviewer-gated) -------------------------
@@ -109,7 +118,9 @@ production:
   # destructive-only change must still run a test. A deletion has no coverage
   # requirement, so a single stable passing test satisfies the platform without
   # running the whole (possibly red) org suite. Comma-separated; blank =
-  # RunLocalTests.
+  # RunLocalTests. The release validation of a no-Apex change runs it too, so
+  # that validation can be quick-deployed; without it, the approved release is
+  # deployed again with a full deploy.
   # Replace with the name of a small, stable, always-passing Apex test class in
   # YOUR org. Leave blank if you do not have one.
   destructive_tests: "MyStableSmokeTest"
@@ -123,8 +134,9 @@ production:
 # ---- Quality gates --------------------------------------------------------
 # Static code analysis (PMD / SonarQube) is handled by your organisation's dedicated
 # GitHub Actions from the internal marketplace — it is NOT part of this
-# pipeline. The only gate enforced here is Apex test coverage, which fires
-# during the org deploy and only when *.cls / *.trigger change.
+# pipeline. The only gate enforced here is Apex test coverage, which fires only
+# when *.cls / *.trigger change and judges a validation with the tests BEFORE
+# anything is deployed.
 quality_gates:
   apex_coverage: true  # fail the deploy if changed Apex is below the threshold
 
@@ -136,17 +148,23 @@ coverage_threshold: 85
 #   full         (default) — deploy the COMPLETE profile/permission-set from
 #                source. Safest when every referenced component already exists in
 #                the target org (baseline / full deploys).
-#   incremental  — for each profile/PS in the delta, strip it down to only the
-#                permission entries that reference components ALSO in this delta
-#                (field/object/class/tab/app/recordType/… permissions), keeping
-#                profile-level settings like userPermissions. Avoids "component
-#                does not exist" failures on orgs that lag behind.
+#   incremental  — compare each profile/PS in the delta with the ref the delta
+#                came from and deploy only the permission entries that were ADDED
+#                or CHANGED (a file new on the branch deploys in full). Avoids
+#                "component does not exist" failures on orgs that lag behind.
 profiles_mode: full
 
 # An admin can add this label to a PR to bypass the quality gates above when
 # needed. The bypass is honored ONLY if the person who added the label has
 # admin/maintain permission on the repo (verified at run time).
 bypass_label: bypass-quality-gates
+
+# May a PR's author approve its own ENTRY deploy with the `approved` label?
+# Off by default: the label needs a repo admin who is not the PR's author (or a
+# reviewer's Approve review). Working alone? Set it to true — on the entry
+# branch, since that is where a PR's gates are read from (an admin can commit
+# it there directly).
+# allow_self_approval: false
 
 # ---- Notifications ---------------------------------------------------------
 notifications:

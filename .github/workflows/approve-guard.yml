@@ -47,15 +47,18 @@ jobs:
       bypass_label: ${{ steps.cfg.outputs.bypass_label }}
     steps:
       - uses: actions/checkout@v4
+      # Gates come from the PR's base branch, never from the PR itself.
       - id: cfg
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with:
           mode: outputs
+          config_ref: ${{ inputs.base_ref }}
       - id: resolve
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with:
           mode: resolve
           arg: ${{ inputs.base_ref }}
+          config_ref: ${{ inputs.base_ref }}
 
   guard:
     needs: plan
@@ -68,22 +71,31 @@ jobs:
       pull-requests: write
       statuses: read
     steps:
+      # The bypass label alone is not authority: re-verify who added it.
+      - id: bypass
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/bypass@main
+        with:
+          pr_number: ${{ inputs.pr_number }}
+          bypass_label: ${{ needs.plan.outputs.bypass_label }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Hold approval until validation is green
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           SHA: ${{ inputs.head_sha }}
-          BYPASS_LABEL: ${{ needs.plan.outputs.bypass_label }}
+          BYPASS_ACTIVE: ${{ steps.bypass.outputs.active }}
         run: |
           set -uo pipefail
-          # An admin quality-gate bypass overrides the validation requirement.
-          labels=$(gh pr view "$PR" --repo "$REPO" --json labels -q '.labels[].name' 2>/dev/null || echo "")
-          if printf '%s\n' "$labels" | grep -qx "$BYPASS_LABEL"; then
-            echo "Bypass label present — allowing approval without validation."; exit 0
+          # A verified admin quality-gate bypass overrides the validation requirement.
+          if [ "$BYPASS_ACTIVE" = "true" ]; then
+            echo "Admin bypass active — allowing approval without validation."; exit 0
           fi
-          state=$(gh api "repos/$REPO/commits/$SHA/status" \
-            --jq '.statuses[] | select(.context=="pr-validation") | .state' 2>/dev/null | tail -n1 || echo "")
+          # Only the newest pr-validation status the pipeline wrote (github-actions[bot])
+          # counts; anyone with write access can POST a status by hand.
+          state=$(gh api --paginate "repos/$REPO/commits/$SHA/statuses?per_page=100" 2>/dev/null \
+            | jq -r '.[] | select(.context == "pr-validation" and .creator.login == "github-actions[bot]") | .state' \
+            | head -n1 || echo "")
           echo "pr-validation status for $SHA = '${state:-missing}'"
           if [ "$state" = "success" ]; then
             echo "Validation green — approval stands."; exit 0

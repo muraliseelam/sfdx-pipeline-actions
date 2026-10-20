@@ -48,8 +48,12 @@ retry() {
   done
 }
 
-# Ensure the environment exists (no-op if it already does).
-retry gh api -X PUT "repos/$REPO/environments/$ENVN" >/dev/null
+# Create the environment only when it is missing. Secrets need no PUT, and an
+# existing environment (e.g. prod, with its reviewers and deployment branch
+# policy) must never be rewritten by a bare PUT.
+if ! gh api "repos/$REPO/environments/$ENVN" >/dev/null 2>&1; then
+  retry gh api -X PUT "repos/$REPO/environments/$ENVN" >/dev/null
+fi
 
 retry gh secret set SF_CONSUMER_KEY --repo "$REPO" --env "$ENVN" --body "$CKEY"
 retry gh secret set SF_USERNAME     --repo "$REPO" --env "$ENVN" --body "$USERNAME"

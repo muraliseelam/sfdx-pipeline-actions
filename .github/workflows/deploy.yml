@@ -15,6 +15,10 @@ name: Deploy (approval-gated environment deploy)
 # ahead of a real deployment. The feature is deployed directly (no promotion
 # branch) — overlapping files deploy the feature's version; GitHub's squash
 # merge combines them in git and the merge-conflict guard blocks real conflicts.
+#
+# Exactly the approved commit is deployed AND merged. A commit pushed after the
+# approval is refused before the deploy; one pushed DURING the deploy makes the
+# merge refuse (it is pinned to the deployed SHA), and the PR says why.
 
 on:
   workflow_call:
@@ -35,11 +39,15 @@ concurrency:
 
 jobs:
   # ---- Gate: approval review, admin `approved` label, or admin override -------
+  # A push to a PR (opened/synchronize/...) deploys only a `gate: auto` stage; the
+  # approval action decides, and it is a no-op for an approval-gated base.
   ctx:
-    if: ${{ github.event.review.state == 'approved' || github.event.label.name == 'approved' || inputs.manual_pr != '' }}
+    if: ${{ github.event.review.state == 'approved' || github.event.label.name == 'approved' || inputs.manual_pr != '' || (github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize","ready_for_review"]'), github.event.action)) }}
     runs-on: ubuntu-latest
     outputs:
       proceed:   ${{ steps.a.outputs.proceed }}
+      method:    ${{ steps.a.outputs.method }}
+      gate:      ${{ steps.a.outputs.gate }}
       pr_number: ${{ steps.a.outputs.pr_number }}
       base_ref:  ${{ steps.a.outputs.base_ref }}
       head_sha:  ${{ steps.a.outputs.head_sha }}
@@ -77,15 +85,16 @@ jobs:
       is_entry:           ${{ steps.pd.outputs.r_is_entry }}
     steps:
       - uses: actions/checkout@v4
+      # Gates and environments come from the PR's base branch, never the PR.
       - id: cfg
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
-        with: { mode: outputs }
+        with: { mode: outputs, config_ref: "${{ needs.ctx.outputs.base_ref }}" }
       - id: resolve
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
-        with: { mode: resolve, arg: "${{ needs.ctx.outputs.base_ref }}" }
+        with: { mode: resolve, arg: "${{ needs.ctx.outputs.base_ref }}", config_ref: "${{ needs.ctx.outputs.base_ref }}" }
       - id: pd
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
-        with: { mode: prdeploy, arg: "${{ steps.resolve.outputs.r_name }}" }
+        with: { mode: prdeploy, arg: "${{ steps.resolve.outputs.r_name }}", config_ref: "${{ needs.ctx.outputs.base_ref }}" }
       # delta_baseline=target → diff against the PR's target env branch.
       - id: base
         env:
@@ -151,7 +160,9 @@ jobs:
           env_name: ${{ needs.plan.outputs.env_name }}
           require_env: ${{ needs.plan.outputs.require_env }}
           require_envs: ${{ needs.plan.outputs.require_envs }}
-          is_entry: ${{ needs.plan.outputs.is_entry }}
+          # An auto stage has no PR Validation run (its deploy validates with the
+          # tests before the coverage gate), so it skips the pr-validation check.
+          is_entry: ${{ needs.ctx.outputs.gate == 'auto' && 'false' || needs.plan.outputs.is_entry }}
           bypass_active: ${{ needs.bypass.outputs.active }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -169,11 +180,50 @@ jobs:
     outputs:
       has_changes: ${{ steps.deploy.outputs.has_changes }}
       outcome: ${{ steps.deploy.outputs.outcome }}
+      refused: ${{ steps.fresh.outputs.refused }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.ctx.outputs.head_sha }}
           fetch-depth: 0
+      # The approval was for head_sha. If the PR has moved on (or was closed),
+      # deploying head_sha would leave the org ahead of a branch that can never
+      # merge it — refuse before anything touches the org.
+      - name: Refuse if the PR moved since it was approved
+        id: fresh
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.ctx.outputs.pr_number }}
+          SHA: ${{ needs.ctx.outputs.head_sha }}
+          ENVN: ${{ needs.plan.outputs.env_name }}
+          METHOD: ${{ needs.ctx.outputs.method }}
+        run: |
+          set -uo pipefail
+          info=$(gh pr view "$PR" --repo "$REPO" --json state,headRefOid \
+                   -q '.state + " " + .headRefOid' 2>/dev/null || echo "")
+          state="${info%% *}"; head="${info#* }"
+          why=""
+          if [ -z "$info" ]; then
+            echo "::warning::Could not read PR #$PR — the merge is still pinned to ${SHA:0:8}."
+          elif [ "$state" = "CLOSED" ]; then
+            why="this PR was closed without being merged"
+          elif [ "$head" != "$SHA" ]; then
+            why="a new commit (\`${head:0:7}\`) was pushed after \`${SHA:0:7}\` was approved"
+          fi
+          [ -z "$why" ] && { echo "PR #$PR is still at the approved ${SHA:0:8} ($state)."; exit 0; }
+          echo "refused=true" >> "$GITHUB_OUTPUT"
+          if [ "$METHOD" = "auto" ]; then
+            # gate: auto — the newer push started its own run, which deploys it.
+            echo "::error::PR #$PR moved past ${SHA:0:8} ($why); the run for the newer commit deploys it — nothing deployed here."
+            exit 1
+          fi
+          gh api -X DELETE "repos/$REPO/issues/$PR/labels/approved" >/dev/null 2>&1 || true
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "⛔ **Not deployed to \`$ENVN\`** — $why. Nothing was deployed and nothing merged. Once PR Validation is green for the current head, approve again (or re-add \`approved\`); the pipeline deploys and merges exactly that commit."
+          echo "::error::PR #$PR moved since approval: $why."
+          exit 1
       - id: deploy
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
         with:
@@ -226,10 +276,14 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/merge-pr@main
+      # Pinned to the deployed SHA: a commit pushed during the deploy is never
+      # merged without being deployed.
+      - id: merge
+        uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/merge-pr@main
         with:
           pr_number: ${{ needs.ctx.outputs.pr_number }}
           base_ref: ${{ needs.ctx.outputs.base_ref }}
+          sha: ${{ needs.ctx.outputs.head_sha }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # Stamp the durable status label `deployed:<env>` and clear the working
@@ -253,10 +307,37 @@ jobs:
             gh api -X DELETE "repos/$REPO/issues/$PR/labels/$l" >/dev/null 2>&1 || true
           done
 
+      # Deployed but not merged: the org is ahead of the branch. Say so plainly,
+      # stamp nothing, and drop `approved` so approving again retriggers.
+      - name: Explain why the PR was not merged
+        if: ${{ failure() && steps.merge.outcome == 'failure' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.ctx.outputs.pr_number }}
+          BASE: ${{ needs.ctx.outputs.base_ref }}
+          SHA: ${{ needs.ctx.outputs.head_sha }}
+          ENVN: ${{ needs.plan.outputs.env_name }}
+          REASON: ${{ steps.merge.outputs.reason }}
+        run: |
+          set -uo pipefail
+          gh api -X DELETE "repos/$REPO/issues/$PR/labels/approved" >/dev/null 2>&1 || true
+          printf '%s\n' \
+            "⛔ **Deployed \`${SHA:0:7}\` to \`$ENVN\`, but this PR was not merged** — ${REASON:-the merge did not complete (see the run log)}." \
+            "" \
+            "The \`$ENVN\` org has \`${SHA:0:7}\`, but this run merged nothing into \`$BASE\` and did not add \`deployed:$ENVN\`." \
+            "" \
+            "**To finish:** once PR Validation is green for the PR's current head, approve again (or re-add \`approved\`). The pipeline deploys exactly that commit and merges only it." > /tmp/merge-fail.md
+          gh pr comment "$PR" --repo "$REPO" --body-file /tmp/merge-fail.md || true
+
   # ---- Post the unified deploy report on the PR -------------------------------
+  # Not posted when the deploy never ran (the guard or the freshness check has
+  # already explained why) or when the merge was refused (the merge job has):
+  # the report would otherwise claim "deployed and merged".
   comment:
-    needs: [plan, changes, bypass, deploy]
-    if: ${{ always() && needs.plan.result == 'success' && (github.event_name == 'pull_request_review' || github.event_name == 'pull_request') }}
+    needs: [plan, changes, bypass, deploy, merge]
+    if: ${{ always() && needs.plan.result == 'success' && needs.deploy.result != 'skipped' && needs.deploy.outputs.refused != 'true' && needs.merge.result != 'failure' && (github.event_name == 'pull_request_review' || github.event_name == 'pull_request') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

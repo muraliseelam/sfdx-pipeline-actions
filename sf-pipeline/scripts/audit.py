@@ -63,6 +63,9 @@ def main():
         "short_sha": env("AUDIT_SHA")[:8],
         "pr": env("AUDIT_PR"),
         "deploy_id": env("AUDIT_DEPLOY_ID"),
+        # The check-only validation behind this run (for a quick deploy, the
+        # validated job it promoted). Blank for a plain deploy.
+        "validation_id": env("AUDIT_VALIDATION_ID"),
         "run_id": env("AUDIT_RUN_ID"),
         "run_url": env("AUDIT_RUN_URL"),
         "repo": env("AUDIT_REPO"),
@@ -99,7 +102,9 @@ def main():
                 f"| Profiles mode | {record['profiles_mode'] or '—'} |\n"
                 f"| Apex coverage | {cov} |\n"
                 f"| Deploy id | `{record['deploy_id'] or '—'}` |\n"
-                f"| Run | {record['run_url'] or '—'} |\n"
+                + (f"| Validation id | `{record['validation_id']}` |\n"
+                   if record['validation_id'] and record['validation_id'] != record['deploy_id'] else "")
+                + f"| Run | {record['run_url'] or '—'} |\n"
             )
     return 0
 

@@ -15,6 +15,13 @@
 #   package/package.xml                 - components to deploy
 #   destructiveChanges/destructiveChanges.xml - components to delete
 #
+# Outputs (to $GITHUB_OUTPUT): has_changes, output_dir, and from_ref — the ref
+# the delta was really computed from (the merge-base in three-dot mode), which
+# anything that diffs against "the baseline" must use too.
+#
+# Fails, rather than reporting "no changes", when sfdx-git-delta fails or writes
+# no package.xml: a deploy treats "no changes" as success and merges.
+#
 # Usage: scripts/ci/delta.sh
 set -euo pipefail
 
@@ -52,23 +59,31 @@ if [ "${DELTA_MERGE_BASE:-false}" = "true" ]; then
     echo "Using merge-base ${MB} of ${FROM}...${TO} as delta FROM (three-dot)."
     FROM="$MB"
   else
-    echo "::warning::Could not compute merge-base of ${FROM} and ${TO}; using two-dot diff."
+    # A two-dot diff against a drifted branch marks every component that only
+    # the other side has as a DELETION, and the deploy would delete it.
+    echo "::error::Could not compute the merge-base of ${FROM} and ${TO} (is the checkout shallow? use fetch-depth: 0). Refusing a two-dot diff, which would delete components this branch never touched."
+    exit 1
   fi
 fi
 
 echo "::group::Computing delta ${FROM}..${TO} (API ${API_VERSION})"
-sf sgd source delta \
+if ! sf sgd source delta \
   --from "$FROM" \
   --to "$TO" \
   --output-dir "$OUTPUT" \
   --generate-delta \
   --api-version "$API_VERSION" \
-  --ignore-whitespace
+  --ignore-whitespace; then
+  echo "::endgroup::"
+  echo "::error::sfdx-git-delta could not compute the delta ${FROM}..${TO}. Nothing was deployed."
+  exit 1
+fi
 echo "::endgroup::"
 
 PKG="$OUTPUT/package/package.xml"
 if [ ! -f "$PKG" ]; then
-  echo "No package.xml produced by sfdx-git-delta." >&2
+  echo "::error::sfdx-git-delta wrote no ${PKG}. Refusing to treat that as 'no changes'."
+  exit 1
 fi
 
 # Expose whether there is anything to deploy for downstream steps.
@@ -84,6 +99,9 @@ if [ -f "$DESTRUCT" ] && grep -q "<types>" "$DESTRUCT"; then
 fi
 echo "Delta has deployable changes: $HAS_CHANGES"
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
-  echo "has_changes=$HAS_CHANGES" >> "$GITHUB_OUTPUT"
-  echo "output_dir=$OUTPUT" >> "$GITHUB_OUTPUT"
+  {
+    echo "has_changes=$HAS_CHANGES"
+    echo "output_dir=$OUTPUT"
+    echo "from_ref=$FROM"
+  } >> "$GITHUB_OUTPUT"
 fi

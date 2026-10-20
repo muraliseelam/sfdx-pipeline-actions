@@ -7,9 +7,12 @@ name: Org Bootstrap
 # Run this once per environment during setup (User Guide, Part 1, Step 6).
 # After the last org is bootstrapped you never need it again.
 #
-# Two secrets are required before the first run:
+# Two repository secrets are required before the first run:
 #   SFDX_AUTH_URL   — an sfdx auth URL for an admin of the TARGET org
+#                     (one org per value: replace it before the next org)
 #   BOOTSTRAP_TOKEN — a PAT with repo admin, so it can write Environment secrets
+# Delete both once the last org is bootstrapped: any workflow a developer pushes
+# can read repository secrets.
 
 on:
   workflow_dispatch:

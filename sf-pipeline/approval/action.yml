@@ -1,11 +1,17 @@
 name: "Resolve approval + PR context"
 description: >-
   Decide whether an approval-gated deploy may proceed, and surface the PR
-  context the rest of the pipeline needs. Handles three entry paths:
-    * a native "Approve" review,
-    * the self-serve `approved` label (admin-only on the entry stage),
-    * an admin workflow_dispatch override (manual_pr) that waives peer approval.
-  Outputs proceed=true only for an approval-gated stage that cleared its gate.
+  context the rest of the pipeline needs. Handles four entry paths:
+    * a native "Approve" review (the reviewer must have write access),
+    * the self-serve `approved` label (admin-only on the entry stage, and never
+      from the PR's own author unless `allow_self_approval: true`; write access
+      on later stages),
+    * an admin workflow_dispatch override (manual_pr) that waives peer approval,
+    * a push to a PR (opened / synchronize / reopened / ready_for_review), which
+      deploys only when the PR's base is a `gate: auto` stage.
+  Outputs proceed=true only for an approval-gated stage that cleared its gate,
+  or an auto stage on a push.
+  The gate and stage are read from the PR's base branch, not from the PR.
 
 inputs:
   manual_pr:
@@ -30,6 +36,12 @@ outputs:
     value: ${{ steps.pr.outputs.head_ref }}
   pr_title:
     value: ${{ steps.pr.outputs.pr_title }}
+  method:
+    description: "review | label | manual | auto (a push to a PR) | none"
+    value: ${{ steps.pr.outputs.method }}
+  gate:
+    description: "Gate of the PR's base stage (auto | approval | on_demand | none)"
+    value: ${{ steps.resolve.outputs.r_gate }}
 
 runs:
   using: composite
@@ -51,16 +63,29 @@ runs:
         EVT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         EVT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         EVT_TITLE: ${{ github.event.pull_request.title }}
+        EVT_AUTHOR: ${{ github.event.pull_request.user.login }}
+        EVT_DRAFT: ${{ github.event.pull_request.draft }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
       run: |
         set -uo pipefail
-        if [ "${REVIEW_STATE:-}" = "approved" ] || [ "${LABEL_NAME:-}" = "approved" ]; then
+        # Expressions compare case-insensitively, so the callers fire for `Approved` too.
+        LABEL_LC=$(printf '%s' "${LABEL_NAME:-}" | tr '[:upper:]' '[:lower:]')
+        if [ "${REVIEW_STATE:-}" = "approved" ] || [ "$LABEL_LC" = "approved" ]; then
           if [ "${REVIEW_STATE:-}" = "approved" ]; then
             METHOD=review; APPROVER="${REVIEW_USER:-$ACTOR}"
           else
             METHOD=label;  APPROVER="${SENDER:-$ACTOR}"
           fi
-          PRNUM="$EVT_PR"; BASE="$EVT_BASE"; HSHA="$EVT_HEAD_SHA"; HREF="$EVT_HEAD_REF"; TITLE="$EVT_TITLE"
-        else
+          PRNUM="$EVT_PR"; BASE="$EVT_BASE"; HSHA="$EVT_HEAD_SHA"; HREF="$EVT_HEAD_REF"; TITLE="$EVT_TITLE"; AUTHOR="$EVT_AUTHOR"
+        elif [ "$EVENT_NAME" = "pull_request" ] && [ "$EVT_DRAFT" != "true" ] && \
+             case "$EVENT_ACTION" in opened|reopened|synchronize|ready_for_review) true ;; *) false ;; esac; then
+          # A push to a PR: deploys only when its base is a `gate: auto` stage
+          # (decided in step 3); an approval-gated base ignores it.
+          METHOD=auto; APPROVER="${SENDER:-$ACTOR}"
+          PRNUM="$EVT_PR"; BASE="$EVT_BASE"; HSHA="$EVT_HEAD_SHA"; HREF="$EVT_HEAD_REF"; TITLE="$EVT_TITLE"; AUTHOR="$EVT_AUTHOR"
+        elif [ -n "${MANUAL_PR:-}" ]; then
+          case "$MANUAL_PR" in *[!0-9]*) echo "::error::manual_pr must be a PR number, got '$MANUAL_PR'."; exit 1 ;; esac
           # Admin override: the triggering actor must be admin/maintain on the repo.
           METHOD=manual; APPROVER="$ACTOR"
           PERM=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" -q .permission 2>/dev/null || echo "")
@@ -74,48 +99,100 @@ runs:
           HSHA=$(printf '%s' "$J"  | python3 -c "import sys,json;print(json.load(sys.stdin)['head']['sha'])")
           HREF=$(printf '%s' "$J"  | python3 -c "import sys,json;print(json.load(sys.stdin)['head']['ref'])")
           TITLE=$(printf '%s' "$J" | python3 -c "import sys,json;print(json.load(sys.stdin)['title'])")
+          AUTHOR=$(printf '%s' "$J" | python3 -c "import sys,json;print(json.load(sys.stdin)['user']['login'])")
+        else
+          echo "method=none" >> "$GITHUB_OUTPUT"
+          echo "Not an approval (review/'approved' label) and no manual_pr — nothing to deploy."
+          exit 0
         fi
+        TITLE=$(printf '%s' "$TITLE" | tr -d '\r\n')
         {
           echo "pr_number=$PRNUM"; echo "base_ref=$BASE"; echo "head_sha=$HSHA"
           echo "head_ref=$HREF"; echo "pr_title=$TITLE"
-          echo "method=$METHOD"; echo "approver=$APPROVER"
+          echo "method=$METHOD"; echo "approver=$APPROVER"; echo "author=$AUTHOR"
         } >> "$GITHUB_OUTPUT"
-        echo "PR #$PRNUM -> $BASE (method=$METHOD, approver=$APPROVER)"
+        echo "PR #$PRNUM -> $BASE (method=$METHOD, approver=$APPROVER, author=$AUTHOR)"
 
-    # 2) Look up the target stage's gate + chain position from the config.
-    - id: resolve
+    # 2) Look up the target stage's gate + chain position from the config on the
+    #    PR's BASE branch — the PR's own copy can't change who may approve it.
+    - id: cfg
+      if: ${{ steps.pr.outputs.method != 'none' }}
       uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
-      with: { mode: resolve, arg: "${{ steps.pr.outputs.base_ref }}" }
+      with: { mode: outputs, config_ref: "${{ steps.pr.outputs.base_ref }}" }
+    - id: resolve
+      if: ${{ steps.pr.outputs.method != 'none' }}
+      uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
+      with: { mode: resolve, arg: "${{ steps.pr.outputs.base_ref }}", config_ref: "${{ steps.pr.outputs.base_ref }}" }
     - id: pd
+      if: ${{ steps.pr.outputs.method != 'none' }}
       continue-on-error: true
       uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
-      with: { mode: prdeploy, arg: "${{ steps.resolve.outputs.r_name }}" }
+      with: { mode: prdeploy, arg: "${{ steps.resolve.outputs.r_name }}", config_ref: "${{ steps.pr.outputs.base_ref }}" }
 
-    # 3) Final decision. Only approval-gated stages deploy here; on the entry
-    #    stage the `approved` LABEL must come from an admin (developers can't
-    #    self-approve their own entry PR).
+    # 3) Final decision. Only approval-gated stages deploy here.
+    #    * review: the reviewer needs write access (on a public repo anyone can
+    #      submit an "Approve" review).
+    #    * label on the entry stage: a repo admin, and not the PR's own author
+    #      unless allow_self_approval is on (solo operators).
+    #    * label on a later stage: write access (developers self-approve there;
+    #      the ordering guard is that stage's gate).
     - id: gate
+      if: ${{ steps.pr.outputs.method != 'none' }}
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         REPO: ${{ github.repository }}
         BASE: ${{ steps.pr.outputs.base_ref }}
         GATE: ${{ steps.resolve.outputs.r_gate }}
+        ENVN: ${{ steps.resolve.outputs.r_name }}
         METHOD: ${{ steps.pr.outputs.method }}
         APPROVER: ${{ steps.pr.outputs.approver }}
+        AUTHOR: ${{ steps.pr.outputs.author }}
+        ALLOW_SELF: ${{ steps.cfg.outputs.allow_self_approval }}
+        CFG_SRC: ${{ steps.cfg.outputs.config_source }}
         IS_ENTRY: ${{ steps.pd.outputs.r_is_entry }}
         PR: ${{ steps.pr.outputs.pr_number }}
       run: |
         set -uo pipefail
         PROCEED=false
-        [ "$GATE" = "approval" ] && PROCEED=true
-        if [ "$PROCEED" = "true" ] && [ "${METHOD:-}" = "label" ] && [ "${IS_ENTRY:-}" = "true" ]; then
-          PERM=$(gh api "repos/$REPO/collaborators/$APPROVER/permission" -q .permission 2>/dev/null || echo "")
-          if [ "$PERM" != "admin" ]; then
-            PROCEED=false
+        # approval: a review / the label / an admin override. auto: every push to
+        # the PR (and an admin override); no approval is asked for.
+        case "$GATE:$METHOD" in
+          approval:auto) ;;
+          approval:*)    PROCEED=true ;;
+          auto:auto|auto:manual) PROCEED=true ;;
+        esac
+        if [ "$PROCEED" = "true" ] && [ -z "${IS_ENTRY:-}" ]; then
+          # Approval-gated for validation (e.g. a release branch) but not an environment.
+          PROCEED=false
+          echo "::notice::'$BASE' is not a configured environment branch — nothing to deploy."
+        fi
+        deny() {  # $1 = PR comment, $2 = log reason
+          PROCEED=false
+          if [ "$METHOD" = "label" ]; then
             gh api -X DELETE "repos/$REPO/issues/$PR/labels/approved" >/dev/null 2>&1 || true
-            gh pr comment "$PR" --repo "$REPO" --body "🚫 On an **int** (entry) PR the \`approved\` label can only be added by a repo **admin**. @$APPROVER has \`${PERM:-none}\` permission, so the label was removed. Get a reviewer's **Approve** review, or ask an admin to apply the label." >/dev/null 2>&1 || true
-            echo "::notice::Denied entry-stage 'approved' label from @$APPROVER (permission=${PERM:-none})."
+          fi
+          gh pr comment "$PR" --repo "$REPO" --body "$1" >/dev/null 2>&1 || true
+          echo "::notice::Did not accept the $METHOD approval from @$APPROVER ($2)."
+        }
+        if [ "$PROCEED" = "true" ] && [ "$METHOD" != "manual" ] && [ "$METHOD" != "auto" ]; then
+          PERM=$(gh api "repos/$REPO/collaborators/$APPROVER/permission" -q .permission 2>/dev/null || echo "")
+          if [ "$METHOD" = "label" ] && [ "$IS_ENTRY" = "true" ]; then
+            if [ "$PERM" != "admin" ]; then
+              deny "🚫 On an **$ENVN** (entry) PR the \`approved\` label can only be added by a repo **admin**. @$APPROVER has \`${PERM:-none}\` permission, so the label was removed. Get a reviewer's **Approve** review, or ask an admin to apply the label." "permission=${PERM:-none}"
+            elif [ "$APPROVER" = "$AUTHOR" ] && [ "$ALLOW_SELF" != "true" ]; then
+              deny "🚫 @$APPROVER, this is your own PR, so your \`approved\` label can't approve its deploy to **$ENVN** — the label was removed. Ask a reviewer to **Approve** the PR, or another admin to add the label. Working alone? Set \`allow_self_approval: true\` in \`sf-pipeline/pipeline.config.yml\` on \`$CFG_SRC\` (the branch this PR targets; an admin can commit it there directly), then re-add the label." "self-approval; allow_self_approval is off"
+            fi
+          else
+            case "$PERM" in
+              admin|maintain|write) ;;
+              *)
+                if [ "$METHOD" = "label" ]; then
+                  deny "🚫 The \`approved\` label needs **write** access to this repo. @$APPROVER has \`${PERM:-none}\` permission, so the label was removed." "permission=${PERM:-none}"
+                else
+                  deny "🚫 @$APPROVER's approval doesn't start a deploy: it needs **write** access to this repo (@$APPROVER has \`${PERM:-none}\`)." "permission=${PERM:-none}"
+                fi ;;
+            esac
           fi
         fi
         echo "proceed=$PROCEED" >> "$GITHUB_OUTPUT"

@@ -20,13 +20,33 @@ Two modes:
 
 The single config file is the only thing a new project edits; this script keeps
 the workflows generic so they never hardcode env names, branches or org counts.
+
+Trust: --config is the file the gates and environment mapping come from. When a
+workflow acts on a pull request, the plan action fetches it from the PR's
+(protected) base branch, so a PR can't relax the gates that judge it. The keys
+that describe the code being shipped (CODE_KEYS) are then read from
+--code-config, the PR's own checkout.
 """
 import argparse
 import json
 import os
+import re
 import sys
 
 DEFAULT_CONFIG = os.path.join("sf-pipeline", "pipeline.config.yml")
+
+# Keys that describe the change itself rather than policy. They follow the code
+# (a PR that moves its metadata changes source_path in the same PR); everything
+# else (gates, thresholds, environments, production) comes from --config.
+CODE_KEYS = ("source_path", "api_version", "node_version")
+
+# These values can come from a PR, and workflows interpolate them into shell, so
+# only plain path / version characters are accepted.
+SAFE_VALUE = {
+    "source_path": re.compile(r"^(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9_.][A-Za-z0-9_./-]*$"),
+    "api_version": re.compile(r"^[0-9]+(\.[0-9]+)?$"),
+    "node_version": re.compile(r"^[A-Za-z0-9.*/_-]+$"),
+}
 
 
 def load_config(path):
@@ -86,7 +106,22 @@ def normalize_envs(cfg):
     return envs
 
 
-def cmd_outputs(cfg):
+def code_values(cfg, code_cfg):
+    """source_path / api_version / node_version: from the change when given."""
+    src = cfg if code_cfg is None else code_cfg
+    defaults = {"source_path": "force-app", "api_version": "66.0", "node_version": "22"}
+    vals = {}
+    for key in CODE_KEYS:
+        val = str(src.get(key, defaults[key])).strip()
+        if not SAFE_VALUE[key].match(val):
+            print(f"::error::pipeline.config.yml: `{key}: {val}` is not allowed. Use a plain "
+                  f"relative path / version (letters, digits and . _ / - only).", file=sys.stderr)
+            sys.exit(1)
+        vals[key] = val
+    return vals
+
+
+def cmd_outputs(cfg, code_cfg=None):
     envs = normalize_envs(cfg)
     if not envs:
         print("::error::pipeline.config.yml has no `environments` defined", file=sys.stderr)
@@ -94,15 +129,16 @@ def cmd_outputs(cfg):
     q = cfg.get("quality_gates", {}) or {}
     prod = cfg.get("production", {}) or {}
     notif = cfg.get("notifications", {}) or {}
+    code = code_values(cfg, code_cfg)
 
     def flag(v, default=True):
         return "true" if (default if v is None else bool(v)) else "false"
 
     emit(
         {
-            "source_path": cfg.get("source_path", "force-app"),
-            "api_version": cfg.get("api_version", "66.0"),
-            "node_version": cfg.get("node_version", "22"),
+            "source_path": code["source_path"],
+            "api_version": code["api_version"],
+            "node_version": code["node_version"],
             "baseline_branch": cfg.get("baseline_branch", "main"),
             "delta_baseline": str(cfg.get("delta_baseline", "prod")).strip().lower(),
             "entry_branch": envs[0]["branch"],
@@ -125,6 +161,9 @@ def cmd_outputs(cfg):
             "profiles_mode": str(cfg.get("profiles_mode", "full")).strip().lower(),
             "bypass_label": cfg.get("bypass_label", "bypass-quality-gates"),
             "require_pr_approval": flag(cfg.get("require_pr_approval"), default=True),
+            # May a PR's own author approve its entry deploy with the `approved`
+            # label? Off by default; a solo operator turns it on.
+            "allow_self_approval": flag(cfg.get("allow_self_approval"), default=False),
             "chat": flag(notif.get("chat"), default=False),
             "jira": flag(notif.get("jira"), default=False),
         }
@@ -280,6 +319,8 @@ def cmd_prdeploy(cfg, target):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default=DEFAULT_CONFIG)
+    p.add_argument("--code-config", default="",
+                   help="Config of the change being shipped; supplies only " + ", ".join(CODE_KEYS))
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("outputs")
     r = sub.add_parser("resolve")
@@ -292,7 +333,10 @@ def main():
 
     cfg = load_config(args.config)
     if args.cmd == "outputs":
-        cmd_outputs(cfg)
+        code_cfg = None
+        if args.code_config and os.path.isfile(args.code_config):
+            code_cfg = load_config(args.code_config)
+        cmd_outputs(cfg, code_cfg)
     elif args.cmd == "resolve":
         cmd_resolve(cfg, args.branch)
     elif args.cmd == "promote":
