@@ -11,7 +11,8 @@ Salesforce org.
                         dropped, never resolved; a reset records the old tip
   * Rollback          — refuses an unmerged PR / a non-SHA ref; cuts the revert
                         from the production baseline when it applies there, so
-                        it carries nothing else; never reverts a look-alike file
+                        it carries nothing else; refuses a never-released change
+                        under delta_baseline: prod; never reverts a look-alike file
   * Redeploy          — unknown environment / profiles_mode fail with the list
   * promote prepare   — every refusal is explained, clears the label and opens
                         no stray PR; "No commits between" is the one benign
@@ -369,7 +370,8 @@ def test_recreate():
 # Rollback (TS-066, TS-067)
 # --------------------------------------------------------------------------
 def rollback_env(**kw):
-    env = {"PR_NUMBER": "", "REF_IN": "", "BASE_IN": "", "ENTRY": "int", "BASELINE": "main"}
+    env = {"PR_NUMBER": "", "REF_IN": "", "BASE_IN": "", "ENTRY": "int", "BASELINE": "main",
+           "DELTA_BASELINE": "prod"}
     env.update(kw)
     return env
 
@@ -412,12 +414,26 @@ def test_rollback():
               ["force-app/f/Released__c.field-meta.xml"])
         check("released change: no carry-over warning", "[!WARNING]" in json.dumps(calls), False)
 
-        # An unreleased change: nothing to revert on main, so it falls back to int — loudly.
+        # An unreleased change under delta_baseline: prod: a revert cut from int
+        # would carry every unreleased int change — refused, nothing pushed.
+        before = remote_branches(origin)
         rc, log, _, calls, summ = sb.run(run, rollback_env(REF_IN=other), state, cwd=work)
+        check("unreleased change, delta_baseline prod: refused, no branch, no PR",
+              (rc, "never reached 'main'" in log, "every unreleased change on 'int'" in log,
+               "(a) fix forward" in log, "(c) set delta_baseline: target" in log, "Rollback refused" in summ,
+               kinds(calls, "create"), remote_branches(origin)),
+              (1, True, True, True, True, True, [], before))
+
+        # Under delta_baseline: target the package is computed against int: allowed, with the warning.
+        rc, log, _, calls, summ = sb.run(run, rollback_env(REF_IN=other, DELTA_BASELINE="target"), state, cwd=work)
         body = next((c["body"] for c in calls if c["kind"] == "create"), "")
-        check("unreleased change: cut from int, warns it carries int's other changes",
+        check("unreleased change, delta_baseline target: cut from int, warns about promotion",
               (rc, "cut from `int`" in summ, "::warning::" in log, "[!WARNING]" in body, "Do not promote" in body),
               (0, True, True, True, True))
+
+        # A released change is still cut from main under target.
+        rc, log, _, calls, summ = sb.run(run, rollback_env(PR_NUMBER="6", DELTA_BASELINE="target"), state, cwd=work)
+        check("released change, delta_baseline target: still cut from main", (rc, "cut from `main`" in summ), (0, True))
     finally:
         sb.close()
 
@@ -432,9 +448,14 @@ def test_rollback():
         git(work, "push", "-q", "origin", "main", "feature/x")
         git(work, "push", "-q", "origin", "main:int")
         rc, log, _, calls, _ = sb.run(run, rollback_env(REF_IN=c1), {"prs": {}}, cwd=work)
-        check("a conflicting revert stops with manual git commands, no PR (TS-067)",
+        check("delta_baseline prod: a revert conflicting on main is refused with the commands for main (TS-067)",
+              (rc, "never reached 'main'" in log, f"git checkout -B rollback/{c1[:8]} origin/main" in log,
+               kinds(calls, "create"), f"rollback/{c1[:8]}" in remote_branches(origin)),
+              (1, True, True, [], False))
+        rc, log, _, calls, _ = sb.run(run, rollback_env(REF_IN=c1, DELTA_BASELINE="target"), {"prs": {}}, cwd=work)
+        check("delta_baseline target: a conflicting revert stops with manual git commands, no PR (TS-067)",
               (rc, "Resolve manually" in log, f"git checkout -B rollback/{c1[:8]} origin/int" in log,
-               [c for c in calls if c["kind"] == "create"], f"rollback/{c1[:8]}" in remote_branches(origin)),
+               kinds(calls, "create"), f"rollback/{c1[:8]}" in remote_branches(origin)),
               (1, True, True, [], False))
     finally:
         sb.close()
@@ -450,8 +471,12 @@ def test_rollback():
         git(work, "checkout", "-q", "main")
         commit_file(work, "force-app/f/Story2__c.field-meta.xml", far_field("Story2__c", 50), "look-alike on main")
         git(work, "push", "-q", "origin", "main")
-        rc, log, _, calls, summ = sb.run(run, rollback_env(REF_IN=bump), {"prs": {}}, cwd=work)
         br = f"rollback/{bump[:8]}"
+        # With rename detection main would "revert" Story2__c cleanly; without, it is not on main: refused.
+        rc, log, _, calls, summ = sb.run(run, rollback_env(REF_IN=bump), {"prs": {}}, cwd=work)
+        check("no rename matching: the look-alike on main is not reverted (refused under prod)",
+              (rc, br in remote_branches(origin)), (1, False))
+        rc, log, _, calls, summ = sb.run(run, rollback_env(REF_IN=bump, DELTA_BASELINE="target"), {"prs": {}}, cwd=work)
         touched = git(origin, "diff", "--name-only", f"{br}~1", br).split() if rc == 0 else []
         check("the revert touches only the file the change touched (no rename matching)",
               (rc, touched), (0, ["force-app/f/Story__c.field-meta.xml"]))

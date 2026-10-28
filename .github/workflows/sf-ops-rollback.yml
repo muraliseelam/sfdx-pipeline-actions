@@ -51,11 +51,14 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.PIPELINE_PAT || github.token }}
 
+      # From a protected branch: an unprotected one (anyone with write access can
+      # push a config there) falls back to the default branch.
       - name: Resolve config
         id: cfg
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with:
           mode: outputs
+          config_ref: ${{ github.ref_name }}
 
       - name: Create the revert branch + PR
         env:
@@ -66,6 +69,7 @@ jobs:
           BASE_IN: ${{ inputs.base }}
           ENTRY: ${{ steps.cfg.outputs.entry_branch }}
           BASELINE: ${{ steps.cfg.outputs.baseline_branch }}
+          DELTA_BASELINE: ${{ steps.cfg.outputs.delta_baseline }}
         run: |
           set -euo pipefail
 
@@ -118,16 +122,39 @@ jobs:
           # deploy:<env> promotion of it, would take all of them along.
           # No rename detection: a revert touches only the files the change
           # touched, never a look-alike metadata file elsewhere.
-          revert_on() {  # $1 = branch to cut the revert from
+          revert_on() {  # $1 = branch to cut the revert from; WHY = conflict|empty on failure
+            WHY=empty
             git checkout -q -B "$BRANCH" "origin/$1" || return 1
             # MFLAG is empty or "-m 1" and must split into separate words.
             # shellcheck disable=SC2086
             git revert --no-edit -X no-renames $MFLAG "$SHA" && return 0
+            [ -z "$(git status --porcelain --untracked-files=no)" ] || WHY=conflict
             git revert --abort >/dev/null 2>&1 || true
             return 1
           }
           FROM="$BASELINE"
           if [ "$BASE" = "$BASELINE" ] || ! revert_on "$BASELINE"; then
+            # Not in production as-is. Under delta_baseline: prod every package
+            # is computed against $BASELINE, so a revert cut from $BASE would
+            # deploy - and promote - every unreleased change on $BASE: refuse.
+            # Only under `target` is it computed against $BASE and stays clean.
+            if [ "$BASE" != "$BASELINE" ] && [ "${DELTA_BASELINE:-prod}" != "target" ]; then
+              {
+                echo "$SRC_DESC never reached '$BASELINE': its revert does not apply there. Under delta_baseline: prod a revert PR into '$BASE' would deploy and promote every unreleased change on '$BASE' with it, so no rollback branch or PR was created."
+                echo "To take it out:"
+                echo "  (a) fix forward with a new story (a feature branch cut from $BASELINE), or"
+                echo "  (b) remove its components from the affected orgs by hand and revert the commit on the env branches, or"
+                echo "  (c) set delta_baseline: target in sf-pipeline/pipeline.config.yml - the revert's package is then computed against '$BASE' and stays clean."
+                if [ "$WHY" = "conflict" ]; then
+                  echo "If it did reach '$BASELINE' and was changed there since, resolve the conflict on a branch cut from it:"
+                  echo "  git checkout -B $BRANCH origin/$BASELINE && git revert -X no-renames $MFLAG $SHA"
+                fi
+              } > /tmp/refused.txt
+              echo "::error::$(head -n1 /tmp/refused.txt)"
+              tail -n +2 /tmp/refused.txt
+              { echo "### ⏪ Rollback refused"; echo ""; echo '```'; cat /tmp/refused.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
             FROM="$BASE"
             if ! revert_on "$BASE"; then
               echo "::error::Revert of $SHA hit conflicts against '$BASE' (or changes nothing there). Resolve manually:"
