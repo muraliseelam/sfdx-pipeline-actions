@@ -174,6 +174,12 @@ def main():
         return
     base, email, token = c
 
+    # The key becomes part of the API path: only a real issue key (PROJ-123) may.
+    key_arg = argv[1] if cmd in ("comment", "transition", "deploy") and len(argv) > 1 else ""
+    if key_arg and not KEY_RE.fullmatch(key_arg):
+        _warn(f"'{key_arg}' is not a Jira issue key (e.g. PROJ-123) — skipping.")
+        return
+
     if cmd == "comment":
         key, body = argv[1], argv[2]
         if not key:

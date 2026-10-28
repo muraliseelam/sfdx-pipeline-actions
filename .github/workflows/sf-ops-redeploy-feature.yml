@@ -53,17 +53,27 @@ jobs:
       profiles_mode: ${{ steps.cfg.outputs.profiles_mode }}
     steps:
       - uses: actions/checkout@v4
+      # Gates and environments from a protected branch: dispatched from an
+      # unprotected one (anyone with write access can push a config there), the
+      # plan action reads them from the default branch instead.
       - id: cfg
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with:
           mode: outputs
+          config_ref: ${{ github.ref_name }}
       - name: Resolve target environment
         id: env
         env:
           AUTO_JSON: ${{ steps.cfg.outputs.auto_json }}
           TARGET: ${{ inputs.environment }}
+          PROFILES_MODE: ${{ inputs.profiles_mode }}
         run: |
           set -euo pipefail
+          # The override reaches the deploy action's scripts: only the known modes.
+          case "$PROFILES_MODE" in
+            ""|full|incremental) ;;
+            *) echo "::error::profiles_mode '$PROFILES_MODE' is not one of: full, incremental (blank = pipeline.config.yml)."; exit 1 ;;
+          esac
           ROW="$(printf '%s' "$AUTO_JSON" | jq -c --arg t "$TARGET" '.[] | select(.name==$t)')"
           if [ -z "$ROW" ]; then
             VALID="$(printf '%s' "$AUTO_JSON" | jq -r '[.[].name] | join(", ")')"
@@ -110,11 +120,18 @@ jobs:
 
       - name: Summary
         if: always()
+        # Through env, never interpolated into the script: feature_ref is free text.
+        env:
+          ENVN: ${{ needs.plan.outputs.name }}
+          FEATURE_REF: ${{ inputs.feature_ref }}
+          SHA: ${{ steps.ref.outputs.sha }}
+          MODE: ${{ inputs.dry_run == true && 'check-only (dry run)' || 'REAL deploy' }}
+          RESULT: ${{ job.status }}
         run: |
           {
-            echo "### 🔁 Redeploy ${{ needs.plan.outputs.name }}"
+            echo "### 🔁 Redeploy $ENVN"
             echo ""
-            echo "- Ref: \`${{ inputs.feature_ref }}\` @ \`${{ steps.ref.outputs.sha }}\`"
-            echo "- Mode: ${{ inputs.dry_run == true && 'check-only (dry run)' || 'REAL deploy' }}"
-            echo "- Result: ${{ job.status }}"
+            echo "- Ref: \`$FEATURE_REF\` @ \`$SHA\`"
+            echo "- Mode: $MODE"
+            echo "- Result: $RESULT"
           } >> "$GITHUB_STEP_SUMMARY"

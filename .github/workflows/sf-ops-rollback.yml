@@ -65,6 +65,7 @@ jobs:
           REF_IN: ${{ inputs.ref }}
           BASE_IN: ${{ inputs.base }}
           ENTRY: ${{ steps.cfg.outputs.entry_branch }}
+          BASELINE: ${{ steps.cfg.outputs.baseline_branch }}
         run: |
           set -euo pipefail
 
@@ -88,6 +89,10 @@ jobs:
             fi
             SRC_DESC="PR #$PR_NUMBER"
           elif [ -n "$REF_IN" ]; then
+            # A commit SHA only: anything else (a branch name, an option) is not a change to revert.
+            if ! [[ "$REF_IN" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+              echo "::error::ref '$REF_IN' is not a commit SHA."; exit 1
+            fi
             SHA="$REF_IN"
             SRC_DESC="commit ${SHA:0:8}"
           else
@@ -95,8 +100,8 @@ jobs:
           fi
 
           git fetch origin "$SHA" >/dev/null 2>&1 || true
-          if ! git cat-file -e "${SHA}^{commit}" 2>/dev/null; then
-            echo "::error::Commit $SHA not found."; exit 1
+          if ! SHA="$(git rev-parse --verify -q "${SHA}^{commit}")"; then
+            echo "::error::Commit ${REF_IN:-$SHA} not found."; exit 1
           fi
 
           # Is it a merge commit? If so revert the first parent.
@@ -106,15 +111,38 @@ jobs:
 
           SHORT="${SHA:0:8}"
           BRANCH="rollback/${SHORT}"
-          git checkout -B "$BRANCH" "origin/$BASE"
 
-          # MFLAG is empty or "-m 1" and must split into separate words.
-          # shellcheck disable=SC2086
-          if ! git revert --no-edit $MFLAG "$SHA"; then
-            echo "::error::Revert of $SHA hit conflicts against '$BASE'. Resolve manually:"
-            echo "  git checkout -B $BRANCH origin/$BASE && git revert $MFLAG $SHA"
-            git revert --abort || true
-            exit 1
+          # Cut the revert from the production baseline when it applies there:
+          # the PR then carries ONLY the revert. Cut from $BASE, it also carries
+          # every $BASE change production doesn't have yet — its deploy, and a
+          # deploy:<env> promotion of it, would take all of them along.
+          # No rename detection: a revert touches only the files the change
+          # touched, never a look-alike metadata file elsewhere.
+          revert_on() {  # $1 = branch to cut the revert from
+            git checkout -q -B "$BRANCH" "origin/$1" || return 1
+            # MFLAG is empty or "-m 1" and must split into separate words.
+            # shellcheck disable=SC2086
+            git revert --no-edit -X no-renames $MFLAG "$SHA" && return 0
+            git revert --abort >/dev/null 2>&1 || true
+            return 1
+          }
+          FROM="$BASELINE"
+          if [ "$BASE" = "$BASELINE" ] || ! revert_on "$BASELINE"; then
+            FROM="$BASE"
+            if ! revert_on "$BASE"; then
+              echo "::error::Revert of $SHA hit conflicts against '$BASE' (or changes nothing there). Resolve manually:"
+              echo "  git checkout -B $BRANCH origin/$BASE && git revert -X no-renames $MFLAG $SHA"
+              exit 1
+            fi
+          fi
+          NOTE=""
+          if [ "$FROM" != "$BASELINE" ]; then
+            CARRIED="$(git diff --name-only "origin/$BASELINE...origin/$BASE" | wc -l | tr -d ' ')"
+            if [ "$CARRIED" -gt 0 ]; then
+              echo "::warning::$SRC_DESC does not revert cleanly on '$BASELINE' (never released, or changed there since), so the revert is cut from '$BASE' and also carries the $CARRIED file(s) '$BASE' has that '$BASELINE' doesn't. Do not promote it with a deploy:<env> label: that takes them all to the next stage."
+              # shellcheck disable=SC2016
+              NOTE="$(printf '\n\n> [!WARNING]\n> This change does not revert cleanly on `%s` (it never reached production, or production changed it since), so this revert is cut from `%s` and **also carries the %s file(s) `%s` has that `%s` does not**. Do not promote this PR with a `deploy:<env>` label: that would take all of them to the next stage. To keep the change out of production, put `hold` on its PR instead.' "$BASELINE" "$BASE" "$CARRIED" "$BASE" "$BASELINE")"
+            fi
           fi
 
           git push origin "$BRANCH" --force-with-lease
@@ -122,7 +150,7 @@ jobs:
           TITLE="Rollback: revert $SRC_DESC"
           # The backticks are literal Markdown, not command substitution.
           # shellcheck disable=SC2016
-          BODY="$(printf 'Automated rollback (REQ-016). Reverts `%s` (%s) on top of `%s`.\n\nThis revert flows through the standard pipeline: validation -> approval -> real deploy -> merge. Approve to restore the last known-good state.' "$SHA" "$SRC_DESC" "$BASE")"
+          BODY="$(printf 'Automated rollback (REQ-016). Reverts `%s` (%s) on top of `%s`.\n\nThis revert flows through the standard pipeline: validation -> approval -> real deploy -> merge. Approve to restore the last known-good state.%s' "$SHA" "$SRC_DESC" "$FROM" "$NOTE")"
 
           # The org may block Actions from opening PRs; fall back to a one-click link.
           if PR_URL="$(gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" --title "$TITLE" --body "$BODY" 2>/tmp/prerr)"; then
@@ -137,7 +165,7 @@ jobs:
             echo "### ⏪ Rollback PR opened"
             echo ""
             echo "- Reverting: \`$SHA\` ($SRC_DESC)"
-            echo "- Base: \`$BASE\`"
+            echo "- Base: \`$BASE\` (revert cut from \`$FROM\`)"
             echo "- Revert branch: \`$BRANCH\`"
             echo "$PR_LINE"
             echo ""
