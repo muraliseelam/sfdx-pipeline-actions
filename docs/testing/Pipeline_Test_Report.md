@@ -883,6 +883,34 @@ docs. Priority: **BUG-003** (three-dot prod delta or force re-assembly / refuse 
 
 ---
 
+## 4b. Execution results (2026-10-27)
+
+All 100 scenarios were executed by three workstreams against the live consumer
+and offline harnesses; every fix was pushed to `main` (CI green) and re-verified.
+Per-scenario evidence (PRs, run ids, org queries, harness commands):
+[WS1](results/WS1_Results.md) · [WS2](results/WS2_Results.md) · [WS3](results/WS3_Results.md).
+
+| Workstream | PASS | FAIL→FIXED | BLOCKED-HUMAN | BLOCKED-CLASSIFIER | N/A | Total |
+|---|---|---|---|---|---|---|
+| WS1 Entry, validation & deploy engine | 26 | 6 | 1 | 1 | 0 | 34 |
+| WS2 Promotion, state & ops runbooks | 30 | 2 | 0 | 0 | 1 | 33 |
+| WS3 Release, sync & platform | 28 | 4 | 1 | 0 | 0 | 33 |
+| **Total** | **84** | **12** | **2** | **1** | **1** | **100** |
+
+- **Findings:** BUG-001…BUG-007 fixed and verified (BUG-001 live: a test class
+  named `Mk$(echo …)Test.cls` is refused and never expanded). BUG-008 did not
+  reproduce; a regression test now guards it. New findings NEW-WS1-01…04,
+  NEW-WS2-01…06 and NEW-WS3-01…04 are fixed (NEW-WS3-01 — Redeploy's two-dot
+  delta — in `035caf5`, verified live: run 40618331570 diffed from the merge-base
+  and listed only the branch's own changes). NEW-WS1-05 (sandbox GitHub
+  Environments have no branch policy, so PR code can read sandbox credentials) is
+  a documented trade-off: restricting them would block PR validation.
+- **Needs a human:** TS-014 (a `gate: auto` admin push to `env/monday` was denied
+  by the agents' safety classifier — the script and expected output are in the WS1
+  results), TS-026(b) (a non-admin collaborator), TS-086 and the production halves
+  of TS-078/TS-081 (an approved production deploy — agents never approve the
+  `prod` gate). No production deploy was approved during this run.
+
 ## 5. Appendix — reproductions
 
 Tooling: Git Bash; base Python `C:\Users\mural\AppData\Local\Programs\Python\Python312\python.exe`
