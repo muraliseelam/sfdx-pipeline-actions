@@ -16,7 +16,7 @@ live scenario ran; `526f8e5` and `65fc385` followed (see *Fixes pushed*).
 | BLOCKED-CLASSIFIER | 1 |
 | **Total** | **34** |
 
-Offline suite: `tests/test_deploy_engine.py` 91 checks, `tests/test_config_matrix.py` 95 checks,
+Offline suite: `tests/test_deploy_engine.py` 95 checks, `tests/test_config_matrix.py` 95 checks,
 `PYTHONUTF8=1 bash scripts/validate.sh` → *All checks passed* after every fix (and after rebasing
 onto WS3's `069095f`). Against the pre-fix tree (`8fd014f`) the same deploy-engine suite fails
 16 checks — including the two where the injected `touch` **ran** — and the matrix fails 3
@@ -87,7 +87,7 @@ PR/run numbers are in `muraliseelam/sfdx-pipeline-example`.
   again). Offline: `test_deploy_action` (both gated failure shapes).
 
 ### NEW-WS1-02 — `prod-release.yml` interpolates the dispatch `version` into `run:`; a crafted version empties the release proof
-- **Severity:** MEDIUM · **Category:** injection / release integrity · **Owner:** WS3 · **Status:** CONFIRMED offline, OPEN (cross-workstream request 1)
+- **Severity:** MEDIUM · **Category:** injection / release integrity · **Owner:** WS3 · **Status:** CONFIRMED offline, FIXED by WS3 in `e9f9d1b` (re-verified below)
 - **Where:** `.github/workflows/prod-release.yml` job `plan` step `ref`
   (`echo "ref=${{ steps.cfg.outputs.release_prefix }}${{ inputs.version }}" …`) and job
   `assemble` step "Determine version + configure git" (`V="${{ inputs.version }}"`). Still
@@ -100,7 +100,11 @@ PR/run numbers are in `muraliseelam/sfdx-pipeline-example`.
   workflow's `contents: write` / `pull-requests: write` token.
 - **Evidence:** `bash scratchpad/ws1/new02.sh` renders the real step the way the runner
   does → `step rc=0`, GITHUB_OUTPUT = `chain_statuses=` / `ref=release/x`.
-- **Fix:** see cross-workstream request 1.
+- **Fix:** see cross-workstream request 1 — applied by WS3 in `e9f9d1b` (`VERSION` /
+  `RELEASE_PREFIX` through `env:`, version checked against `[A-Za-z0-9._-]`). Re-running the
+  same hostile version against the fixed step: `::error::version '…' may use only letters,
+  digits and . _ -`, rc 1, nothing written to GITHUB_OUTPUT; no `run:` block of
+  `prod-release.yml` contains `${{` any more.
 
 ### NEW-WS1-03 — `approved` survived a failed deploy, so re-adding it did nothing
 - **Severity:** LOW · **Category:** operability · **Owner:** WS1 · **Status:** CONFIRMED live, FIXED `65fc385`
@@ -116,6 +120,24 @@ PR/run numbers are in `muraliseelam/sfdx-pipeline-example`.
   (`PROJ111Test.noBlocker - … Expected: 0, Actual: 1`, nothing deployed) and
   `github-actions[bot]` removed `approved` at 01:09:29Z. Marker deleted, `approved` added
   again → run 40613404185 deployed and merged.
+
+### CW-1 / NEW-WS2-01 (from WS2) — `approved` survived a deploy the guard refused
+- **Severity:** LOW · **Category:** operability · **Owner:** WS1 (`deploy.yml`) · **Status:** CONFIRMED (WS2, consumer PR #66), FIXED `245021f`
+- **Where:** `.github/workflows/deploy.yml` `guards` job. When the pre-deploy guard refused
+  (PR closed or moved, conflicts, chain order, validation not green) the label stayed, so
+  re-adding it did nothing — the same gap as NEW-WS1-03 one job earlier.
+- **Fix:** step "Drop approved after a refused deploy" (`if: failure()`), only removing the
+  label; the guard has already commented why. Offline: `test_deploy_workflow` (both jobs'
+  drop steps exist, are failure-gated, and — run with a fake `gh` — issue exactly
+  `api -X DELETE repos/<repo>/issues/<pr>/labels/approved`).
+- **Verified live:** PR #119 (PROJ-112, field). Validation green for `99266f48`; `approved`
+  added at 01:38:35Z and a new commit `c85bb051` pushed 2 s later. Deploy run 40616263254:
+  guard step failed (`PR #119 head moved: c85bb051… != 99266f48…`, PR comment "⛔ Cannot
+  deploy to `int` — this PR's head is now `c85bb051` …"), then *Drop approved after a refused
+  deploy* = success and `github-actions[bot]` unlabeled `approved` at 01:39:14Z (approve-guard
+  had kept it — the approved head was green — so the guards job is what removed it). After
+  the new head's validation (40616270229) went green, adding `approved` again started run
+  40616477871, which deployed and merged (`deployed:int`).
 
 ### NEW-WS1-04 — `profiles.py` only finds Profiles / Permission Sets under `<source_path>/main/default`
 - **Severity:** LOW · **Category:** portability · **Owner:** WS1 · **Status:** CONFIRMED (code + offline), FIXED `65fc385`
@@ -144,6 +166,7 @@ PR/run numbers are in `muraliseelam/sfdx-pipeline-example`.
 | `b439e8b` | Deploy: keep Apex test names out of the shell (all deploy-action `run:` values via `env:`; non-Apex class names refused); audit the deployed commit (`to_sha`); `node_version` rejects paths; `specified_tests.py` suite + rendered-run-block injection tests (BUG-001/004/005/006/007) |
 | `526f8e5` | Deploy report: say when Salesforce refused a gated deploy's quick deploy (NEW-WS1-01); `profiles.py` git tree path uses `/`; tests for TS-004/011/012/024/025/033/034 |
 | `65fc385` | Deploy: drop `approved` after a failed deploy (NEW-WS1-03); `profiles.py` finds profiles outside `main/default` (NEW-WS1-04) |
+| `245021f` | Deploy: drop `approved` after a refused deploy too — `guards` job (WS2's CW-1 / NEW-WS2-01) |
 
 ## Cross-workstream requests
 
@@ -195,7 +218,7 @@ No `validate.sh` hook is needed: the new checks live in `tests/test_deploy_engin
 
 ## Consumer cleanup
 
-- PRs: #91, #93, #94, #98, #108 merged into `int` by the pipeline (`deployed:int`; none
+- PRs: #91, #93, #94, #98, #108, #119 merged into `int` by the pipeline (`deployed:int`; none
   reached `deployed:stage`, so no `hold` needed); #95, #96, #97, #99, #105, #107 closed.
   Stray `bypass-quality-gates` removed from #98. No WS1 PR is open and no WS1 run is in
   progress.
@@ -204,9 +227,9 @@ No `validate.sh` hook is needed: the new checks live in `tests/test_deploy_engin
 - Branches created and left in place (the brief forbids deleting remote branches):
   `feature/PROJ-101-field`, `-102-apex100`, `-103-lowcov-relaxcfg`, `-104-exact85`,
   `-105-notest`, `-106-inject`, `-107-bypass`, `-108-delete-absent`, `-109-gated`,
-  `-110-unprotected-base`, `-111-deploy-fails`, and `ws1/ts022-unprotected-helper`
+  `-110-unprotected-base`, `-111-deploy-fails`, `-112-guard-refusal`, and `ws1/ts022-unprotected-helper`
   (unprotected; its config is never trusted).
-- `int` org: PROJ101__c, PROJ102(+Test), PROJ104(+Test), PROJ107(+Test), PROJ111(+Test)
+- `int` org: PROJ101__c, PROJ112__c, PROJ102(+Test), PROJ104(+Test), PROJ107(+Test), PROJ111(+Test)
   deployed through the pipeline (normal story flow). No settings, protection, environments or labels changed;
   `env/monday` untouched (the push was denied). Check-only calibration validations in
   `sfp-int` deployed nothing.
