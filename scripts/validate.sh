@@ -11,12 +11,12 @@
 #   4. every internal `uses:` points at a path that actually exists
 #   5. no reusable workflow calls sf-pipeline/scripts/ or sf-setup/ directly
 #   6. internal references all use the same owner/repo and the same ref
-#   7-10. portability suite, example consumer vs example config, doc links,
+#   7-10. portability suite (7b deploy engine, 7c promotion + ops runbooks),
+#         example consumer vs example config, doc links,
 #         an example caller for every reusable workflow
 #  11. every composite-action output a workflow or action reads is declared
 #  12. branch protection leaves no pipeline branch open
 #  12b. the release train ships only proven content, never behind production
-#  12c. the promotion steps and the ops runbooks behave as documented
 #  13. the example CODEOWNERS covers the caller workflows and the config
 #
 # Usage: ./scripts/validate.sh
@@ -165,6 +165,22 @@ if [[ -f tests/test_deploy_engine.py ]]; then
   fi
 else
   fail "tests/test_deploy_engine.py is missing"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "7c. Promotion and ops runbooks"
+# The promotion's prepare / guard / merge steps and the Recreate, Rollback and
+# Redeploy runbooks, run on local repos with a fake gh — offline.
+# ---------------------------------------------------------------------------
+if [[ -f tests/test_promotion_ops.py ]]; then
+  if OUT=$(python3 tests/test_promotion_ops.py 2>&1); then
+    pass "$(grep -oE 'All [0-9]+ checks passed|skipped.*' <<< "$OUT" | head -1 || echo 'promotion and ops suite passed')"
+  else
+    fail "promotion and ops suite failed:"
+    grep -E '✗|expected|actual|Error' <<< "$OUT" | sed 's/^/    /'
+  fi
+else
+  fail "tests/test_promotion_ops.py is missing"
 fi
 
 # ---------------------------------------------------------------------------
@@ -361,22 +377,6 @@ if [[ -f tests/test_release_train.py ]]; then
   fi
 else
   fail "tests/test_release_train.py is missing"
-fi
-
-# ---------------------------------------------------------------------------
-head2 "12c. Promotion and ops runbooks"
-# The promotion's prepare / guard / merge steps and the Recreate, Rollback and
-# Redeploy runbooks, run on local repos with a fake gh — offline.
-# ---------------------------------------------------------------------------
-if [[ -f tests/test_promotion_ops.py ]]; then
-  if OUT=$(python3 tests/test_promotion_ops.py 2>&1); then
-    pass "$(grep -oE 'All [0-9]+ checks passed|skipped.*' <<< "$OUT" | head -1 || echo 'promotion and ops suite passed')"
-  else
-    fail "promotion and ops suite failed:"
-    grep -E '✗|expected|actual|Error' <<< "$OUT" | sed 's/^/    /'
-  fi
-else
-  fail "tests/test_promotion_ops.py is missing"
 fi
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,12 @@ jobs:
       - name: Environment-name portability suite
         run: python3 tests/test_config_matrix.py
 
+      - name: Promotion and ops runbooks suite
+        run: python3 tests/test_promotion_ops.py
+
+      - name: Release train suite
+        run: python3 tests/test_release_train.py
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest

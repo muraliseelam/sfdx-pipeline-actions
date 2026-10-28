@@ -103,7 +103,8 @@ NEW-WS1-02 (WS1's finding in a WS3 file: the dispatch `version` pasted into `run
 | `069095f` | Release train: three-dot prod delta, preflight refuses a release behind the prod branch, deploy job refuses if it moved during the gate (BUG-003); assemble refuses env-branch passengers and held content, `release-gather` outputs `held` (BUG-002); Sync Env Branches branch via env; new `tests/test_release_train.py` + validate.sh §12b |
 | `e9f9d1b` | Dispatch `version` through env and validated (NEW-WS1-02); Project Init summary via env; refusal chat message (NEW-WS3-03); `cut-release.sh` encoding (NEW-WS3-02); tests: no expressions in run blocks, 1/6-stage chains, Project Init dry run |
 | `492e2aa` | Docs: passenger refusal, never behind main, three-dot everywhere, version characters, consumer uses `prod`; WS1's doc changes (test-name refusal, audit `sha`, `node_version` values, `approved` removed after a failed deploy, profiles anywhere under `source_path`, `destructive_tests` format, sandbox-environment trade-off in SECURITY.md) |
-| this commit | validate.sh §12c runs WS2's `tests/test_promotion_ops.py` (62 checks, passing) — hooked ahead of a request; results file |
+| `36b87a3` | this results file; validate.sh runs WS2's `tests/test_promotion_ops.py` |
+| next commit | WS2's CW-2: the promotion/ops suite moved to validate.sh §7c and added to `ci.yml` (with the release-train suite); WS2's doc text (Recreate name rules + old tip, Redeploy gates from a protected branch + `profiles_mode` values, Rollback cut from the baseline / `-X no-renames` / SHA-only `ref`, Product_Documentation §18); reference-consumer config and qa/stage test levels corrected (TS-053/054 premise) |
 
 ## Cross-workstream requests
 
@@ -116,7 +117,7 @@ NEW-WS1-02 (WS1's finding in a WS3 file: the dispatch `version` pasted into `run
 
 ## Doc changes
 
-All made in `492e2aa` (User Guide, Product Documentation, sf-pipeline/README, SECURITY.md, example config). After WS2's results land: document `e55e029` (rollback revert cut from the baseline when the change reached production; `ref` must be a SHA; recreate name rules) and NEW-WS3-01 once fixed.
+All made in `492e2aa` (User Guide, Product Documentation, sf-pipeline/README, SECURITY.md, example config). WS2's doc changes (`e55e029`) are in the commit after `36b87a3`. Still to document when it lands: WS2's follow-up that makes Rollback refuse a change that never reached production under `delta_baseline: prod`, and NEW-WS3-01 once fixed.
 
 ## Remaining human steps (production gate)
 

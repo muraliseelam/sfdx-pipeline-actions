@@ -741,9 +741,12 @@ Cut a clean `feature/<name>` from the baseline when a branch is stale or corrupt
 
 | Input | Notes |
 |---|---|
-| `name` | Feature name or Jira key; normalised to `feature/<name>` |
+| `name` | Feature name or Jira key; normalised to `feature/<name>` — spaces become `-`, characters other than letters, digits, `.`, `_`, `/`, `-` are dropped, and path parts git refuses (empty, `.`, `..`, starting or ending with `.`, ending in `.lock`) are removed — never resolved, so `a/../b` becomes `a/b`, not `b` |
 | `base` | Optional; defaults to the pipeline baseline |
 | `confirm_reset` | Must be `true` to reset an **existing** branch — destructive |
+
+Resetting an existing branch records its previous tip in the run summary — the
+only way back to the discarded commits.
 
 ### Ops — Redeploy Feature Branch
 
@@ -756,9 +759,12 @@ this is not a promotion.
 | `feature_ref` | The branch or commit to deploy |
 | `environment` | int / qa / stage / … |
 | `dry_run` | **Defaults to `true`** (check-only). Uncheck for a real deploy |
-| `profiles_mode` | `config` (default — use `pipeline.config.yml`), or a one-off `full` / `incremental` |
+| `profiles_mode` | `config` (default — use `pipeline.config.yml`), or a one-off `full` / `incremental`; anything else is refused |
 
-Higher orgs still require their GitHub Environment reviewer.
+Higher orgs still require their GitHub Environment reviewer. The gates and
+environments come from the branch you dispatch from only if it is protected;
+otherwise from the default branch, so a branch can't relax the coverage gate for
+a real deploy.
 
 ### Ops — Rollback (revert + redeploy)
 
@@ -766,14 +772,22 @@ Reverts a deployed change and opens a **revert PR into the entry branch**, so th
 rollback flows through the same gate → approve → deploy → merge path — fully
 validated, reviewed and audited. Nothing is force-deployed.
 
+The revert is cut from the production baseline whenever it applies there, so the
+PR carries only the revert and can be promoted like any story. A change that never
+reached production can't be reverted on the baseline; the revert is then cut from
+`base` and **also carries every change on `base` that production doesn't have** —
+the PR says so; don't promote it with `deploy:<env>`.
+
 | Input | Notes |
 |---|---|
 | `pr_number` | A **merged** PR to revert — an open or closed-unmerged PR is refused, as there is nothing to roll back (merge commits use `-m 1` automatically) |
-| `ref` | Alternatively, a commit SHA |
+| `ref` | Alternatively, a commit SHA (7–40 hex characters) |
 | `base` | Branch to revert on; defaults to the entry branch. For a prod hotfix rollback, revert on the baseline branch |
 
-A conflicting revert stops with manual `git revert` instructions rather than
-guessing.
+Renames are not followed: the revert only touches the files the change touched.
+If `base` is behind the baseline, the PR also brings those baseline commits into
+`base`, as Sync Env Branches would. A conflicting revert stops with manual
+`git revert` instructions rather than guessing.
 
 Without a `PIPELINE_PAT` the revert PR is opened by the workflow token, and GitHub
 doesn't start workflows for it on its own: its PR Validation waits as *Action

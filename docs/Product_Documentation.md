@@ -310,8 +310,8 @@ says (it is merged unattended after every deploy); it still requires its
 | Environment | Branch | GitHub Environment | Reviewers | Test level | How a change arrives |
 |---|---|---|---|---|---|
 | int | `int` | `int` | no | `RunSpecifiedTests` | PR approved → real deploy → merge |
-| qa | `qa` | `qa` | optional | `NoTestRun` | `deploy:qa` label on the int PR |
-| stage | `stage` | `stage` | optional | `NoTestRun` | `deploy:stage` label on the int PR |
+| qa | `qa` | `qa` | optional | `RunSpecifiedTests` (default) or `NoTestRun` | `deploy:qa` label on the int PR |
+| stage | `stage` | `stage` | optional | `RunSpecifiedTests` (default) or `NoTestRun` | `deploy:stage` label on the int PR |
 | prod (validate) | `main` | `prod-validate` | **no** | `RunSpecifiedTests` | check-only, unattended |
 | prod (deploy) | `main` | `prod` | **yes** | quick-deploy (full deploy when the validation ran no tests, §11) | reviewer-gated release train |
 
@@ -503,26 +503,31 @@ explicitly only if you stamp a label the pipeline did not generate.
 
 The maintained example is
 [`sf-pipeline/pipeline.config.example.yml`](../sf-pipeline/pipeline.config.example.yml).
-The live reference consumer is `sfdx-pipeline-example`, which sets:
+The live reference consumer is `sfdx-pipeline-example`, which sets (org URLs and
+integration users left out):
 
 ```yaml
-delta_baseline: target          # diff against the PR's target env branch
+delta_baseline: prod            # every stage diffs against main
 baseline_branch: main
-environments:                   # all three gated on approval
-  - { name: int,   branch: int,   gh_environment: int,   sandbox: acmeint, gate: approval, test_level: RunSpecifiedTests }
-  - { name: qa,    branch: qa,    gh_environment: qa,    sandbox: acmeqa,  gate: approval, test_level: NoTestRun }
-  - { name: stage, branch: stage, gh_environment: stage, sandbox: acmestg, gate: approval, test_level: NoTestRun }
+environments:
+  - { name: int,   branch: int,   gh_environment: int,   gate: approval, test_level: RunSpecifiedTests }
+  - { name: qa,    branch: qa,    gh_environment: qa,    gate: on_demand }   # test_level defaults to RunSpecifiedTests
+  - { name: stage, branch: stage, gh_environment: stage, gate: on_demand }
 production:
   branch: main
   deploy_environment: prod      # required reviewers
   validate_environment: prod-validate
-  is_sandbox: true
-  sandbox: acmeprod
+  release_branch_prefix: "release/"
+  test_level: RunSpecifiedTests
+  destructive_tests: ""         # no canary: a no-Apex release is deployed in full after approval
 quality_gates: { apex_coverage: true }
 coverage_threshold: 85
-profiles_mode: incremental
-require_pr_approval: true
+profiles_mode: full
+allow_self_approval: true       # solo operator
 ```
+
+With no `test_level` on qa and stage, their promotions run `RunSpecifiedTests` and
+an Apex promotion goes through the coverage gate (`gated`), not `NoTestRun`.
 
 ---
 
@@ -1176,9 +1181,9 @@ actions. They sit **alongside** the promotion chain, not inside it.
 
 | Runbook | Purpose | Key inputs |
 |---|---|---|
-| **Recreate Feature Branch** | Cut a clean `feature/<name>` from the baseline when a branch is stale or corrupted | `name`, `base` (defaults to the pipeline baseline), `confirm_reset` (**required `true`** to reset an existing branch — destructive) |
-| **Redeploy Feature Branch** | Idempotently (re)deploy a feature branch's delta to any environment, to retry a flaky deploy or re-validate after an org change. Does **not** move any env branch | `feature_ref`, `environment`, `dry_run` (**default true** = check-only), `profiles_mode` (`config` = use `pipeline.config.yml`, the default · `full` · `incremental`) |
-| **Rollback** | Revert a deployed change and open a **revert PR** into the entry branch, so the rollback flows through the same gate → approve → deploy → merge path — fully validated, reviewed and audited. Nothing is force-deployed | `pr_number` of a **merged** PR (an unmerged one is refused; merge commits use `-m 1` automatically) **or** `ref`; `base` |
+| **Recreate Feature Branch** | Cut a clean `feature/<name>` from the baseline when a branch is stale or corrupted | `name` (normalised to `feature/<name>`; path parts git refuses are dropped, never resolved, so `a/../b` becomes `a/b`), `base` (defaults to the pipeline baseline), `confirm_reset` (**required `true`** to reset an existing branch — destructive; the run summary records the previous tip) |
+| **Redeploy Feature Branch** | Idempotently (re)deploy a feature branch's delta to any environment, to retry a flaky deploy or re-validate after an org change. Does **not** move any env branch | `feature_ref`, `environment`, `dry_run` (**default true** = check-only), `profiles_mode` (`config` = use `pipeline.config.yml`, the default · `full` · `incremental`; anything else is refused). Gates and environments come from the dispatch branch only if it is protected, else from the default branch |
+| **Rollback** | Revert a deployed change and open a **revert PR** into the entry branch, so the rollback flows through the same gate → approve → deploy → merge path — fully validated, reviewed and audited. Nothing is force-deployed. The revert is cut from the production baseline whenever it applies there, so the PR carries only the revert and can be promoted like any story; a change that never reached production is reverted on `base`, and that PR **also carries every change on `base` that production doesn't have** (it says so — don't promote it). Renames are not followed (`-X no-renames`) | `pr_number` of a **merged** PR (an unmerged one is refused; merge commits use `-m 1` automatically) **or** `ref` (a commit SHA, 7–40 hex characters); `base` |
 | **Sync env branches** | Merge `main` into every env branch; a conflict opens a PR cut from the production branch | dispatch it when branches drift, or when the post-release realign (§11) left a branch with conflicts |
 
 A conflicting revert stops with manual `git revert` instructions rather than
