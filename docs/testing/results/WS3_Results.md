@@ -19,7 +19,7 @@ taken and before the post-fix live re-runs; `e9f9d1b` / `492e2aa` followed (see 
 | **Total** | **33** |
 
 Partial remainders that need a human are noted on TS-078, TS-081 and TS-090 (their automatable
-part passed). Offline: new `tests/test_release_train.py` (69 checks, validate.sh §12b) and
+part passed). Offline: new `tests/test_release_train.py` (72 checks, validate.sh §12b and its own CI step) and
 extended `tests/test_branch_protection.py` (72 checks). Run against the pre-fix files
 (`scratchpad/ws3/prefix_check.sh`, ref `8fd014f`) the release-train suite fails 10 checks (all
 BUG-002 and BUG-003 checks) and stops at the missing deploy-job guard.
@@ -104,7 +104,9 @@ NEW-WS1-02 (WS1's finding in a WS3 file: the dispatch `version` pasted into `run
 | `e9f9d1b` | Dispatch `version` through env and validated (NEW-WS1-02); Project Init summary via env; refusal chat message (NEW-WS3-03); `cut-release.sh` encoding (NEW-WS3-02); tests: no expressions in run blocks, 1/6-stage chains, Project Init dry run |
 | `492e2aa` | Docs: passenger refusal, never behind main, three-dot everywhere, version characters, consumer uses `prod`; WS1's doc changes (test-name refusal, audit `sha`, `node_version` values, `approved` removed after a failed deploy, profiles anywhere under `source_path`, `destructive_tests` format, sandbox-environment trade-off in SECURITY.md) |
 | `36b87a3` | this results file; validate.sh runs WS2's `tests/test_promotion_ops.py` |
-| next commit | WS2's CW-2: the promotion/ops suite moved to validate.sh §7c and added to `ci.yml` (with the release-train suite); WS2's doc text (Recreate name rules + old tip, Redeploy gates from a protected branch + `profiles_mode` values, Rollback cut from the baseline / `-X no-renames` / SHA-only `ref`, Product_Documentation §18); reference-consumer config and qa/stage test levels corrected (TS-053/054 premise) |
+| `1e5d7bc` | WS2's CW-2: the promotion/ops suite moved to validate.sh §7c and added to `ci.yml` (with the release-train suite); WS2's doc text (Recreate name rules + old tip, Redeploy gates from a protected branch + `profiles_mode` values, Rollback cut from the baseline / `-X no-renames` / SHA-only `ref`, Product_Documentation §18); reference-consumer config and qa/stage test levels corrected (TS-053/054 premise) |
+| `08841c6` | Assemble accepts the env-branch squash of a story gathered into the same release (`release-gather` output `merges`), so "rebase on int, release both" isn't refused; docs for the lead's `245021f` (`approved` dropped after a guard refusal). Live regression: run 40617279512 (`MERGES` = PROJ-303's int/qa/stage squashes, assembled) |
+| `19bf030`, `39b3115` | Docs: WS2's `0d26349` — Rollback refuses a never-released change under `delta_baseline: prod`, in WS2's wording |
 
 ## Cross-workstream requests
 
@@ -117,7 +119,7 @@ NEW-WS1-02 (WS1's finding in a WS3 file: the dispatch `version` pasted into `run
 
 ## Doc changes
 
-All made in `492e2aa` (User Guide, Product Documentation, sf-pipeline/README, SECURITY.md, example config). WS2's doc changes (`e55e029`) are in the commit after `36b87a3`. WS2's follow-up `0d26349` (Rollback refuses a never-released change under `delta_baseline: prod`) is documented in the commit after `08841c6`. Still to document: NEW-WS3-01 once fixed.
+All made in `492e2aa` (User Guide, Product Documentation, sf-pipeline/README, SECURITY.md, example config). WS2's doc changes (`e55e029`, `0d26349`) are in `1e5d7bc`, `19bf030` and `39b3115`. Still to document: NEW-WS3-01 once fixed.
 
 ## Remaining human steps (production gate)
 
