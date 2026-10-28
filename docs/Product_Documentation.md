@@ -412,6 +412,8 @@ Three keys describe the code being shipped rather than policy, and still come
 from the change itself (`plan.py --code-config`): `source_path`, `api_version`
 and `node_version`. Because a PR can set them, they are validated — plain
 relative path / version characters only, or the run fails.
+`node_version` takes what `actions/setup-node` accepts (`22`, `22.x`, `20.11.1`,
+`lts/*`, `lts/iron`, `latest`); a leading `/` or `..` is refused, as for `source_path`.
 
 ### Top-level keys
 
@@ -808,13 +810,13 @@ Key properties:
 flowchart TD
     subgraph AS["action: assemble"]
         A1["<b>release-gather</b><br/>candidates: deployed:stage<br/>proof: bot deploy-&lt;env&gt; for EVERY stage<br/><i>an explicit stories list only narrows it</i>"]
-        A2["build/refresh release/&lt;version&gt;<br/>from main · merge each story's<br/>DEPLOYED commit, never the tip"]
+        A2["build/refresh release/&lt;version&gt;<br/>from main · merge each story's<br/>DEPLOYED commit, never the tip<br/><i>no passengers: env-branch commits, held content</i>"]
         A3["💬 summary prints a compare link<br/><i>it does NOT open the PR</i>"]
         A1 --> A2 --> A3
     end
 
     subgraph RL["action: release"]
-        R1["<b>preflight</b><br/>release PR open · authorized at its head · green<br/>mergeable into main · not deployed:prod"]
+        R1["<b>preflight</b><br/>release PR open · authorized at its head · green<br/>mergeable into main · not behind main · not deployed:prod"]
         R2["<b>validate</b> the preflight commit<br/>env: prod-validate — <b>NO reviewers</b><br/>check_only=true → captures deploy_id"]
         R3{{"⏸ <b>env: prod</b><br/>REQUIRED REVIEWERS"}}
         R4["<b>deploy</b><br/>QUICK-DEPLOY the validated deploy_id<br/><i>no id (no Apex): full deploy</i><br/>→ deployed:prod on the release PR"]
@@ -859,6 +861,15 @@ warning — otherwise a story deployed to int only could reach a release.
 - **Nothing unaccounted for.** Assemble refuses a release branch holding commits
   that no proven story accounts for (a story since put on hold, a hand push):
   assemble a new version, or delete the branch and re-run.
+- **Only the stories' own work.** A deployed commit can carry other stories as
+  its ancestors: a story branch that merged an env branch (`git merge origin/int`
+  to settle a conflict) holds every story squashed into int, held or never
+  selected, and one that merged another story's branch holds that story.
+  Assemble refuses a gathered commit that contains commits of an env branch which
+  `main` doesn't have, and refuses the release when any file a story on `hold`
+  changed carries that story's version (unless `main` already has it), however it
+  got there. Settle a conflict by rebasing the story on `main`, never by merging an
+  env branch into it.
 - **Nothing to release is an error**, not an empty release.
 
 ### One commit, end to end
@@ -873,6 +884,18 @@ counts only for the commit it approved. Preflight also refuses — before anythi
 is deployed — when branch protection would block the release PR's merge into
 `main` (`mergeStateStatus` `BLOCKED`, e.g. a required review is missing and only
 the label was given) or when it conflicts.
+
+**Never behind `main`.** The release branch is cut from `main`. Anything merged
+into `main` after assemble (a hotfix, a rollback) is not in the release, and
+deploying the release would undo it in production. Preflight therefore refuses a
+release PR that is behind `main` — it asks the compare API, since GitHub reports
+`BEHIND` only when protection requires up-to-date branches — and the deploy job
+checks again after the reviewer's approval, which can come hours later. Run
+**assemble** for the same version again: it merges `main` in and removes
+`prod-approved`, so authorize the new content. The production delta is
+computed three-dot as well, like every other stage — against the merge-base of
+`main` and the release, i.e. what assemble started from — so a component only
+`main` has is never turned into a deletion.
 
 ### No double deploy
 
@@ -995,7 +1018,12 @@ producing a `package.xml` and, where relevant, a `destructiveChanges.xml`.
 The resolved value surfaces as **`eff_baseline`** and is computed in
 `deploy.yml`, `pr-validation.yml` and `sf-promote-label.yml`, so a promotion
 deploys the same package as the entry deploy. The reference consumer `sfdx-pipeline-example`
-uses `target`.
+uses `prod`.
+
+**Every delta is three-dot** (`delta_merge_base: true`): PR validation, the entry
+deploy, promotions and both production jobs diff against the merge-base of the
+baseline and the branch, so a baseline that moved on after the branch was cut
+never turns its own new components into deletions.
 
 **A delta that can't be computed fails the run.** A deploy treats "no changes" as
 success and merges, so `delta.sh` fails instead of reporting no changes when
@@ -1027,6 +1055,13 @@ is pruned there.
 suite into the run. `NoTestRun` on qa/stage is safe precisely because int already
 validated with tests.
 
+Test names come from the Apex file names in the change. A changed class or trigger
+whose name is not an Apex identifier (letters, digits and underscores, starting with
+a letter) fails the validation before anything else runs, and the PR report says
+which. Test names — like every other value — reach the deploy script through the
+environment, never pasted into it, and so does the production canary
+(`destructive_tests`), which must likewise be Apex class names, separated by commas.
+
 ---
 
 ## 14. Profiles and permission sets
@@ -1039,6 +1074,9 @@ block into the job summary.
 |---|---|---|
 | `full` *(default)* | Deploy the complete Profile / Permission Set from source | Safest when every referenced component already exists in the target org |
 | `incremental` | Each Profile / Permission Set in the delta is compared with the ref the delta came from (`from_ref` — for PR validation, PR deploys and promotions the merge-base of the baseline and the branch) and keeps only the permission entries that were **added or changed** there; profile-level settings are kept only when they changed. A file that is new on the branch deploys in full. Comparing with the baseline's *tip* instead would treat an entry another change updated there as this branch's change and deploy it back to the older value | Deploys exactly what the branch changed; avoids "component does not exist" failures on orgs that lag behind |
+
+Profiles and permission sets are found anywhere under `source_path` (not only
+`main/default`).
 
 The *Redeploy Feature Branch* runbook exposes a `profiles_mode` override for
 one-off runs.
@@ -1108,6 +1146,10 @@ Every deploy / validate / promote / rollback records a structured entry via
    to the durable **`audit-log`** branch at `audit/audit-log.jsonl` — a permanent,
    greppable history. The append is best-effort and race-safe, so it can never
    fail a deploy.
+
+Each record's `sha` / `short_sha` is the commit that was deployed (for a PR
+deploy the same commit as `ref`). Records written before 2026-10-28 carry a
+pull_request run's temporary merge commit in `sha`; look those up by `ref`.
 
 ```bash
 git show audit-log:audit/audit-log.jsonl | jq 'select(.environment=="prod")'
@@ -1221,8 +1263,8 @@ Step-by-step onboarding instructions live in
 | `report` | The unified sticky PR comment |
 | `status` | Write `pr-validation` / `deploy-<env>` commit statuses |
 | `coverage` | Apex coverage gate |
-| `release-gather` | Collect the stories for a release — candidates by `release_label`, proven by the bot's `deploy-<env>` statuses for every stage — and the exact commit of each |
-| `release-preflight` | Verify the release PR exists, is authorized at its head, green, mergeable and not already deployed; outputs the head commit |
+| `release-gather` | Collect the stories for a release — candidates by `release_label`, proven by the bot's `deploy-<env>` statuses for every stage — and the exact commit of each, plus the branches on `hold` |
+| `release-preflight` | Verify the release PR exists, is authorized at its head, green, mergeable, not behind the prod branch and not already deployed; outputs the head commit |
 | `sync-branches` | Post-release realign: reset each env branch to `main` when that loses nothing, else merge `main` in; restores branch protection |
 | `jira` · `notify` | Integrations (no-ops when unconfigured) |
 

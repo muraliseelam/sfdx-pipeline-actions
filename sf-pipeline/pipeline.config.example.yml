@@ -122,7 +122,8 @@ production:
   # that validation can be quick-deployed; without it, the approved release is
   # deployed again with a full deploy.
   # Replace with the name of a small, stable, always-passing Apex test class in
-  # YOUR org. Leave blank if you do not have one.
+  # YOUR org. Leave blank if you do not have one. Apex class names only
+  # (letters, digits, underscores), separated by commas.
   destructive_tests: "MyStableSmokeTest"
 
   # Label the release train gathers PRs by. Defaults to `deployed:<name of the

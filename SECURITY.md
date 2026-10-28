@@ -74,6 +74,14 @@ The production stage is deliberately split into two GitHub Environments —
 quick-deploy). The human gate is only as strong as the reviewer list you
 configure on the `prod` environment. Configure it.
 
+Project Init limits `prod` and `prod-validate` to the production branch.
+Sandbox environments (`int`, `qa`, `stage`) are usable by any workflow in the
+repository, including a pull request's own copy of the caller workflows, so their
+org credentials are trusted to everyone with write access. Restricting them to
+protected branches would also block the pipeline's own PR validation (it runs on
+`refs/pull/<n>/merge`), so this is a deliberate trade-off: give the sandbox
+integration users only the permissions a deploy needs.
+
 ### Notifications are not a gate
 
 Chat notifications are best-effort telemetry. A failing or misconfigured chat

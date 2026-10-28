@@ -35,7 +35,7 @@ sf-pipeline/
 ├── status/            write the pr-validation / deploy-<env> commit statuses
 ├── coverage/          Apex coverage gate          → coverage-gate.py
 ├── release-gather/    collect the stories proven deployed to every stage, at their deployed commit
-├── release-preflight/ verify the release PR is authorized at its head, green, mergeable, not yet deployed
+├── release-preflight/ verify the release PR is authorized at its head, green, mergeable, not behind prod, not yet deployed
 ├── sync-branches/     post-release realign: reset or merge main into each env branch, keep protection
 ├── jira/              comment on + transition the story named in the branch
 ├── notify/            dispatch deploy notifications → scripts/notify.sh

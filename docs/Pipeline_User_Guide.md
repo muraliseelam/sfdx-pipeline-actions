@@ -648,7 +648,8 @@ from **Actions → Prod Release**.
 
 #### Step 1 — `action: assemble`
 
-Run the workflow with `action = assemble`.
+Run the workflow with `action = assemble`. `version` (blank = the ISO
+year.week) may use only letters, digits and `. _ -`; anything else is refused.
 
 It collects every story carrying `deployed:stage` that has not already shipped
 and that the pipeline really deployed to **every** stage (its own `deploy-<env>`
@@ -657,6 +658,14 @@ statuses — a hand-added label isn't enough), creates the release branch
 commits pushed to its branch later — and pushes it. The job summary lists each
 story with the commit released. Name stories in `stories` to release only those;
 each must still be proven, or the run fails.
+
+Assemble also refuses to ship another story as a passenger. A story branch that
+merged `int` (or another env branch) to settle a conflict carries every story
+squashed there; one that merged another story's branch carries that story. The
+run fails, naming the story and the commits or files involved, when a gathered
+commit holds env-branch commits `main` lacks, or when a story on `hold` would ship
+anyway. Settle conflicts by rebasing the story on `main`, then take it through
+the stages again.
 
 > **`assemble` does not open the release PR.** It prints a pre-filled compare link
 > and stops. Opening the PR is a deliberate human step, so someone reads the list
@@ -692,8 +701,9 @@ Run the workflow again with `action = release`, from the production branch.
 
 1. **Preflight** — confirms the release PR exists, is **authorized** at its
    current commit, is green, can merge into `main` under its branch protection,
-   and hasn't been deployed already. Its head commit is what gets validated,
-   deployed and merged.
+   isn't behind `main` (a hotfix or rollback merged there after assemble would
+   otherwise be undone in production), and hasn't been deployed already. Its head
+   commit is what gets validated, deployed and merged.
 2. **Validate** — a check-only validation against production in the **ungated**
    `validate_environment`, producing a quick-deploy id. No reviewer is disturbed
    for a run that might fail. A release without Apex is validated too (no tests);
@@ -791,7 +801,9 @@ shows the conflicts to resolve.
 commit. Get validation passing, then approve again. The pipeline also removes it,
 with a comment, when the person who added it may not approve: on the entry PR the
 label needs a repo admin who isn't the PR's author (unless `allow_self_approval:
-true`), on a later stage write access.
+true`), on a later stage write access. A failed deploy (validation, the coverage
+gate, or a quick deploy Salesforce refused) removes it too, so adding it again
+starts a new deploy.
 
 ### *Not deployed to `<env>`* — a new commit was pushed after … was approved
 
@@ -909,6 +921,7 @@ refusals:
 | *approved, but not at its current commit* | The release branch changed after the review. Approve again, or add `prod-approved` |
 | *can't merge into `main` yet — branch protection blocks it* | Usually a required review: the label alone doesn't meet it (Part 1, Step 8). Nothing was deployed |
 | *conflicts with `main`* | Assemble the release again |
+| *N commit(s) behind `main`* | Something merged into `main` after assemble. Assemble the same version again (it merges `main` in and removes `prod-approved`), authorize it again, then release. The deploy job refuses the same way if `main` moves while it waits for approval |
 | *carries `deployed:prod`* | That release is already in production. Re-run the earlier run's failed finalize job instead |
 
 ### The deploy guard reports a merge conflict
@@ -931,8 +944,8 @@ left, the deploy succeeds without deploying anything.
 A validated job can be quick-deployed once, within 10 days, if it ran Apex tests
 and the org hasn't changed under it — another deploy may have landed between the
 validation and the quick deploy. Nothing was deployed. For a promotion, re-add the
-label; for an entry deploy, approve again (or remove and re-add `approved`) — it
-validates afresh. For a release, check **Setup → Deployment Status** in
+label; for an entry deploy, add `approved` again (a failed deploy removes it) or
+approve again — it validates afresh. For a release, check **Setup → Deployment Status** in
 production, then run **Prod Release** with `action: release` again: it validates
 again and asks for approval again. There is no automatic fallback.
 
