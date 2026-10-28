@@ -765,7 +765,9 @@ this is not a promotion.
 Higher orgs still require their GitHub Environment reviewer. The gates and
 environments come from the branch you dispatch from only if it is protected;
 otherwise from the default branch, so a branch can't relax the coverage gate for
-a real deploy.
+a real deploy. The delta is the branch's own changes since it left the baseline
+(three-dot), the same package the entry deploy built: redeploying a branch that is
+older than `main` never deletes what `main` gained since.
 
 ### Ops — Rollback (revert + redeploy)
 

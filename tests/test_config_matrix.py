@@ -340,6 +340,14 @@ def test_unsafe_values():
     for bad in ("force-app; echo x", "force-app\necho x"):
         p = plan(MINIMAL, "outputs", code=f"source_path: {json.dumps(bad)}\n", expect_fail=True)
         check(f"rejects source_path {bad!r}", p.returncode != 0, True)
+    canary = MINIMAL.replace("  validate_environment: prod-validate",
+                             "  validate_environment: prod-validate\n  destructive_tests: {}")
+    for good, want in (('""', ""), ("CanaryTest", "CanaryTest"), ('"ATest, B_Test"', "ATest, B_Test")):
+        o = plan(canary.format(good), "outputs")
+        check(f"accepts destructive_tests {good}", o["prod_destructive_tests"], want)
+    for bad in ('"CanaryTest; id"', '"$(id)"', '"1Test"'):
+        p = plan(canary.format(bad), "outputs", expect_fail=True)
+        check(f"rejects destructive_tests {bad}", (p.returncode != 0, "destructive_tests" in p.stderr), (True, True))
 
 
 def test_outputs_declared():

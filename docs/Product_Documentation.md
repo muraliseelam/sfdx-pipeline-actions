@@ -1066,7 +1066,8 @@ whose name is not an Apex identifier (letters, digits and underscores, starting 
 a letter) fails the validation before anything else runs, and the PR report says
 which. Test names — like every other value — reach the deploy script through the
 environment, never pasted into it, and so does the production canary
-(`destructive_tests`), which must likewise be Apex class names, separated by commas.
+(`destructive_tests`), which must likewise be Apex class names, separated by commas
+or spaces — `plan.py` refuses anything else when it reads the config.
 
 ---
 
@@ -1183,7 +1184,7 @@ actions. They sit **alongside** the promotion chain, not inside it.
 | Runbook | Purpose | Key inputs |
 |---|---|---|
 | **Recreate Feature Branch** | Cut a clean `feature/<name>` from the baseline when a branch is stale or corrupted | `name` (normalised to `feature/<name>`; path parts git refuses are dropped, never resolved, so `a/../b` becomes `a/b`), `base` (defaults to the pipeline baseline), `confirm_reset` (**required `true`** to reset an existing branch — destructive; the run summary records the previous tip) |
-| **Redeploy Feature Branch** | Idempotently (re)deploy a feature branch's delta to any environment, to retry a flaky deploy or re-validate after an org change. Does **not** move any env branch | `feature_ref`, `environment`, `dry_run` (**default true** = check-only), `profiles_mode` (`config` = use `pipeline.config.yml`, the default · `full` · `incremental`; anything else is refused). Gates and environments come from the dispatch branch only if it is protected, else from the default branch |
+| **Redeploy Feature Branch** | Idempotently (re)deploy a feature branch's delta to any environment, to retry a flaky deploy or re-validate after an org change. Does **not** move any env branch | `feature_ref`, `environment`, `dry_run` (**default true** = check-only), `profiles_mode` (`config` = use `pipeline.config.yml`, the default · `full` · `incremental`; anything else is refused). Gates and environments come from the dispatch branch only if it is protected, else from the default branch. The delta is three-dot (the branch's own changes), so an old branch never deletes the baseline's newer components |
 | **Rollback** | Revert a deployed change and open a **revert PR** into the entry branch, so the rollback flows through the same gate → approve → deploy → merge path — fully validated, reviewed and audited. Nothing is force-deployed. The revert is cut from the production baseline whenever it applies there, so the PR carries only the revert and can be promoted like any story; a change that never reached production is **refused** under `delta_baseline: prod` (its revert PR would carry every unreleased change on `base`) — fix forward, remove it by hand, or use `delta_baseline: target`, where it is reverted on `base` with a warning not to promote it. Renames are not followed (`-X no-renames`) | `pr_number` of a **merged** PR (an unmerged one is refused; merge commits use `-m 1` automatically) **or** `ref` (a commit SHA, 7–40 hex characters); `base` |
 | **Sync env branches** | Merge `main` into every env branch; a conflict opens a PR cut from the production branch | dispatch it when branches drift, or when the post-release realign (§11) left a branch with conflicts |
 

@@ -49,6 +49,11 @@ SAFE_VALUE = {
     "node_version": re.compile(r"^(?!/)(?!.*\.\.)[A-Za-z0-9.*/_-]+$"),
 }
 
+# production.destructive_tests: Apex test class names, comma/space separated
+# (blank = none). The deploy step passes them through env, but a name that isn't
+# an Apex identifier is a config mistake, so refuse it here, loudly.
+APEX_TEST_LIST = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*([\s,]+[A-Za-z][A-Za-z0-9_]*)*)?\s*$")
+
 
 def load_config(path):
     try:
@@ -131,6 +136,11 @@ def cmd_outputs(cfg, code_cfg=None):
     prod = cfg.get("production", {}) or {}
     notif = cfg.get("notifications", {}) or {}
     code = code_values(cfg, code_cfg)
+    destructive_tests = str(prod.get("destructive_tests") or "")
+    if not APEX_TEST_LIST.match(destructive_tests):
+        print(f"::error::pipeline.config.yml: `production.destructive_tests: {destructive_tests}` is not "
+              f"allowed. List Apex test class names only, separated by commas or spaces.", file=sys.stderr)
+        sys.exit(1)
 
     def flag(v, default=True):
         return "true" if (default if v is None else bool(v)) else "false"
@@ -155,7 +165,7 @@ def cmd_outputs(cfg, code_cfg=None):
             "prod_deploy_env": prod.get("deploy_environment", ""),
             "prod_validate_env": prod.get("validate_environment", ""),
             "prod_test_level": prod.get("test_level", "RunSpecifiedTests"),
-            "prod_destructive_tests": prod.get("destructive_tests", ""),
+            "prod_destructive_tests": destructive_tests.strip(),
             "release_prefix": prod.get("release_branch_prefix", "release/"),
             "q_apex_coverage": flag(q.get("apex_coverage")),
             "coverage_threshold": str(cfg.get("coverage_threshold", 75)),

@@ -107,6 +107,9 @@ jobs:
           test_level: ${{ needs.plan.outputs.test_level }}
           manifest_title: "Redeploy ${{ inputs.feature_ref }}"
           baseline_branch: ${{ needs.plan.outputs.baseline_branch }}
+          # Three-dot: only the branch's own changes. A two-dot diff of a branch
+          # older than the baseline would delete the baseline's newer components.
+          delta_merge_base: "true"
           source_path: ${{ needs.plan.outputs.source_path }}
           api_version: ${{ needs.plan.outputs.api_version }}
           node_version: ${{ needs.plan.outputs.node_version }}
