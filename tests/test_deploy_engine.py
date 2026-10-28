@@ -507,6 +507,31 @@ def test_deploy_action():
                   (0, True, True))
 
 
+def test_deploy_workflow():
+    print("\n\033[1mdeploy.yml — a refused or failed deploy drops `approved`\033[0m")
+    import yaml
+    jobs = yaml.safe_load(open(os.path.join(ROOT, ".github", "workflows", "deploy.yml"), encoding="utf-8"))["jobs"]
+    for job, cond in (("guards", "failure()"), ("deploy", "steps.deploy.outcome == 'failure'")):
+        drops = [s for s in jobs[job]["steps"] if str(s.get("name", "")).startswith("Drop approved")]
+        check(f"the {job} job drops `approved` when it fails",
+              [cond in str(s.get("if", "")) and "failure()" in str(s.get("if", "")) for s in drops], [True])
+        if not drops or not shutil.which("bash"):
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "bin"))
+            with open(os.path.join(tmp, "bin", "gh"), "w", newline="\n") as fh:
+                fh.write('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$GH_ARGS"\n')
+            os.chmod(os.path.join(tmp, "bin", "gh"), 0o755)
+            with open(os.path.join(tmp, "step.sh"), "w", newline="\n") as fh:
+                fh.write(drops[0]["run"])
+            args = os.path.join(tmp, "gh-args")
+            p = run(["bash", "step.sh"], tmp, {"REPO": "o/r", "PR": "7", "GH_TOKEN": "x", "GH_ARGS": args,
+                                                "PATH": os.path.join(tmp, "bin") + os.pathsep + os.environ["PATH"]})
+            check(f"and removes only that label ({job})",
+                  (p.returncode, open(args).read().split()),
+                  (0, ["api", "-X", "DELETE", "repos/o/r/issues/7/labels/approved"]))
+
+
 def git(cwd, *args):
     return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args], cwd=cwd,
                           input="", capture_output=True, text=True, check=True).stdout.strip()
@@ -643,7 +668,8 @@ def test_audit():
 def main():
     print("Deploy engine suite")
     for fn in (test_prune, test_deploy_report, test_coverage_gate, test_manifest_to_md,
-               test_specified_tests, test_deploy_action, test_delta, test_profiles_incremental,
+               test_specified_tests, test_deploy_action, test_deploy_workflow, test_delta,
+               test_profiles_incremental,
                test_audit):
         fn()
     print()

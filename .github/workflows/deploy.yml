@@ -165,6 +165,17 @@ jobs:
           is_entry: ${{ needs.ctx.outputs.gate == 'auto' && 'false' || needs.plan.outputs.is_entry }}
           bypass_active: ${{ needs.bypass.outputs.active }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+      # A refused deploy (PR closed or moved, conflicts, chain order, validation
+      # not green) drops `approved`, so adding it again re-runs the guards. The
+      # guard has already commented why.
+      - name: Drop approved after a refused deploy
+        if: ${{ failure() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.ctx.outputs.pr_number }}
+        run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/approved" >/dev/null 2>&1 || true
 
   # ---- REAL deploy to the org, then open the merge gate -----------------------
   deploy:
