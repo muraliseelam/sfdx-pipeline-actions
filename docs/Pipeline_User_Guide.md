@@ -773,16 +773,18 @@ Reverts a deployed change and opens a **revert PR into the entry branch**, so th
 rollback flows through the same gate → approve → deploy → merge path — fully
 validated, reviewed and audited. Nothing is force-deployed.
 
-The revert is cut from the production baseline whenever it applies there, so the
-PR carries only the revert and can be promoted like any story. A change that never
-reached production can't be reverted on the baseline. Under the default
-`delta_baseline: prod` the runbook then **refuses** — before creating a branch or a
-PR — because a revert into `base` would deploy and promote every change on `base`
-that production doesn't have; it says how to take the change out instead: fix
-forward with a new story cut from the baseline, remove its components from the
-orgs by hand and revert the commit on the env branches, or use
-`delta_baseline: target`. Under `target` the revert is cut from `base` (its package
-is computed against `base`, so it stays clean) and the PR says not to promote it.
+The revert is cut from the production baseline whenever it applies there, so the PR
+carries only the revert and can be promoted like any story. A change that **never
+reached production** can only be reverted on `base`, and under `delta_baseline: prod`
+(the default) such a PR would deploy — and promote — every unreleased change on
+`base` with it, so the runbook **refuses** it before creating any branch or PR. To
+take such a change out: fix forward with a new story; or remove its components from
+the affected orgs by hand and revert the commit on the env branches; or use
+`delta_baseline: target`, where the revert is cut from `base`, its package is
+computed against `base` and stays clean (the PR still warns not to promote it,
+since its branch carries `base`'s other changes). A revert that conflicts on the
+baseline is refused the same way under `prod`, with the commands to resolve it on a
+branch cut from the baseline.
 
 | Input | Notes |
 |---|---|
@@ -790,19 +792,21 @@ is computed against `base`, so it stays clean) and the PR says not to promote it
 | `ref` | Alternatively, a commit SHA (7–40 hex characters) |
 | `base` | Branch to revert on; defaults to the entry branch. For a prod hotfix rollback, revert on the baseline branch |
 
+The runbook reads `delta_baseline` and the branch names from the branch you
+dispatch from only if it is protected; otherwise from the default branch.
+
 Renames are not followed: the revert only touches the files the change touched.
 If `base` is behind the baseline, the PR also brings those baseline commits into
 `base`, as Sync Env Branches would. A conflicting revert stops with manual
-`git revert` instructions (for the baseline, on a branch cut from it) rather than
-guessing. The gates and branch names come from a protected branch, so a branch's
-own config can't change `delta_baseline` to get past the refusal.
+`git revert` instructions rather than guessing.
 
 Without a `PIPELINE_PAT` the revert PR is opened by the workflow token, and GitHub
 doesn't start workflows for it on its own: its PR Validation waits as *Action
 required* until a maintainer clicks **Approve and run**.
 
-With `delta_baseline: prod` a change that never reached production has nothing to
-delete relative to production, which is why the runbook refuses it (above).
+With `delta_baseline: prod` such a revert is refused (above): relative to production
+there is nothing to delete, so it could not remove the components from the env orgs
+anyway.
 
 ### Sync env branches
 
