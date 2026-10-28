@@ -117,7 +117,7 @@ NEW-WS1-02 (WS1's finding in a WS3 file: the dispatch `version` pasted into `run
 
 ## Doc changes
 
-All made in `492e2aa` (User Guide, Product Documentation, sf-pipeline/README, SECURITY.md, example config). WS2's doc changes (`e55e029`) are in the commit after `36b87a3`. Still to document when it lands: WS2's follow-up that makes Rollback refuse a change that never reached production under `delta_baseline: prod`, and NEW-WS3-01 once fixed.
+All made in `492e2aa` (User Guide, Product Documentation, sf-pipeline/README, SECURITY.md, example config). WS2's doc changes (`e55e029`) are in the commit after `36b87a3`. WS2's follow-up `0d26349` (Rollback refuses a never-released change under `delta_baseline: prod`) is documented in the commit after `08841c6`. Still to document: NEW-WS3-01 once fixed.
 
 ## Remaining human steps (production gate)
 

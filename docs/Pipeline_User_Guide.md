@@ -775,9 +775,14 @@ validated, reviewed and audited. Nothing is force-deployed.
 
 The revert is cut from the production baseline whenever it applies there, so the
 PR carries only the revert and can be promoted like any story. A change that never
-reached production can't be reverted on the baseline; the revert is then cut from
-`base` and **also carries every change on `base` that production doesn't have** —
-the PR says so; don't promote it with `deploy:<env>`.
+reached production can't be reverted on the baseline. Under the default
+`delta_baseline: prod` the runbook then **refuses** — before creating a branch or a
+PR — because a revert into `base` would deploy and promote every change on `base`
+that production doesn't have; it says how to take the change out instead: fix
+forward with a new story cut from the baseline, remove its components from the
+orgs by hand and revert the commit on the env branches, or use
+`delta_baseline: target`. Under `target` the revert is cut from `base` (its package
+is computed against `base`, so it stays clean) and the PR says not to promote it.
 
 | Input | Notes |
 |---|---|
@@ -788,16 +793,16 @@ the PR says so; don't promote it with `deploy:<env>`.
 Renames are not followed: the revert only touches the files the change touched.
 If `base` is behind the baseline, the PR also brings those baseline commits into
 `base`, as Sync Env Branches would. A conflicting revert stops with manual
-`git revert` instructions rather than guessing.
+`git revert` instructions (for the baseline, on a branch cut from it) rather than
+guessing. The gates and branch names come from a protected branch, so a branch's
+own config can't change `delta_baseline` to get past the refusal.
 
 Without a `PIPELINE_PAT` the revert PR is opened by the workflow token, and GitHub
 doesn't start workflows for it on its own: its PR Validation waits as *Action
 required* until a maintainer clicks **Approve and run**.
 
-With `delta_baseline: prod`, reverting a change that never reached production
-removes it from the branch but **not** from the env org: relative to production
-there is nothing to delete. Delete such components in the org by hand, or use
-`delta_baseline: target`.
+With `delta_baseline: prod` a change that never reached production has nothing to
+delete relative to production, which is why the runbook refuses it (above).
 
 ### Sync env branches
 
