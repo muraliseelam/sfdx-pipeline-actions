@@ -176,6 +176,9 @@ def test_resolve_by_branch():
     o = plan(WEEKDAYS, "resolve", "some/random/branch")
     check("an unmapped branch is inert, not an error", o["r_is_stage"], "false")
 
+    o = plan(WEEKDAYS, "resolve", "tue")
+    check("resolve is keyed by branch: an env NAME is inert", (o["r_name"], o["r_is_stage"]), ("", "false"))
+
 
 def test_prdeploy_chain():
     print("\n\033[1mprdeploy (environment -> deploy target) — used by promotion\033[0m")
@@ -227,6 +230,7 @@ def test_minimal_config():
     check("works with one environment", o["env_count"], "1")
     check("entry branch is that environment", o["entry_branch"], "sandbox")
     check("release label follows it", o["release_label"], "deployed:sandbox")
+    check("it is also the last environment", o["last_env"], "sandbox")
     check("gh_environment defaults to the name", json.loads(o["auto_json"])[0]["gh_environment"], "sandbox")
     check("test level defaults", json.loads(o["auto_json"])[0]["test_level"], "RunSpecifiedTests")
     check("coverage threshold defaults", o["coverage_threshold"], "75")
@@ -234,6 +238,9 @@ def test_minimal_config():
     o = plan(MINIMAL, "prdeploy", "sandbox")
     check("the only stage is the entry stage", o["r_is_entry"], "true")
     check("and has no next stage", o["r_next_name"], "")
+    check("and nothing before it", (o["r_require_env"], o["r_require_envs"]), ("", ""))
+    o = plan(MINIMAL, "resolve", "sandbox")
+    check("its branch resolves to it", (o["r_name"], o["r_gate"]), ("sandbox", "approval"))
 
 
 def test_gate_defaults():

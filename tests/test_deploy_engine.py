@@ -117,9 +117,12 @@ def test_prune():
 
         # Folder-based types are never listed, so never pruned.
         calls.clear()
-        open(path, "w", encoding="utf-8").write(manifest({"Report": ["Sales/Pipeline"]}))
-        check("a folder-based type is kept", pd.prune(path, lister({"Report": []})), [])
+        open(path, "w", encoding="utf-8").write(manifest({"Report": ["Sales/Pipeline"],
+                                                          "Dashboard": ["Sales/Overview"]}))
+        check("a folder-based type is kept", pd.prune(path, lister({"Report": [], "Dashboard": []})), [])
         check("without even listing it", calls, [])
+        check("Report and Dashboard deletions both stay",
+              members_of(path), {"Report": ["Sales/Pipeline"], "Dashboard": ["Sales/Overview"]})
 
         # Encoding and case differences keep the deletion (the safe direction).
         open(path, "w", encoding="utf-8").write(manifest({
@@ -131,6 +134,10 @@ def test_prune():
             "CustomLabel": ["E2E_Recovery"],
         }))
         check("URL-encoded and case-different names match", skipped, [])
+        open(path, "w", encoding="utf-8").write(manifest({"CustomLabel": ["My%5FLabel", "my_label", "Absent"]}))
+        skipped = pd.prune(path, lister({"CustomLabel": ["My_Label"]}))
+        check("%5F and case variants of a present name are deleted; only the absent one is skipped",
+              (skipped, members_of(path)), ([("CustomLabel", "Absent")], {"CustomLabel": ["My%5FLabel", "my_label"]}))
 
         # Spaces and XML-escaped characters survive the rewrite.
         open(path, "w", encoding="utf-8").write(manifest({
@@ -269,6 +276,14 @@ def test_coverage_gate():
         check("but only records it once Salesforce rejected the deploy", p.returncode, 0)
         cov = json.load(open(os.path.join(tmp, ".deploy", "coverage.json")))
         check("the measurement still reaches the report", (cov["measured"], cov["percent"]), (True, 81.82))
+
+        # The boundary: exactly the threshold passes (17 of 20 lines = 85.00%).
+        for covered, rc in ((17, 0), (16, 1)):
+            json.dump({"status": 0, "result": {"details": {"runTestResult": {"codeCoverage": [
+                {"name": "PROJ104", "numLocations": 20, "numLocationsNotCovered": 20 - covered}]}}}},
+                open(os.path.join(tmp, "deploy-result.json"), "w"))
+            p = run([sys.executable, COVERAGE_GATE], tmp, env)
+            check(f"{covered * 5}.00% against an 85% gate exits {rc}", p.returncode, rc)
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +477,35 @@ def test_deploy_action():
         check("nothing left after pruning: success, sf never called", (rc, args), (0, None))
         check("reported as nothing-left", "mode=nothing-left" in out, True)
 
+        rc, args, out = run_deploy_step(tmp, apex, None, ALIAS="int", HAS_APEX="true", TESTS="MkTest",
+                                        COVERAGE_GATE="true")
+        check("a real Apex deploy behind the coverage gate validates first (gated)",
+              (rc, (args or [])[:3], "mode=gated" in out, "quick_job=0AfFAKE" in out),
+              (0, ["project", "deploy", "validate"], True, True))
+        quick = next(s for s in deploy_steps() if s.get("id") == "quick")
+        check("and is quick-deployed only after the gate passed",
+              "steps.coverage.outcome == 'success'" in quick["if"], True)
+
+        # The report step: a refused quick deploy is not reported as a coverage stop.
+        step = next(s for s in deploy_steps() if s.get("id") == "report")
+        with open(os.path.join(tmp, "report.sh"), "w", newline="\n", encoding="utf-8") as fh:
+            fh.write(step["run"])
+        json.dump({"status": 1, "message": "Job ID can't be used for quick deployment."},
+                  open(os.path.join(tmp, "deploy-result.json"), "w"))
+        for cov, quick_outcome, want in (("success", "failure", "refused the quick deploy"),
+                                         ("failure", "skipped", "coverage-gated before it is deployed")):
+            open(os.path.join(tmp, "gh_output"), "w").close()
+            p = run(["bash", "report.sh"], tmp, {
+                "GITHUB_ACTION_PATH": os.path.join(ROOT, "sf-pipeline", "deploy"),
+                "GITHUB_OUTPUT": os.path.join(tmp, "gh_output"), "GITHUB_STEP_SUMMARY": "",
+                "QUICK_ID": "", "HAS_CHANGES": "true", "RUN_OUTCOME": "success", "COVERAGE_OUTCOME": cov,
+                "QUICK_JOB": "0AfV", "QUICK_OUTCOME": quick_outcome, "ENVIRONMENT": "int",
+                "CHECK_ONLY": "false", "MODE": "gated", "HAS_APEX": "true", "LEVEL": "RunSpecifiedTests"})
+            md = open(os.path.join(tmp, ".deploy", "errors.md"), encoding="utf-8").read()
+            check(f"gated, gate {cov}, quick deploy {quick_outcome}: the report says so",
+                  (p.returncode, "status=failure" in open(os.path.join(tmp, "gh_output")).read(), want in md),
+                  (0, True, True))
+
 
 def git(cwd, *args):
     return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args], cwd=cwd,
@@ -521,6 +565,55 @@ def test_delta():
               (rc, "wrote no" in log, o.get("has_changes")), (1, True, None))
 
 
+def profile(a, b):
+    fp = "".join(f"<fieldPermissions><editable>{e}</editable><field>Account.{f}__c</field>"
+                 "<readable>true</readable></fieldPermissions>" for f, e in (("A", a), ("B", b)))
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<Profile xmlns="http://soap.sforce.com/2006/04/metadata">{fp}<custom>false</custom></Profile>\n')
+
+
+def test_profiles_incremental():
+    print("\n\033[1mprofiles.py incremental — self-diff against the delta's own from_ref\033[0m")
+    if not shutil.which("git"):
+        print("  (skipped — git is not available)")
+        return
+    with tempfile.TemporaryDirectory() as repo:
+        rel = "force-app/main/default/profiles/Admin.profile-meta.xml"
+        path = os.path.join(repo, *rel.split("/"))
+        os.makedirs(os.path.dirname(path))
+        git(repo, "init", "-q")
+        git(repo, "checkout", "-q", "-b", "main")
+        open(path, "w", encoding="utf-8").write(profile("false", "false"))
+        git(repo, "add", ".")
+        git(repo, "commit", "-q", "-m", "base")
+        base = git(repo, "rev-parse", "HEAD")
+        # Another story already changed B on the target env branch.
+        git(repo, "checkout", "-q", "-b", "int")
+        open(path, "w", encoding="utf-8").write(profile("false", "true"))
+        git(repo, "commit", "-q", "-am", "other story: B editable")
+        git(repo, "update-ref", "refs/remotes/origin/int", "HEAD")
+        # This branch changes only A.
+        git(repo, "checkout", "-q", "-b", "feature", base)
+        open(path, "w", encoding="utf-8").write(profile("true", "false"))
+        git(repo, "commit", "-q", "-am", "this story: A editable")
+        os.makedirs(os.path.join(repo, ".sgd", "package"))
+        open(os.path.join(repo, ".sgd", "package", "package.xml"), "w", encoding="utf-8").write(
+            manifest({"Profile": ["Admin"]}))
+
+        def kept(baseline):
+            git(repo, "checkout", "-q", "--", rel)
+            p = run([sys.executable, os.path.join(SCRIPTS, "profiles.py"), "--mode", "incremental",
+                     "--baseline", baseline], repo, {"GITHUB_STEP_SUMMARY": ""})
+            root = ET.parse(path).getroot()
+            return p.returncode, sorted(fp.find(f"{NS}field").text for fp in root.findall(f"{NS}fieldPermissions"))
+
+        merge_base = git(repo, "merge-base", "origin/int", "HEAD")
+        check("against the merge-base (from_ref): only this branch's entry is deployed",
+              kept(merge_base), (0, ["Account.A__c"]))
+        check("against the target's tip it would deploy B back to its old value",
+              kept("origin/int"), (0, ["Account.A__c", "Account.B__c"]))
+
+
 def test_audit():
     print("\n\033[1maudit.py — the record names the deployed commit\033[0m")
     head = "d75fccf392d6a1b2c3d4e5f60718293a4b5c6d7e"
@@ -536,7 +629,8 @@ def test_audit():
 def main():
     print("Deploy engine suite")
     for fn in (test_prune, test_deploy_report, test_coverage_gate, test_manifest_to_md,
-               test_specified_tests, test_deploy_action, test_delta, test_audit):
+               test_specified_tests, test_deploy_action, test_delta, test_profiles_incremental,
+               test_audit):
         fn()
     print()
     if FAILURES:

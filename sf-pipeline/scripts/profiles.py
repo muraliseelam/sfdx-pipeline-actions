@@ -148,8 +148,9 @@ def resolve_target(source_root, meta_type, member):
 def git_show(ref, path):
     """Return the file contents at <ref>:<path>, or None if it does not exist."""
     try:
+        # A tree path is always '/'-separated (os.path.join gives '\' on Windows).
         out = subprocess.run(
-            ["git", "show", f"{ref}:{path}"],
+            ["git", "show", f"{ref}:{path.replace(os.sep, '/')}"],
             capture_output=True, text=True, check=False,
         )
     except FileNotFoundError:

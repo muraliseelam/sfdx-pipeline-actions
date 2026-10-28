@@ -530,6 +530,9 @@ runs:
         else
           STATUS_STR="failure"
         fi
+        # A gated deploy that passed the gate but whose quick deploy Salesforce
+        # refused (the org changed after the validation) is reported as that.
+        if [ "$MODE" = "gated" ] && [ "$QUICK_OUTCOME" = "failure" ]; then MODE="quick"; fi
         echo "status=$STATUS_STR" >> "$GITHUB_OUTPUT"
         python3 "$GITHUB_ACTION_PATH/../scripts/deploy_report.py" \
           --result deploy-result.json \

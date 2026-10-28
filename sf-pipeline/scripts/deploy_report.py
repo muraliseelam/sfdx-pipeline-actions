@@ -187,7 +187,10 @@ def main():
                       "deployed, and it stopped there.\n")
         elif args.mode == "quick":
             md.append(f"> Nothing was deployed to `{args.environment}`: Salesforce "
-                      "refused the quick deploy of the validated job.\n")
+                      "refused the quick deploy of the validated job. A validation can "
+                      "be quick-deployed once, within 10 days, and only if the org has "
+                      "not changed since (another deploy landing in between is enough). "
+                      "Run the deploy again (on a PR: approve again) to validate afresh.\n")
         if comp_rows:
             md.append(f"#### 🧩 Code / metadata problems ({len(comp_rows)})\n")
             md.append("| Component | Type | Line | Problem |")
