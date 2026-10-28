@@ -204,9 +204,10 @@ BUILD = workflow_step(PROD_RELEASE, "assemble", "Build release branch")["run"]
 ENVS = '["int", "qa", "stage"]'
 
 
-def assemble(sb, stories, shas, held="", br="release/2026.300"):
+def assemble(sb, stories, shas, held="", br="release/2026.300", merges=""):
     return sb.run(BUILD, sb.runner(), {"PROD_BRANCH": "main", "BR": br, "STORIES": stories, "SHAS": shas,
-                                       "HELD": held, "ENV_BRANCHES": ENVS, "RELEASE_PREFIX": "release/"})
+                                       "HELD": held, "MERGES": merges, "ENV_BRANCHES": ENVS,
+                                       "RELEASE_PREFIX": "release/"})
 
 
 def test_assemble():
@@ -215,10 +216,10 @@ def test_assemble():
         sb = Sandbox(tmp)
         # B is squash-merged into int and put on hold; A is clean.
         sb.branch("feature/PROJ-301-b")
-        sb.commit("force-app/f/storyB.txt", "B\n", "B")
+        b1 = sb.commit("force-app/f/storyB.txt", "B\n", "B")
         sb.push("feature/PROJ-301-b")
         sb.branch("int")
-        sb.commit("force-app/f/storyB.txt", "B\n", "B (#1) [squash]")
+        b_squash = sb.commit("force-app/f/storyB.txt", "B\n", "B (#1) [squash]")
         sb.push("int")
         sb.branch("feature/PROJ-302-a")
         a1 = sb.commit("force-app/f/storyA.txt", "A\n", "A")
@@ -246,6 +247,11 @@ def test_assemble():
         check("…and no release branch pushed", sb.ref("release/2026.301"), "")
         rc, out, _ = assemble(sb, "feature/PROJ-302-a-int", a2, held="", br="release/2026.301")
         check("…refused even when the passenger is merely not selected", rc != 0, True)
+        rc, out, _ = assemble(sb, "feature/PROJ-302-a-int feature/PROJ-301-b", f"{a2} {b1}",
+                              br="release/2026.304", merges=b_squash)
+        check("…but accepted when the story it carries ships in the same release", rc, 0)
+        check("…which then holds both", sb.files("release/2026.304"),
+              ["force-app/f/base.txt", "force-app/f/storyA.txt", "force-app/f/storyB.txt"])
 
         rc, out, _ = assemble(sb, "feature/PROJ-302-a-b", a3, held="feature/PROJ-301-b", br="release/2026.302")
         check("story that merged a held story's branch: refused", rc != 0, True)
@@ -386,14 +392,14 @@ def test_gather():
         s5 = sb.commit("force-app/f/s5.txt", "5\n", "s5 held")
         sb.push("feature/S5")
         prs = [
-            {"number": 1, "headRefName": "feature/S1", "headRefOid": s1},
-            {"number": 2, "headRefName": "feature/S2", "headRefOid": s2a},
+            {"number": 1, "headRefName": "feature/S1", "headRefOid": s1, "mergeCommit": {"oid": "1" * 40}},
+            {"number": 2, "headRefName": "feature/S2", "headRefOid": s2a, "mergeCommit": {"oid": "2" * 40}},
             {"number": 3, "headRefName": "feature/S2", "headRefOid": s2b},
-            {"number": 4, "headRefName": "feature/S3", "headRefOid": s3},
+            {"number": 4, "headRefName": "feature/S3", "headRefOid": s3, "mergeCommit": {"oid": "4" * 40}},
             {"number": 5, "headRefName": "feature/GONE", "headRefOid": "c" * 40},
             {"number": 6, "headRefName": "feature/S4", "headRefOid": s4old},
             {"number": 8, "headRefName": "feature/S4", "headRefOid": s4new},
-            {"number": 9, "headRefName": "feature/S5", "headRefOid": s5},
+            {"number": 9, "headRefName": "feature/S5", "headRefOid": s5, "mergeCommit": {"oid": "9" * 40}},
         ]
         rules = [
             {"match": r"^pr list .*--label hold ", "out": "feature/S5"},
@@ -413,6 +419,7 @@ def test_gather():
               (0, "feature/S1 feature/S2 feature/S4"))
         check("…at the commit each deployed", o.get("shas"), f"{s1} {s2a} {s4new}")
         check("…and reports the held branches", o.get("held"), "feature/S5")
+        check("…and the env-branch squashes of the gathered stories only", o.get("merges"), "1" * 40 + " " + "2" * 40)
         check("a status posted by someone else is not proof (S3 left out, named)",
               "the one set by @mallory is not trusted" in out, True)
         check("a deleted story branch drops out with a notice", "Skipping 'feature/GONE'" in out, True)

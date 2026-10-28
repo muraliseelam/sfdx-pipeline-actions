@@ -83,6 +83,11 @@ outputs:
       Space-separated head branches of every PR carrying `exclude_label`, so the
       caller can check that none of their content reached the release anyway.
     value: ${{ steps.gather.outputs.held }}
+  merges:
+    description: >-
+      Space-separated merge (squash) commits of every PR of the gathered stories,
+      i.e. what those stories put on the env branches.
+    value: ${{ steps.gather.outputs.merges }}
 
 runs:
   using: composite
@@ -130,12 +135,12 @@ runs:
           ALL="[]"
           for s in $ONLY; do
             ONE="$(gh pr list --repo "$REPO" --state merged --head "$s" "${BASE_ARGS[@]}" \
-                     --json number,headRefName,headRefOid --limit 100)"
+                     --json number,headRefName,headRefOid,mergeCommit --limit 100)"
             ALL="$(A="$ALL" B="$ONE" python3 -c 'import json,os; print(json.dumps(json.loads(os.environ["A"]) + json.loads(os.environ["B"])))')"
           done
         else
           ALL="$(gh pr list --repo "$REPO" --state merged --label "$LABEL" "${BASE_ARGS[@]}" \
-                   --json number,headRefName,headRefOid --limit 200)"
+                   --json number,headRefName,headRefOid,mergeCommit --limit 200)"
         fi
         # Every PR of a story is a candidate commit (its head when it merged),
         # newest PR first: the control PR's head is what the pipeline deployed.
@@ -147,7 +152,9 @@ runs:
             if p["headRefName"] in held:
                 print("  hold #%s -> %s" % (p["number"], p["headRefName"]), file=sys.stderr)
                 continue
-            g = groups.setdefault(p["headRefName"], {"number": p["number"], "headRefName": p["headRefName"], "cands": []})
+            g = groups.setdefault(p["headRefName"], {"number": p["number"], "headRefName": p["headRefName"], "cands": [], "merges": []})
+            m = (p.get("mergeCommit") or {}).get("oid")
+            g["merges"] += [m] if m else []
             g["cands"] = ["%s:%s" % (p["number"], p["headRefOid"])] + [c for c in g["cands"] if not c.endswith(":" + p["headRefOid"])]
         print(json.dumps(list(groups.values())))
         ')"
@@ -272,5 +279,8 @@ runs:
           exit 1
         fi
 
-        { echo "stories=$STORIES"; echo "keys=$KEYS"; echo "shas=$SHAS"; echo "held=$HELD"; } >> "$GITHUB_OUTPUT"
+        # The squash commits the gathered stories' PRs made on the env branches: a
+        # story that merged one of them carries a story that ships anyway.
+        MERGES="$(RAW="$RAW" STORIES="$STORIES" python3 -c 'import json,os; s=set(os.environ["STORIES"].split()); print(" ".join(m for g in json.loads(os.environ["RAW"]) if g["headRefName"] in s for m in g["merges"]))')"
+        { echo "stories=$STORIES"; echo "keys=$KEYS"; echo "shas=$SHAS"; echo "held=$HELD"; echo "merges=$MERGES"; } >> "$GITHUB_OUTPUT"
         echo "Resolved release stories: $STORIES"

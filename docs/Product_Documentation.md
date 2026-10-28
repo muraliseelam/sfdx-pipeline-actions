@@ -867,14 +867,15 @@ warning — otherwise a story deployed to int only could reach a release.
   that no proven story accounts for (a story since put on hold, a hand push):
   assemble a new version, or delete the branch and re-run.
 - **Only the stories' own work.** A deployed commit can carry other stories as
-  its ancestors: a story branch that merged an env branch (`git merge origin/int`
-  to settle a conflict) holds every story squashed into int, held or never
-  selected, and one that merged another story's branch holds that story.
-  Assemble refuses a gathered commit that contains commits of an env branch which
-  `main` doesn't have, and refuses the release when any file a story on `hold`
-  changed carries that story's version (unless `main` already has it), however it
-  got there. Settle a conflict by rebasing the story on `main`, never by merging an
-  env branch into it.
+  its ancestors: a story branch that merged or was rebased on an env branch
+  (`git merge origin/int` to settle a conflict) holds every story squashed into
+  int, held or never selected, and one that merged another story's branch holds
+  that story. Assemble refuses a gathered commit that contains commits of an env
+  branch which `main` doesn't have — except the squash commits of stories gathered
+  into the same release (`release-gather`'s `merges`) — and refuses the release
+  when any file a story on `hold` changed carries that story's version (unless
+  `main` already has it), however it got there. Release the carried stories
+  together, or rebase the story on `main` and take it through the stages again.
 - **Nothing to release is an error**, not an empty release.
 
 ### One commit, end to end
@@ -1268,7 +1269,7 @@ Step-by-step onboarding instructions live in
 | `report` | The unified sticky PR comment |
 | `status` | Write `pr-validation` / `deploy-<env>` commit statuses |
 | `coverage` | Apex coverage gate |
-| `release-gather` | Collect the stories for a release — candidates by `release_label`, proven by the bot's `deploy-<env>` statuses for every stage — and the exact commit of each, plus the branches on `hold` |
+| `release-gather` | Collect the stories for a release — candidates by `release_label`, proven by the bot's `deploy-<env>` statuses for every stage — and the exact commit of each, plus the branches on `hold` and the squash commits the gathered stories made on the env branches |
 | `release-preflight` | Verify the release PR exists, is authorized at its head, green, mergeable, not behind the prod branch and not already deployed; outputs the head commit |
 | `sync-branches` | Post-release realign: reset each env branch to `main` when that loses nothing, else merge `main` in; restores branch protection |
 | `jira` · `notify` | Integrations (no-ops when unconfigured) |

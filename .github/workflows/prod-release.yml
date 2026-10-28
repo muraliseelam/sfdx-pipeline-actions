@@ -132,6 +132,7 @@ jobs:
           STORIES: ${{ steps.gather.outputs.stories }}
           SHAS: ${{ steps.gather.outputs.shas }}
           HELD: ${{ steps.gather.outputs.held }}
+          MERGES: ${{ steps.gather.outputs.merges }}
           ENV_BRANCHES: ${{ needs.plan.outputs.env_branches }}
           RELEASE_PREFIX: ${{ needs.plan.outputs.release_prefix }}
         run: |
@@ -161,9 +162,10 @@ jobs:
             git checkout -B "$BR" "origin/$PROD_BRANCH"
           fi
           # A proven commit can hold other stories' work as its own ancestors, out
-          # of reach of the commit checks here: merging an env branch into a story
-          # branch (`git merge origin/int` to settle a conflict) brings in every
-          # story squashed there, held or never selected. Refuse it.
+          # of reach of the commit checks here: merging (or rebasing on) an env
+          # branch to settle a conflict brings in every story squashed there, held
+          # or never selected. Refuse it, unless the commit is the squash of a story
+          # that is in this release anyway.
           read -ra ENVS <<< "$(python3 -c 'import json,os; print(" ".join(json.loads(os.environ.get("ENV_BRANCHES") or "[]")))')"
           RIDE=""
           for i in "${!S[@]}"; do
@@ -171,15 +173,16 @@ jobs:
             for e in "${ENVS[@]}"; do
               if [ "$e" = "$PROD_BRANCH" ] || ! git rev-parse -q --verify "origin/$e" >/dev/null; then continue; fi
               C="$(comm -12 <(git rev-list --no-merges "${H[$i]}" "^origin/$PROD_BRANCH" | sort) \
-                            <(git rev-list --no-merges "origin/$e" "^origin/$PROD_BRANCH" | sort))"
+                            <(git rev-list --no-merges "origin/$e" "^origin/$PROD_BRANCH" | sort) \
+                   | grep -vxF -f <(tr ' ' '\n' <<< "${MERGES:-}") || true)"
               if [ -n "$C" ]; then
                 RIDE="$RIDE"$'\n'"  ${S[$i]} @ ${H[$i]:0:8} has $(wc -l <<< "$C" | tr -d ' ') commit(s) of $e that $PROD_BRANCH doesn't:"$'\n'"$(git log --no-walk --format='    %h %s' --stdin <<< "$C")"
               fi
             done
           done
           if [ -n "$RIDE" ]; then
-            echo "::error::A story's deployed commit carries other stories' work from an env branch; it would reach production without being gathered, or while on hold:$RIDE"
-            echo "Rebase the story on $PROD_BRANCH instead of merging an env branch into it, take it through the stages again, then re-run."
+            echo "::error::A story's deployed commit carries work from an env branch that is not in this release; it would reach production without being gathered, or while on hold:$RIDE"
+            echo "Release those stories too, or rebase the story on $PROD_BRANCH (not on an env branch), take it through the stages again, then re-run."
             exit 1
           fi
           # Merge the commit each story deployed, not its branch: a commit pushed

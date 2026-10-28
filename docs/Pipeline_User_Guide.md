@@ -660,12 +660,13 @@ story with the commit released. Name stories in `stories` to release only those;
 each must still be proven, or the run fails.
 
 Assemble also refuses to ship another story as a passenger. A story branch that
-merged `int` (or another env branch) to settle a conflict carries every story
-squashed there; one that merged another story's branch carries that story. The
-run fails, naming the story and the commits or files involved, when a gathered
-commit holds env-branch commits `main` lacks, or when a story on `hold` would ship
-anyway. Settle conflicts by rebasing the story on `main`, then take it through
-the stages again.
+merged or was rebased on `int` (or another env branch) to settle a conflict
+carries every story squashed there; one that merged another story's branch
+carries that story. The run fails, naming the story and the commits or files
+involved, when a gathered commit holds env-branch commits of stories that are not
+in this release, or when a story on `hold` would ship anyway. Release the carried
+stories in the same train, or rebase the story on `main` and take it through the
+stages again.
 
 > **`assemble` does not open the release PR.** It prints a pre-filled compare link
 > and stops. Opening the PR is a deliberate human step, so someone reads the list
@@ -816,8 +817,9 @@ commit. Get validation passing, then approve again. The pipeline also removes it
 with a comment, when the person who added it may not approve: on the entry PR the
 label needs a repo admin who isn't the PR's author (unless `allow_self_approval:
 true`), on a later stage write access. A failed deploy (validation, the coverage
-gate, or a quick deploy Salesforce refused) removes it too, so adding it again
-starts a new deploy.
+gate, or a quick deploy Salesforce refused) and a deploy the pre-deploy guard
+refused (PR closed or moved, conflicts, chain order, validation not green) remove
+it too, so adding it again starts a new deploy.
 
 ### *Not deployed to `<env>`* — a new commit was pushed after … was approved
 
@@ -941,7 +943,9 @@ refusals:
 ### The deploy guard reports a merge conflict
 
 For an entry PR, rebase the feature branch on the target env branch and push,
-then approve again. For a promotion, the fix is a new commit: take it through int
+then approve again. The story then carries every change on that branch that
+production doesn't have yet, so it can only be released together with those
+stories — assemble refuses it otherwise. For a promotion, the fix is a new commit: take it through int
 first and promote from that PR. The guard runs before anything touches an org, so
 nothing partial was deployed. *GitHub has not finished checking whether this PR
 can merge* is the same guard: try again in a minute.
