@@ -19,6 +19,7 @@ GitHub or Salesforce. Asserts:
   * the post-release realign merges, resets or leaves each env branch, and
     restores (and reports) protection per branch (BUG-008)
   * Sync Env Branches falls back to a PR when a push is refused
+  * no `run:` block pastes an expression; a crafted dispatch version is refused
 
 Run:  python3 tests/test_release_train.py
 """
@@ -563,13 +564,37 @@ def test_sync_env_branches():
         check("PR creation refused too: a warning, not a failure", (rc, "Could not open a sync PR" in out), (0, True))
 
 
+# ---- nothing typed by a person is pasted into a script --------------------------------
+OWNED = [PROD_RELEASE, SYNC_ENV, ROOT / ".github" / "workflows" / "project-init.yml",
+         ROOT / ".github" / "workflows" / "org-bootstrap.yml", GATHER, PREFLIGHT, SYNC_ACTION]
+
+
+def test_no_expressions_in_run():
+    print("\nRun blocks read inputs through env, and the dispatch version must be a plain name (NEW-WS1-02)")
+    for path in OWNED:
+        d = yaml.safe_load(path.read_text(encoding="utf-8"))
+        steps = [s for j in (d.get("jobs") or {}).values() for s in j.get("steps") or []] \
+            or (d.get("runs") or {}).get("steps") or []
+        left = sorted({e for s in steps for e in re.findall(r"\$\{\{\s*(.*?)\s*\}\}", s.get("run") or "")})
+        check(f"{path.name}: no ${{{{ }}}} inside a run: block", left, [])
+    ref = workflow_step(PROD_RELEASE, "plan", "ref")["run"]
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = Sandbox(tmp)
+        env = {"EARLIER": "int,qa", "LAST_ENV": "stage", "RELEASE_PREFIX": "release/"}
+        rc, out, o = sb.run(ref, sb.tmp, dict(env, VERSION="2026.300"))
+        check("a plain version: ref + every stage's status", (rc, o.get("ref"), o.get("chain_statuses")),
+              (0, "release/2026.300", "deploy-int,deploy-qa,deploy-stage"))
+        rc, out, o = sb.run(ref, sb.tmp, dict(env, VERSION='x" ; echo chain_statuses= >> "$GITHUB_OUTPUT" ; echo "'))
+        check("a crafted version: refused, no outputs (the every-stage proof can't be emptied)", (rc != 0, o), (True, {}))
+
+
 def main():
     print("Release train suite")
     if not shutil.which("bash") or not shutil.which("git"):
         print("  (skipped — bash and git are needed)")
         return 0
     for fn in (test_assemble, test_prod_delta_three_dot, test_preflight, test_gather, test_finalize,
-               test_realign, test_sync_env_branches):
+               test_realign, test_sync_env_branches, test_no_expressions_in_run):
         fn()
     print()
     if FAILURES:

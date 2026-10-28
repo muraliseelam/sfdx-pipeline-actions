@@ -71,12 +71,17 @@ jobs:
       - id: last
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/plan@main
         with: { mode: prdeploy, arg: "${{ steps.cfg.outputs.last_env }}" }
+      # The version is typed by whoever dispatches the run: it reaches the shell
+      # through env only, and must be a plain name.
       - id: ref
         env:
           EARLIER: ${{ steps.last.outputs.r_require_envs }}
           LAST_ENV: ${{ steps.cfg.outputs.last_env }}
+          RELEASE_PREFIX: ${{ steps.cfg.outputs.release_prefix }}
+          VERSION: ${{ inputs.version }}
         run: |
-          echo "ref=${{ steps.cfg.outputs.release_prefix }}${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          case "$VERSION" in *[!A-Za-z0-9._-]*) echo "::error::version '$VERSION' may use only letters, digits and . _ -"; exit 1 ;; esac
+          echo "ref=${RELEASE_PREFIX}${VERSION}" >> "$GITHUB_OUTPUT"
           S=""; for e in ${EARLIER//,/ } $LAST_ENV; do S="${S:+$S,}deploy-$e"; done
           echo "chain_statuses=$S" >> "$GITHUB_OUTPUT"
 
@@ -101,8 +106,9 @@ jobs:
         id: ver
         env:
           RELEASE_PREFIX: ${{ needs.plan.outputs.release_prefix }}
+          VERSION: ${{ inputs.version }}
         run: |
-          V="${{ inputs.version }}"; [ -z "$V" ] && V="$(date -u +%G.%V)"
+          V="$VERSION"; [ -z "$V" ] && V="$(date -u +%G.%V)"
           echo "version=$V"          >> "$GITHUB_OUTPUT"
           echo "branch=${RELEASE_PREFIX}$V" >> "$GITHUB_OUTPUT"
           git config user.name  "sf-release-bot"
@@ -359,7 +365,8 @@ jobs:
     steps:
       - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/notify@main
         with:
-          message: ${{ needs.validate.result == 'success' && (needs.validate.outputs.validated == 'false' && format('⚠️ **Prod validation SKIPPED** for v{0} — awaiting deploy approval; the deploy will be a full deploy.', inputs.version) || format('✅ **Prod validation PASSED** for v{0} — awaiting deploy approval{1}.', inputs.version, needs.validate.outputs.quick == 'false' && ' (check-only, no Apex tests; the deploy will be a full deploy)' || '')) || format('❌ **Prod validation FAILED** for v{0}. {1}/{2}/actions/runs/{3}', inputs.version, github.server_url, github.repository, github.run_id) }}
+          # Skipped = preflight refused the release: nothing was validated.
+          message: ${{ needs.validate.result == 'skipped' && format('⛔ **Prod release refused** for v{0} before validation (see preflight) — nothing was validated or deployed. {1}/{2}/actions/runs/{3}', inputs.version, github.server_url, github.repository, github.run_id) || needs.validate.result == 'success' && (needs.validate.outputs.validated == 'false' && format('⚠️ **Prod validation SKIPPED** for v{0} — awaiting deploy approval; the deploy will be a full deploy.', inputs.version) || format('✅ **Prod validation PASSED** for v{0} — awaiting deploy approval{1}.', inputs.version, needs.validate.outputs.quick == 'false' && ' (check-only, no Apex tests; the deploy will be a full deploy)' || '')) || format('❌ **Prod validation FAILED** for v{0}. {1}/{2}/actions/runs/{3}', inputs.version, github.server_url, github.repository, github.run_id) }}
           webhook_url: ${{ secrets.CHAT_WEBHOOK_URL }}
           api_url:     ${{ secrets.CHAT_API_URL }}
           api_token:   ${{ secrets.CHAT_API_TOKEN }}

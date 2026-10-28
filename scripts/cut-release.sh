@@ -58,11 +58,13 @@ import re, pathlib, sys
 tag = sys.argv[1]
 pat = re.compile(r'([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:\.github/workflows|sf-pipeline)/[^@\s]+)@[A-Za-z0-9._-]+')
 n = 0
+# Bytes in, bytes out: the files are UTF-8 whatever the OS code page, and their
+# line endings must not change.
 for p in list(pathlib.Path('.github').rglob('*.yml')) + list(pathlib.Path('sf-pipeline').rglob('*.yml')):
-    o = p.read_text()
+    o = p.read_bytes().decode('utf-8')
     t, k = pat.subn(lambda m: f"{m.group(1)}@{tag}", o)
     if k and t != o:
-        p.write_text(t)
+        p.write_bytes(t.encode('utf-8'))
         n += k
 print(n)
 PY

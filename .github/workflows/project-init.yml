@@ -53,11 +53,13 @@ jobs:
 
       - name: Summary
         if: always()
+        env:
+          APPLY: ${{ inputs.apply }}
         run: |
           {
-            echo "### Project init — ${{ inputs.apply && 'APPLIED' || 'DRY RUN' }}"
+            if [ "$APPLY" = "true" ]; then echo "### Project init — APPLIED"; else echo "### Project init — DRY RUN"; fi
             echo
-            if [ "${{ inputs.apply }}" != "true" ]; then
+            if [ "$APPLY" != "true" ]; then
               echo "Nothing was created. Re-run with **apply = true** once the plan above looks right."
             else
               echo "Branches, labels and environments are provisioned; check the log for anything to set by hand."

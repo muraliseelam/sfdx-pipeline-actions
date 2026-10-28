@@ -12,7 +12,9 @@ calls nothing) across several configs, and asserts:
     `deploy-<env name>`), keyed by environment NAME, not branch;
   * branches the pipeline merges unattended need no human review;
   * the post-release realign (sf-pipeline/sync-branches) restores exactly what
-    the script set: its snapshot -> restore transform round-trips every payload.
+    the script set: its snapshot -> restore transform round-trips every payload;
+  * chains of one to six stages, renamed and prefixed, and Project Init's dry run
+    (init-project.sh) deriving every branch, label and environment from the config.
 
 Run:  python3 tests/test_branch_protection.py
 """
@@ -116,6 +118,66 @@ environments:
   - { name: uat, branch: uat }
 """
 
+ONE_ENV = """
+baseline_branch: main
+environments:
+  - { name: sandbox, branch: sandbox, gate: approval }
+production:
+  branch: main
+  deploy_environment: prod
+  validate_environment: prod-validate
+"""
+
+SIX = """
+baseline_branch: main
+environments:
+  - { name: dev,   branch: pipeline/dev, gate: auto }
+  - { name: sit,   branch: pipeline/sit }
+  - { name: qa,    branch: pipeline/qa }
+  - { name: uat,   branch: pipeline/uat }
+  - { name: perf,  branch: pipeline/perf }
+  - { name: stage, branch: pipeline/stage }
+production:
+  branch: main
+  deploy_environment: prod
+  validate_environment: prod-validate
+  release_label: ready-to-ship
+"""
+
+INIT = ROOT / "sf-pipeline" / "scripts" / "init-project.sh"
+
+# A gh that knows only the baseline branch: every other branch, label and
+# environment is missing, so a dry run lists everything the config implies.
+FAKE_GH = """#!/usr/bin/env bash
+case "$*" in
+  "api repos/owner/repo/git/ref/heads/$BASELINE --jq .object.sha") echo 0123abcd ;;
+  "api repos/owner/repo --jq .permissions.admin // false") echo true ;;
+  *actions/permissions/workflow*) echo true ;;
+  "label list"*) ;;
+  *) exit 1 ;;
+esac
+"""
+
+
+def init_dry(cfg_text, baseline="main"):
+    """Dry-run init-project.sh against a config with a gh that has nothing yet."""
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "sf-pipeline"))
+        os.makedirs(os.path.join(tmp, "bin"))
+        with open(os.path.join(tmp, "sf-pipeline", "pipeline.config.yml"), "w", encoding="utf-8") as fh:
+            fh.write(cfg_text)
+        gh = os.path.join(tmp, "bin", "gh")
+        with open(gh, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(FAKE_GH)
+        os.chmod(gh, 0o755)
+        env = dict(os.environ, BASELINE=baseline, PATH=os.path.join(tmp, "bin") + os.pathsep + os.environ["PATH"])
+        proc = subprocess.run(["bash", INIT.as_posix(), "--repo", "owner/repo"], cwd=tmp, env=env,
+                              capture_output=True, text=True)
+    out = re.sub(r"\x1b\[[0-9;]*m", "", proc.stdout)
+    made = lambda kind: sorted(re.findall(rf"✔ {kind} (\S+) \(would create", out))
+    limited = sorted(re.findall(r"✔ environment (\S+) — deployments limited to branch '([^']+)' \(would set\)", out))
+    return proc.returncode, out, made, limited
+
 
 def test_reference_chain():
     print("\nReference chain int -> qa -> stage -> main (defaults)")
@@ -163,6 +225,47 @@ def test_names_not_branches():
     check("approval-gated later stage: deploy-tue only", contexts(p["env/tuesday"]), ["deploy-tue"])
     check("env/thursday requires deploy-thu", contexts(p["env/thursday"]), ["deploy-thu"])
     check("production branch 'live' is pull-request-only", p["live"].get("required_pull_request_reviews") is not None, True)
+
+
+def test_chain_sizes():
+    print("\nOne stage and six stages (prefixed branches, an auto entry)")
+    rc, p = protect(ONE_ENV)
+    check("one stage: script exits 0", rc, 0)
+    check("one stage: protects it and production", sorted(p), ["main", "sandbox"])
+    check("one stage: pr-validation + deploy-sandbox", contexts(p["sandbox"]), ["pr-validation", "deploy-sandbox"])
+    rc, p = protect(SIX)
+    check("six stages: script exits 0", rc, 0)
+    check("six stages: protects all six and production", len(p), 7)
+    check("auto entry: deploy-dev only, 0 reviews", (contexts(p["pipeline/dev"]), reviews(p["pipeline/dev"])),
+          (["deploy-dev"], 0))
+    check("every later stage requires its own deploy-<name>",
+          [contexts(p[f"pipeline/{n}"]) for n in ("sit", "qa", "uat", "perf", "stage")],
+          [[f"deploy-{n}"] for n in ("sit", "qa", "uat", "perf", "stage")])
+
+
+def test_project_init_dry_run():
+    print("\nProject Init derives branches, labels and environments from the config (dry run)")
+    rc, out, made, limited = init_dry(WEEKDAYS, baseline="live")
+    check("weekday chain: exits 0, creates nothing", (rc, "DRY RUN" in out), (0, True))
+    check("branches by branch name, slashes kept, baseline not re-created",
+          made("branch"), ["env/friday", "env/monday", "env/thursday", "env/tuesday", "env/wednesday"])
+    check("labels by environment NAME", [l for l in made("label") if l.startswith("deploy:")],
+          ["deploy:fri", "deploy:mon", "deploy:thu", "deploy:tue", "deploy:wed"])
+    check("prod-approved exists for the release train", "prod-approved" in made("label"), True)
+    check("environments default to the names, plus production's two",
+          made("environment"), ["fri", "live", "live-check", "mon", "thu", "tue", "wed"])
+    check("production environments limited to the production branch",
+          limited, [("live", "live"), ("live-check", "live")])
+    rc, out, made, limited = init_dry(ONE_ENV)
+    check("one stage: branch, labels and environments",
+          (rc, made("branch"), [l for l in made("label") if ":" in l], made("environment")),
+          (0, ["sandbox"], ["deploy:sandbox", "deployed:sandbox"], ["prod", "prod-validate", "sandbox"]))
+    rc, out, made, limited = init_dry(SIX)
+    check("six stages: six branches, twelve deploy labels",
+          (rc, len(made("branch")), len([l for l in made("label") if l.startswith("deploy")])), (0, 6, 12))
+    rc, out, made, limited = init_dry(NO_PROD, baseline="main")
+    check("no production block: no prod-approved, no production environments",
+          ("prod-approved" in made("label"), limited), (False, []))
 
 
 def test_no_production_block():
@@ -249,6 +352,8 @@ def main():
         test_reference_chain,
         test_solo,
         test_names_not_branches,
+        test_chain_sizes,
+        test_project_init_dry_run,
         test_no_production_block,
         test_options,
         test_realign_round_trip,
