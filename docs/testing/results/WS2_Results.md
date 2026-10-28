@@ -5,26 +5,28 @@
 `PROJ-299-foo/bar` from the Recreate runbook) · **Orgs:** `sfp-int`, `sfp-qa`, `sfp-stage`
 
 Pipeline commits under test: the promotion scenarios ran on `8fd014f` (plus WS1's `b439e8b`
-once it landed); the runbook fixes are `e55e029`, and every runbook scenario was re-run live
-after it was pushed.
+once it landed); the runbook fixes are `e55e029` and `0d26349` (the lead's decision on the
+never-released rollback), and every runbook scenario was re-run live after each was pushed.
 
 ## Counts
 
 | Result | Count |
 |---|---|
 | PASS | 30 |
-| FAIL→FIXED | 2 (TS-065; TS-066 released-change path — the unreleased path stays OPEN, see NEW-WS2-02) |
-| FAIL→OPEN | 0 at scenario level — the unreleased-change residual of TS-066 is kept OPEN under NEW-WS2-02 |
+| FAIL→FIXED | 2 (TS-065 `e55e029`; TS-066 `e55e029` + `0d26349`) |
+| FAIL→OPEN | 0 |
 | BLOCKED-HUMAN | 0 |
 | NOT-APPLICABLE (live) | 1 (TS-054 — no NoTestRun stage in the live consumer; PASS offline) |
 | **Total** | **33** |
 
-Offline suite (new): `tests/test_promotion_ops.py` — **62 checks**, all pass on `e55e029`. Against
-the pre-fix files (`8fd014f`) it fails **19** checks (TS-065 names, the reset record, rollback cut
-from the baseline, `ref` validation, `profiles_mode`, the Summary interpolation, Jira keys); dropping only
-`-X no-renames` from the fixed rollback makes the look-alike check fail. `PYTHONUTF8=1 bash
-scripts/validate.sh` → *All checks passed* (on `65fc385` + my commit). `actionlint -shellcheck=`
-clean on the four workflows; `shellcheck` clean on every extracted `run:` block (LF copies).
+Offline suite (new): `tests/test_promotion_ops.py` — **66 checks**, all pass on `0d26349` (it now
+runs in `validate.sh` §7c and `ci.yml`). Against the pre-fix files (`8fd014f`) the first 62 fail
+**19** (TS-065 names, the reset record, rollback cut from the baseline, `ref` validation,
+`profiles_mode`, the Summary interpolation, Jira keys); against `e55e029` the 66 fail the **3**
+new delta_baseline-prod refusal checks; dropping only `-X no-renames` makes the look-alike check
+fail. `PYTHONUTF8=1 bash scripts/validate.sh` → *All checks passed* on the pushed tree
+(`0d26349`). `actionlint -shellcheck=` clean on the four workflows; `shellcheck` clean on every
+extracted `run:` block (LF copies).
 
 ## Scenarios
 
@@ -63,8 +65,8 @@ PR and run numbers are in `muraliseelam/sfdx-pipeline-example`.
 | TS-063 | Redeploy unknown environment | LIVE | PASS | Run 40610527599: `'nope' is not a configured environment. Valid: int, qa, stage`. | |
 | TS-064 | Recreate existing branch needs confirm_reset | LIVE | PASS | Run 40610596266 created `feature/PROJ-290-recreate`; run 40610884664 (no confirm) refused "Re-run with confirm_reset=true"; after a commit (`2c78e68`) run 40613592512 (`e55e029`, confirm) reset it to main with `--force-with-lease` and recorded "Resetting existing branch … (2c78e68…)" + *Previous tip* row. | |
 | TS-065 | weird name normalised safely | LIVE | FAIL→FIXED (`e55e029`) | Pre-fix run 40609523015: `Target branch: feature/PROJ-299-foo/../bar` → `fatal: invalid refspec`. Post-fix run 40613539269: `Target branch: feature/PROJ-299-foo/bar`, created. Offline: 6 names normalised, `..`/`/`/`@{}`/empty refused. | Decision: keep `.` and `/`, **drop** empty/`.`/`..`/dot-led/dot-ended/`.lock` path parts (never resolve `..` — `a/../b` must not become `b`, an existing branch a reset would wipe), then `git check-ref-format`. `echo` → `printf` (`-n` came out empty). |
-| TS-066 | Rollback: unmerged refused; merged → revert PR | LIVE | (a) PASS · (b) FAIL→FIXED for a released change, OPEN for an unreleased one | (a) run 40610609177 "PR #66 is not merged". (b) pre-fix #92 (revert of one commit) validated a package of **17** components — every int-only story. Post-fix: rollback of release PR #60 (run 40613546331) → #113 "on top of `main`", package **0 deploy · 3 delete** (exactly the release's HardenedGreeting/Test + E2E_Hardened), validated green; rollback of unreleased #72 (run 40613542723) → #112 cut from `int` with the new warning; its package carries **27** int-only components and its validation fails on another story's Apex. | NEW-WS2-02. #113 was not deployed: it would remove HardenedGreeting from the shared int baseline. |
-| TS-067 | conflicting revert stops with instructions | LIVE | PASS | Pre-fix run 40610824884: "Revert of 695adfc… hit conflicts against 'int'. Resolve manually: git checkout -B rollback/695adfcf origin/int && git revert 695adfc…" — but the conflict was in **WS2_201**__c (rename detection matched WS2_202's change to a look-alike file). Post-fix run 40613550299: modify/delete conflict on the right file (`WS2_202__c`), commands include `-X no-renames`. | NEW-WS2-03. |
+| TS-066 | Rollback: unmerged refused; merged → revert PR | LIVE | (a) PASS · (b) FAIL→FIXED (`e55e029`, `0d26349`) | (a) run 40610609177 "PR #66 is not merged". (b) pre-fix #92 (revert of one commit) validated a package of **17** components — every int-only story. After `e55e029`: rollback of release PR #60 (run 40613546331) → #113 "on top of `main`", package **0 deploy · 3 delete** (exactly the release's HardenedGreeting/Test + E2E_Hardened), validated green; rollback of unreleased #72 (run 40613542723) → #112 cut from `int` with a warning, package **27** int-only components, validation failed on another story's Apex. After `0d26349` (lead's decision): rollback of unreleased #68 (PROJ-205, run 40616619058) → **refused** "PR #68 never reached 'main' … a revert PR into 'int' would deploy and promote every unreleased change on 'int' … no rollback branch or PR was created" with options (a)/(b)/(c); `rollback/5dec19e1` absent before and after, no PR. | NEW-WS2-02. #113 was not deployed (it would remove HardenedGreeting from the shared int baseline). |
+| TS-067 | conflicting revert stops with instructions | LIVE | PASS | Pre-fix run 40610824884: "Revert of 695adfc… hit conflicts against 'int'. Resolve manually: git checkout -B rollback/695adfcf origin/int && git revert 695adfc…" — but the conflict was in **WS2_201**__c (rename detection matched WS2_202's change to a look-alike file). Run 40613550299 (`e55e029`): modify/delete conflict on the right file (`WS2_202__c`), commands include `-X no-renames`. Since `0d26349`, under `delta_baseline: prod` a revert that conflicts on `main` is refused with the resolve commands for a branch cut from `main` (offline check); under `target` the old int message (offline check). | NEW-WS2-03. |
 
 ## New findings
 
@@ -80,7 +82,7 @@ PR and run numbers are in `muraliseelam/sfdx-pipeline-example`.
 - **Fix:** see cross-workstream request CW-1.
 
 ### NEW-WS2-02 — A rollback cut from the entry branch carries every unreleased change on it
-- **Severity:** HIGH · **Owner:** WS2 · **Status:** CONFIRMED live; **FIXED** for released changes (`e55e029`); residual OPEN
+- **Severity:** HIGH · **Owner:** WS2 · **Status:** CONFIRMED live; **FIXED** (`e55e029` released changes, `0d26349` never-released changes)
 - **Where:** `sf-ops-rollback.yml` cut `rollback/<sha>` from `origin/$BASE` (the entry branch).
 - **Failure:** every deploy delta is computed against `main` (three-dot), so the revert PR's
   package is *the whole of int's divergence from production* plus the revert. Live: #92 (revert
@@ -93,12 +95,18 @@ PR and run numbers are in `muraliseelam/sfdx-pipeline-example`.
   it does not (never released, or changed in production since) does it fall back to `$BASE` —
   the old behaviour — and then the PR body and the run say how many files it also carries and not
   to promote it.
-- **Residual (OPEN — design decision):** for a change that never reached production the revert
-  can only be expressed against `int`, so its package stays contaminated under
-  `delta_baseline: prod` (and, per the User Guide, it cannot remove the component from the org
-  anyway). Options: refuse that case under `delta_baseline: prod` (tell the user to `hold` the
-  story and delete the component by hand), and/or have `sf-promote-label` refuse a `deploy:<env>`
-  on a control PR whose head is a `rollback/*` branch cut from an env branch.
+- **Never-released changes (`0d26349`, lead's decision):** such a revert can only be expressed
+  against `int`, so under `delta_baseline: prod` (the default) its package is contaminated and it
+  could not remove the component from the org anyway. The runbook now **refuses** it before
+  creating any branch or PR: "<PR/commit> never reached '<prod branch>' … a revert PR into
+  '<entry>' would deploy and promote every unreleased change on '<entry>' … To take it out: (a)
+  fix forward with a new story, (b) remove its components from the affected orgs by hand and
+  revert the commit on the env branches, or (c) set delta_baseline: target". The cut-from-`base`
+  fallback (with its promotion warning) is kept only under `delta_baseline: target`, where the
+  package is computed against that branch and stays clean. A revert that conflicts on the
+  baseline is refused under `prod` too, with the commands to resolve it on a branch cut from the
+  baseline. The runbook's config now comes from a protected branch (`config_ref`), so a branch's
+  own config can't switch `delta_baseline` to get past the refusal. Live: run 40616619058.
 
 ### NEW-WS2-03 — Rollback's revert used rename detection (could edit a look-alike component)
 - **Severity:** MEDIUM · **Owner:** WS2 · **Status:** CONFIRMED live + offline; **FIXED** `e55e029`
@@ -144,8 +152,12 @@ PR and run numbers are in `muraliseelam/sfdx-pipeline-example`.
 | sha | one line |
 |---|---|
 | `e55e029` | Ops runbooks: safe branch names (TS-065), rollbacks cut from the baseline + `-X no-renames` + SHA-only `ref` (NEW-WS2-02/03/05), Redeploy env-only summary / `profiles_mode` check / protected-branch gates (NEW-WS2-04), Jira key check (NEW-WS2-06); new `tests/test_promotion_ops.py` (62 checks). |
+| `0d26349` | Rollback: refuse a never-released change under `delta_baseline: prod` (no branch, no PR; options a/b/c); cut-from-`base` fallback only under `target`; config from a protected branch; suite → 66 checks. |
 
 ## Cross-workstream requests
+
+Both were done by the owners: CW-1 in WS1's `245021f` ("Deploy: drop approved after a refused
+deploy too"), CW-2 in WS3's `36b87a3`/`1e5d7bc` (`validate.sh` §7c, `ci.yml`).
 
 - **CW-1 → WS1 (`.github/workflows/deploy.yml`, `guards` job)** — NEW-WS2-01. Add after the
   guard step, mirroring WS1's *Drop approved after a failed deploy*:
@@ -202,6 +214,32 @@ PR and run numbers are in `muraliseelam/sfdx-pipeline-example`.
   touches the files the change touched. If `base` is behind the baseline, the PR also brings
   those baseline commits into `base`, as Sync Env Branches would."
 - **Product_Documentation §18** (Rollback row): same two sentences.
+- **Follow-up for `0d26349` (not yet in the docs on `1e5d7bc`):**
+  - **User Guide, Part 4 → Ops — Rollback**, replace the paragraph "The revert is cut from the
+    production baseline whenever it applies there … don't promote it with `deploy:<env>`." with:
+    "The revert is cut from the production baseline whenever it applies there, so the PR carries
+    only the revert and can be promoted like any story. A change that **never reached
+    production** can only be reverted on `base`, and under `delta_baseline: prod` (the default)
+    such a PR would deploy — and promote — every unreleased change on `base` with it, so the
+    runbook **refuses** it before creating any branch or PR. To take such a change out: fix
+    forward with a new story; or remove its components from the affected orgs by hand and revert
+    the commit on the env branches; or use `delta_baseline: target`, where the revert is cut
+    from `base`, its package is computed against `base` and stays clean (the PR still warns not
+    to promote it, since its branch carries `base`'s other changes). A revert that conflicts on
+    the baseline is refused the same way under `prod`, with the commands to resolve it on a
+    branch cut from the baseline."
+  - Same section, last paragraph ("With `delta_baseline: prod`, reverting a change that never
+    reached production removes it from the branch but **not** from the env org …"): replace with
+    "With `delta_baseline: prod` such a revert is refused (above): relative to production there
+    is nothing to delete, so it could not remove the components from the env orgs anyway."
+  - Add after the input table: "The runbook reads `delta_baseline` and the branch names from the
+    branch you dispatch from only if it is protected; otherwise from the default branch."
+  - **Product_Documentation §18, Rollback row**, replace "a change that never reached production
+    is reverted on `base`, and that PR **also carries every change on `base` that production
+    doesn't have** (it says so — don't promote it)" with "a change that never reached production
+    is **refused** under `delta_baseline: prod` (its revert PR would carry every unreleased change
+    on `base`) — fix forward, remove it by hand, or use `delta_baseline: target`, where it is
+    reverted on `base` with a warning not to promote it".
 - **Pipeline_Test_Report.md TS-053/TS-054:** "qa is `on_demand`/`NoTestRun` in the live consumer"
   is wrong — `qa`/`stage` set no `test_level`, so they run **RunSpecifiedTests** (`plan.py`
   default) and a promotion of Apex is gated. TS-053 needs coverage between 75% (Salesforce's own
