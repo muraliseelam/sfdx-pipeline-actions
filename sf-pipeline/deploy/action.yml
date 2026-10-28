@@ -130,7 +130,8 @@ runs:
         SF_USERNAME: ${{ inputs.sf_username }}
         SF_INSTANCE_URL: ${{ inputs.sf_instance_url }}
         SF_JWT_KEY: ${{ inputs.sf_jwt_key }}
-      run: bash "$GITHUB_ACTION_PATH/../scripts/auth-jwt.sh" "${{ inputs.environment }}"
+        ALIAS: ${{ inputs.environment }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/auth-jwt.sh" "$ALIAS"
 
     - name: Compute delta vs ${{ inputs.baseline_branch }}
       id: delta
@@ -146,14 +147,21 @@ runs:
     # Diffs against the ref the delta really came from (the merge-base in
     # three-dot mode), not the baseline's tip, so a baseline that moved on is not
     # mistaken for this branch's change.
+    #
+    # No step here interpolates ${{ }} into its script: every value reaches the
+    # shell through env:. Test class names come from the branch's file names,
+    # which a PR controls, and must stay data.
     - name: Dependency lint (destructive safety)
       if: steps.delta.outputs.has_changes == 'true'
       shell: bash
+      env:
+        SOURCE_PATH: ${{ inputs.source_path }}
+        BASELINE: ${{ steps.delta.outputs.from_ref || format('origin/{0}', inputs.baseline_branch) }}
       run: |
         python3 "$GITHUB_ACTION_PATH/../scripts/dependency_lint.py" \
           --dir .sgd \
-          --source-root "${{ inputs.source_path }}" \
-          --baseline "${{ steps.delta.outputs.from_ref || format('origin/{0}', inputs.baseline_branch) }}"
+          --source-root "$SOURCE_PATH" \
+          --baseline "$BASELINE"
 
     # Salesforce fails the whole deploy on a deletion of something the org no
     # longer has. Drop those (listed in the report), after the lint has checked
@@ -163,11 +171,14 @@ runs:
       id: prune
       if: ${{ steps.delta.outputs.has_changes == 'true' && inputs.quick_deploy_id == '' }}
       shell: bash
+      env:
+        ALIAS: ${{ inputs.environment }}
+        API_VERSION: ${{ inputs.api_version }}
       run: |
         python3 "$GITHUB_ACTION_PATH/../scripts/prune_destructive.py" \
           --dir .sgd \
-          --target-org "${{ inputs.environment }}" \
-          --api-version "${{ inputs.api_version }}"
+          --target-org "$ALIAS" \
+          --api-version "$API_VERSION"
 
     - name: Detect Apex in the delta
       id: scope
@@ -197,11 +208,12 @@ runs:
       env:
         # Passed through env: a title can carry a branch name with shell characters.
         MANIFEST_TITLE: ${{ inputs.manifest_title }} — ${{ inputs.environment }}
+        ENVIRONMENT: ${{ inputs.environment }}
       run: |
         python3 "$GITHUB_ACTION_PATH/../scripts/manifest_to_md.py" \
           --dir .sgd \
           --title "$MANIFEST_TITLE" \
-          --out manifest-${{ inputs.environment }}.md
+          --out "manifest-$ENVIRONMENT.md"
 
     - name: Upload manifest artifact
       if: steps.delta.outputs.has_changes == 'true'
@@ -218,7 +230,9 @@ runs:
       id: tests
       if: steps.delta.outputs.has_changes == 'true'
       shell: bash
-      run: python3 "$GITHUB_ACTION_PATH/../scripts/specified_tests.py" --dir .sgd --source-root "${{ inputs.source_path }}"
+      env:
+        SOURCE_PATH: ${{ inputs.source_path }}
+      run: python3 "$GITHUB_ACTION_PATH/../scripts/specified_tests.py" --dir .sgd --source-root "$SOURCE_PATH" --result deploy-result.json
 
     # Incremental mode self-diffs each profile against the ref the delta came from.
     # Against the baseline's TIP, an entry another change updated there (the
@@ -227,12 +241,16 @@ runs:
     - name: Apply Profile / Permission Set mode (REQ-006)
       if: steps.delta.outputs.has_changes == 'true'
       shell: bash
+      env:
+        SOURCE_PATH: ${{ inputs.source_path }}
+        PROFILES_MODE: ${{ inputs.profiles_mode }}
+        BASELINE: ${{ steps.delta.outputs.from_ref || format('origin/{0}', inputs.baseline_branch) }}
       run: |
         python3 "$GITHUB_ACTION_PATH/../scripts/profiles.py" \
           --package .sgd/package/package.xml \
-          --source-root "${{ inputs.source_path }}" \
-          --mode "${{ inputs.profiles_mode }}" \
-          --baseline "${{ steps.delta.outputs.from_ref || format('origin/{0}', inputs.baseline_branch) }}"
+          --source-root "$SOURCE_PATH" \
+          --mode "$PROFILES_MODE" \
+          --baseline "$BASELINE"
 
     - name: Deploy / validate / quick-deploy
       id: run
@@ -241,18 +259,21 @@ runs:
       shell: bash
       env:
         COVERAGE_GATE: ${{ inputs.coverage_gate }}
+        # Through env:, never pasted into the script: TESTS / UNTESTED are Apex
+        # file names from the branch and CANARY_TESTS is a config value, so a
+        # name like Mk$(cmd)Test must stay a string.
+        ALIAS: ${{ inputs.environment }}
+        CHECK: ${{ inputs.check_only }}
+        QUICK_ID: ${{ inputs.quick_deploy_id }}
+        REQUESTED_LEVEL: ${{ inputs.test_level }}
+        TESTS: ${{ steps.tests.outputs.tests }}
+        UNTESTED: ${{ steps.tests.outputs.untested }}
+        HAS_APEX: ${{ steps.scope.outputs.has_apex }}
+        APEX_DESTRUCTIVE: ${{ steps.scope.outputs.apex_destructive }}
+        BYPASS: ${{ inputs.bypass }}
+        CANARY_TESTS: ${{ inputs.destructive_test_names }}
       run: |
         set -euo pipefail
-        ALIAS="${{ inputs.environment }}"
-        CHECK="${{ inputs.check_only }}"
-        QUICK_ID="${{ inputs.quick_deploy_id }}"
-        REQUESTED_LEVEL="${{ inputs.test_level }}"
-        RESOLVED_LEVEL="${{ steps.tests.outputs.test_level }}"
-        TESTS="${{ steps.tests.outputs.tests }}"
-        HAS_APEX="${{ steps.scope.outputs.has_apex }}"
-        APEX_DESTRUCTIVE="${{ steps.scope.outputs.apex_destructive }}"
-        BYPASS="${{ inputs.bypass }}"
-        CANARY_TESTS="${{ inputs.destructive_test_names }}"
         PKG=".sgd/package/package.xml"
         DSTR=".sgd/destructiveChanges/destructiveChanges.xml"
         IS_PROD="false"
@@ -330,7 +351,6 @@ runs:
               # and fails on unrelated pre-existing red tests, masking the real
               # problem. Fail fast with actionable guidance so the developer adds
               # or renames a matching test class.
-              UNTESTED="${{ steps.tests.outputs.untested }}"
               [ -n "$UNTESTED" ] || UNTESTED="the changed Apex class(es)"
               MSG="No Apex test could be resolved for: ${UNTESTED}. RunSpecifiedTests requires each changed Apex class to have a matching test class named <Class>Test (also accepted: Test<Class>, <Class>_Test, <Class>Tests). Add or rename the test class so its name ends in 'Test', then push again. The pipeline will not fall back to running the whole org test suite."
               echo "::error::${MSG}"
@@ -493,6 +513,11 @@ runs:
         COVERAGE_OUTCOME: ${{ steps.coverage.outcome }}
         QUICK_JOB: ${{ steps.run.outputs.quick_job }}
         QUICK_OUTCOME: ${{ steps.quick.outcome }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        CHECK_ONLY: ${{ inputs.check_only }}
+        MODE: ${{ steps.run.outputs.mode }}
+        HAS_APEX: ${{ steps.scope.outputs.has_apex }}
+        LEVEL: ${{ steps.run.outputs.level }}
       run: |
         set -uo pipefail
         # A validated job handed to "Quick-deploy the validated job" (quick or
@@ -509,11 +534,11 @@ runs:
         python3 "$GITHUB_ACTION_PATH/../scripts/deploy_report.py" \
           --result deploy-result.json \
           --status "$STATUS_STR" \
-          --environment "${{ inputs.environment }}" \
-          --check-only "${{ inputs.check_only }}" \
-          --mode "${{ steps.run.outputs.mode }}" \
-          --has-apex "${{ steps.scope.outputs.has_apex }}" \
-          --test-level "${{ steps.run.outputs.level }}" \
+          --environment "$ENVIRONMENT" \
+          --check-only "$CHECK_ONLY" \
+          --mode "$MODE" \
+          --has-apex "$HAS_APEX" \
+          --test-level "$LEVEL" \
           --out-md .deploy/errors.md \
           --out-json .deploy/report.json
 
@@ -528,7 +553,9 @@ runs:
         AUDIT_CHECK_ONLY: ${{ inputs.check_only }}
         AUDIT_ACTOR: ${{ github.actor }}
         AUDIT_REF: ${{ inputs.ref }}
-        AUDIT_SHA: ${{ github.sha }}
+        # The commit deployed (what the delta was computed to), not github.sha:
+        # on a pull_request run that is a merge commit only the run ever had.
+        AUDIT_SHA: ${{ steps.delta.outputs.to_sha || inputs.ref }}
         AUDIT_PR: ${{ github.event.pull_request.number }}
         AUDIT_DEPLOY_ID: ${{ steps.quick.outputs.deploy_id || steps.run.outputs.deploy_id }}
         AUDIT_VALIDATION_ID: ${{ steps.run.outputs.validation_id }}
@@ -562,7 +589,7 @@ runs:
         AUDIT_TYPE: Deploy
         AUDIT_ENVIRONMENT: ${{ inputs.environment }}
         AUDIT_STATUS: ${{ steps.report.outputs.status }}
-        AUDIT_SHA: ${{ github.sha }}
+        AUDIT_SHA: ${{ steps.delta.outputs.to_sha || inputs.ref }}
       run: bash "$GITHUB_ACTION_PATH/../scripts/audit-append.sh"
 
     - name: No changes to deploy

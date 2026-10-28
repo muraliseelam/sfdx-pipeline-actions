@@ -320,10 +320,19 @@ def test_unsafe_values():
     check("rejects an api_version with shell characters", p.returncode != 0, True)
     p = plan(MINIMAL, "outputs", code="node_version: '22; id'\n", expect_fail=True)
     check("rejects a node_version with shell characters", p.returncode != 0, True)
+    for bad in ("../../etc", "/usr/bin", "22/../.."):
+        p = plan(MINIMAL, "outputs", code=f"node_version: '{bad}'\n", expect_fail=True)
+        check(f"rejects node_version {bad!r} like source_path", p.returncode != 0, True)
     o = plan(MINIMAL, "outputs", code="source_path: force-app/main\nnode_version: lts/*\napi_version: 66\n")
     check("accepts a nested source_path", o["source_path"], "force-app/main")
     check("accepts lts/* as node_version", o["node_version"], "lts/*")
     check("accepts an integer api_version", o["api_version"], "66")
+    for good in ("22", "22.x", "20.11.1", "lts/iron", "latest"):
+        o = plan(MINIMAL, "outputs", code=f"node_version: '{good}'\n")
+        check(f"accepts node_version {good!r}", o["node_version"], good)
+    for bad in ("force-app; echo x", "force-app\necho x"):
+        p = plan(MINIMAL, "outputs", code=f"source_path: {json.dumps(bad)}\n", expect_fail=True)
+        check(f"rejects source_path {bad!r}", p.returncode != 0, True)
 
 
 def test_outputs_declared():

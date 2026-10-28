@@ -10,12 +10,18 @@ that decide what reaches the org and what the report says can:
   * coverage-gate.py     — fails a low coverage; records it without failing
                            when Salesforce had already rejected the deploy
   * manifest_to_md.py    — member names cannot break the table
+  * specified_tests.py   — which tests run; a name that is not Apex is refused
+  * the deploy action    — its run: blocks take every value through env:, so a
+                           test class name like Mk$(cmd)Test stays a string
+  * audit.py             — the audit record names the deployed commit
 
 Run:  python3 tests/test_deploy_engine.py
 """
 import importlib.util
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +30,7 @@ import xml.etree.ElementTree as ET
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS = os.path.join(ROOT, "sf-pipeline", "scripts")
 COVERAGE_GATE = os.path.join(ROOT, "sf-pipeline", "coverage", "coverage-gate.py")
+DEPLOY_ACTION = os.path.join(ROOT, "sf-pipeline", "deploy", "action.yml")
 NS = "{http://soap.sforce.com/2006/04/metadata}"
 
 FAILURES = []
@@ -272,9 +279,264 @@ def test_manifest_to_md():
     check("a '|' in a member name is escaped", "| A\\|B Layout |" in md, True)
 
 
+# ---------------------------------------------------------------------------
+def specified(tmp, changed, classes, *extra):
+    """Run specified_tests.py on a delta of {type: [members]} and a source tree of
+    {class name: body}; return (rc, GITHUB_OUTPUT dict, stderr)."""
+    shutil.rmtree(os.path.join(tmp, ".sgd"), ignore_errors=True)
+    shutil.rmtree(os.path.join(tmp, "force-app"), ignore_errors=True)
+    os.makedirs(os.path.join(tmp, ".sgd", "package"))
+    open(os.path.join(tmp, ".sgd", "package", "package.xml"), "w", encoding="utf-8").write(manifest(changed))
+    cdir = os.path.join(tmp, "force-app", "main", "default", "classes")
+    os.makedirs(cdir)
+    for name, body in classes.items():
+        open(os.path.join(cdir, name + ".cls"), "w", encoding="utf-8").write(body)
+    out = os.path.join(tmp, "gh_output")
+    open(out, "w").close()
+    p = run([sys.executable, os.path.join(SCRIPTS, "specified_tests.py"), "--dir", ".sgd",
+             "--source-root", "force-app", *extra], tmp, {"GITHUB_OUTPUT": out})
+    vals = dict(line.split("=", 1) for line in open(out, encoding="utf-8").read().splitlines() if "=" in line)
+    return p.returncode, vals, p.stderr
+
+
+def test_specified_tests():
+    print("\n\033[1mspecified_tests.py — the tests a delta runs\033[0m")
+    test = "@isTest private class X { @isTest static void t() {} }"
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, o, _ = specified(tmp, {"ApexClass": ["Foo"]}, {"Foo": "public class Foo {}", "FooTest": test})
+        check("a changed class runs its <Class>Test", (rc, o["tests"], o["test_level"]),
+              (0, "FooTest", "RunSpecifiedTests"))
+        rc, o, _ = specified(tmp, {"ApexClass": ["Foo"]},
+                             {"Foo": "", "Foo_Test": test, "TestFoo": test, "FooTests": test})
+        check("Test<Class>, <Class>_Test and <Class>Tests are accepted too",
+              o["tests"], "FooTests,Foo_Test,TestFoo")
+        rc, o, _ = specified(tmp, {"ApexTrigger": ["AccountTrigger"]},
+                             {"AccountTriggerTest": "@IsTest class AccountTriggerTest {}"})
+        check("a trigger runs its test", o["tests"], "AccountTriggerTest")
+        rc, o, _ = specified(tmp, {"ApexClass": ["BarTest"]}, {"BarTest": "class B { static testMethod void t() {} }"})
+        check("a changed test class runs itself (legacy testMethod)", o["tests"], "BarTest")
+        rc, o, _ = specified(tmp, {"ApexClass": ["TestDataFactory"]}, {"TestDataFactory": "public class TestDataFactory {}"})
+        check("a class only NAMED like a test is not run", (o["tests"], o["untested"]), ("", "TestDataFactory"))
+        rc, o, _ = specified(tmp, {"ApexClass": ["Baz"]}, {"Baz": "", "BazTest": "public class BazTest {}"})
+        check("a candidate without @isTest is not a test", (o["tests"], o["untested"]), ("", "Baz"))
+        rc, o, _ = specified(tmp, {"ApexClass": ["Lonely"]}, {"Lonely": ""})
+        check("no matching test: untested listed, RunLocalTests for the caller to refuse",
+              (rc, o["tests"], o["untested"], o["test_level"]), (0, "", "Lonely", "RunLocalTests"))
+        rc, o, _ = specified(tmp, {"CustomField": ["Account.F__c"]}, {})
+        check("a delta without Apex resolves nothing", (rc, o["tests"], o["untested"]), (0, "", ""))
+
+        # A file name is not an Apex name: refused before it reaches the shell.
+        for bad in ("Mk$(touch INJECTED)Test", "Mk`id`Test", "Mk Test", "Mk;idTest", "1Foo"):
+            body = test.replace("X", "MkTest")
+            rc, o, err = specified(tmp, {"ApexClass": [bad]}, {bad: body}, "--result", "deploy-result.json")
+            check(f"refuses the class name {bad!r}", (rc, o), (1, {}))
+        check("and says why", "Not a valid Apex class or trigger name" in err, True)
+        res = os.path.join(tmp, "deploy-result.json")
+        msg = json.load(open(res, encoding="utf-8"))["message"] if os.path.exists(res) else ""
+        check("in the result the PR report renders", "'1Foo'" in msg, True)
+        rc, o, _ = specified(tmp, {"ApexClass": ["Foo", "Mk$(id)"]}, {"Foo": "", "FooTest": test})
+        check("one bad name refuses the whole delta", (rc, o), (1, {}))
+
+
+def deploy_steps():
+    import yaml
+    return yaml.safe_load(open(DEPLOY_ACTION, encoding="utf-8"))["runs"]["steps"]
+
+
+# What the "Deploy / validate / quick-deploy" step is given, by the expression the
+# runner evaluates for it.
+STEP_INPUTS = {
+    "ALIAS": "inputs.environment", "CHECK": "inputs.check_only", "QUICK_ID": "inputs.quick_deploy_id",
+    "REQUESTED_LEVEL": "inputs.test_level", "COVERAGE_GATE": "inputs.coverage_gate",
+    "BYPASS": "inputs.bypass", "CANARY_TESTS": "inputs.destructive_test_names",
+    "TESTS": "steps.tests.outputs.tests", "UNTESTED": "steps.tests.outputs.untested",
+    "HAS_APEX": "steps.scope.outputs.has_apex", "APEX_DESTRUCTIVE": "steps.scope.outputs.apex_destructive",
+}
+
+
+def render(text, values):
+    """The runner's ${{ }} substitution: textual, before bash ever sees the script."""
+    return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda m: values.get(m.group(1), ""), str(text))
+
+
+def run_deploy_step(tmp, pkg, dstr, **given):
+    """Run the deploy action's "Deploy / validate / quick-deploy" script as the runner
+    would (expressions substituted into env: and run:) with a fake `sf` that records
+    its arguments. Returns (rc, sf args or None, GITHUB_OUTPUT text)."""
+    step = next(s for s in deploy_steps() if s.get("id") == "run")
+    given = dict({"REQUESTED_LEVEL": "RunSpecifiedTests", "CHECK": "false", "COVERAGE_GATE": "false",
+                  "BYPASS": "false"}, **given)
+    values = {STEP_INPUTS[k]: v for k, v in given.items()}
+    base = {k: render(v, values) for k, v in (step.get("env") or {}).items()}
+    for d in (".sgd", "bin"):
+        shutil.rmtree(os.path.join(tmp, d), ignore_errors=True)
+    for f in ("INJECTED", "POC", "deploy-result.json"):
+        if os.path.exists(os.path.join(tmp, f)):
+            os.remove(os.path.join(tmp, f))
+    os.makedirs(os.path.join(tmp, ".sgd", "package"))
+    os.makedirs(os.path.join(tmp, ".sgd", "destructiveChanges"))
+    open(os.path.join(tmp, ".sgd", "package", "package.xml"), "w", encoding="utf-8").write(manifest(pkg))
+    if dstr:
+        open(os.path.join(tmp, ".sgd", "destructiveChanges", "destructiveChanges.xml"), "w",
+             encoding="utf-8").write(manifest(dstr))
+    os.makedirs(os.path.join(tmp, "bin"))
+    args_file = os.path.join(tmp, "sf-args")
+    if os.path.exists(args_file):
+        os.remove(args_file)
+    sf = os.path.join(tmp, "bin", "sf")
+    with open(sf, "w", newline="\n") as fh:
+        fh.write('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$SF_ARGS"\n'
+                 'echo \'{"status":0,"result":{"id":"0AfFAKE","success":true}}\'\n')
+    os.chmod(sf, 0o755)
+    script = os.path.join(tmp, "step.sh")
+    with open(script, "w", newline="\n", encoding="utf-8") as fh:
+        fh.write(render(step["run"], values))
+    out = os.path.join(tmp, "gh_output")
+    open(out, "w").close()
+    p = run(["bash", "step.sh"], tmp, dict(base, GITHUB_OUTPUT=out, SF_ARGS=args_file,
+                                            PATH=os.path.join(tmp, "bin") + os.pathsep + os.environ["PATH"]))
+    sf_args = open(args_file, encoding="utf-8").read().splitlines() if os.path.exists(args_file) else None
+    return p.returncode, sf_args, open(out, encoding="utf-8").read()
+
+
+def flag_value(args, flag):
+    args = args or []
+    return [args[i + 1] for i, a in enumerate(args) if a == flag]
+
+
+def test_deploy_action():
+    print("\n\033[1mdeploy action — values reach the shell as data\033[0m")
+    leaks = [f"{s.get('name')}: {s['run'].strip().splitlines()[0][:60]}"
+             for s in deploy_steps() if "run" in s and "${{" in s["run"]]
+    check("no run: block interpolates ${{ }} (everything goes through env:)", leaks, [])
+    audit = [s for s in deploy_steps() if "AUDIT_SHA" in (s.get("env") or {})]
+    check("the audit trail never records github.sha (a PR run's merge commit)",
+          [s["env"]["AUDIT_SHA"] for s in audit if "github.sha" in s["env"]["AUDIT_SHA"]], [])
+    check("both audit steps record the deployed commit", len(audit), 2)
+    if not shutil.which("bash"):
+        print("  (run-block checks skipped — bash is not available)")
+        return
+
+    apex = {"ApexClass": ["Mk"]}
+    with tempfile.TemporaryDirectory() as tmp:
+        hostile = "Mk$(touch INJECTED)Test"
+        rc, args, out = run_deploy_step(tmp, apex, None, ALIAS="int", CHECK="true", HAS_APEX="true",
+                                        TESTS=hostile + ",Other`touch INJECTED`Test")
+        check("a test name with $(...) runs nothing", os.path.exists(os.path.join(tmp, "INJECTED")), False)
+        check("and reaches sf as the literal string",
+              (rc, flag_value(args or [], "--tests")), (0, [hostile, "Other`touch INJECTED`Test"]))
+        check("as a validation with RunSpecifiedTests", "mode=validate" in out and "level=RunSpecifiedTests" in out, True)
+
+        rc, args, _ = run_deploy_step(tmp, apex, None, ALIAS="int", CHECK="true", HAS_APEX="true",
+                                      UNTESTED="Mk$(touch INJECTED)")
+        res = os.path.join(tmp, "deploy-result.json")
+        res = json.load(open(res, encoding="utf-8")) if os.path.exists(res) else {}
+        check("an untested name with $(...) runs nothing either",
+              (rc, args, os.path.exists(os.path.join(tmp, "INJECTED"))), (1, None, False))
+        check("and is quoted in the failure",
+              "No Apex test could be resolved for: Mk$(touch INJECTED)." in res.get("message", ""), True)
+
+        destr = {"ApexClass": ["OldClass"]}
+        rc, args, out = run_deploy_step(tmp, {}, destr, ALIAS="prod", CHECK="true", APEX_DESTRUCTIVE="true",
+                                        CANARY_TESTS="Canary$(touch POC)Test")
+        check("a production.destructive_tests value with $(...) runs nothing",
+              os.path.exists(os.path.join(tmp, "POC")), False)
+        check("the canary runs as given, RunSpecifiedTests",
+              (rc, flag_value(args, "--tests"), flag_value(args, "--test-level")),
+              (0, ["Canary$(touch POC)Test"], ["RunSpecifiedTests"]))
+
+        for check_only in ("true", "false"):
+            rc, args, _ = run_deploy_step(tmp, {}, destr, ALIAS="prod", CHECK=check_only, APEX_DESTRUCTIVE="true")
+            check(f"an Apex deletion to prod without a canary runs RunLocalTests (check_only={check_only})",
+                  (rc, flag_value(args, "--test-level"), "--post-destructive-changes" in (args or [])),
+                  (0, ["RunLocalTests"], True))
+            rc, args, _ = run_deploy_step(tmp, {}, destr, ALIAS="prod", CHECK=check_only, APEX_DESTRUCTIVE="true",
+                                          CANARY_TESTS="CanaryTest")
+            check(f"with a canary it runs RunSpecifiedTests, never NoTestRun (check_only={check_only})",
+                  (flag_value(args, "--test-level"), flag_value(args, "--tests")),
+                  (["RunSpecifiedTests"], ["CanaryTest"]))
+        rc, args, _ = run_deploy_step(tmp, {}, destr, ALIAS="qa", APEX_DESTRUCTIVE="true")
+        check("a sandbox Apex deletion may skip tests", flag_value(args, "--test-level"), ["NoTestRun"])
+
+        rc, args, out = run_deploy_step(tmp, {}, None, ALIAS="int")
+        check("nothing left after pruning: success, sf never called", (rc, args), (0, None))
+        check("reported as nothing-left", "mode=nothing-left" in out, True)
+
+
+def git(cwd, *args):
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args], cwd=cwd,
+                          input="", capture_output=True, text=True, check=True).stdout.strip()
+
+
+def delta(repo, write=True, **env):
+    """Run delta.sh in repo with a fake `sf sgd` (writes a package.xml unless
+    write=False). Returns (rc, GITHUB_OUTPUT dict, stdout+stderr)."""
+    bindir = os.path.join(os.path.dirname(repo), "bin")
+    os.makedirs(bindir, exist_ok=True)
+    with open(os.path.join(bindir, "sf"), "w", newline="\n") as fh:
+        fh.write('#!/usr/bin/env bash\nwhile [ $# -gt 0 ]; do [ "$1" = "--output-dir" ] && OUT="$2"; shift; done\n'
+                 '[ "$SF_WRITE" = "true" ] || exit 0\nmkdir -p "$OUT/package"\n'
+                 "printf '%s' '" + manifest({"ApexClass": ["Foo"]}) + "' > \"$OUT/package/package.xml\"\n")
+    os.chmod(os.path.join(bindir, "sf"), 0o755)
+    out = os.path.join(os.path.dirname(repo), "gh_output")
+    open(out, "w").close()
+    p = run(["bash", os.path.join(SCRIPTS, "delta.sh").replace("\\", "/")], repo,
+            dict(env, GITHUB_OUTPUT=out, SF_WRITE="true" if write else "false",
+                 PATH=bindir + os.pathsep + os.environ["PATH"]))
+    vals = dict(line.split("=", 1) for line in open(out, encoding="utf-8").read().splitlines() if "=" in line)
+    return p.returncode, vals, p.stdout + p.stderr
+
+
+def test_delta():
+    print("\n\033[1mdelta.sh — never a silent 'no changes'; names the commit it diffed to\033[0m")
+    if not shutil.which("bash") or not shutil.which("git"):
+        print("  (skipped — bash or git is not available)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = os.path.join(tmp, "repo")
+        os.makedirs(repo)
+        git(repo, "init", "-q")
+        git(repo, "checkout", "-q", "-b", "main")
+        open(os.path.join(repo, "a.txt"), "w").write("a")
+        git(repo, "add", ".")
+        git(repo, "commit", "-q", "-m", "base")
+        base = git(repo, "rev-parse", "HEAD")
+        git(repo, "update-ref", "refs/remotes/origin/main", base)
+        git(repo, "checkout", "-q", "-b", "feature")
+        open(os.path.join(repo, "b.txt"), "w").write("b")
+        git(repo, "add", ".")
+        git(repo, "commit", "-q", "-m", "feature")
+        head = git(repo, "rev-parse", "HEAD")
+        orphan = git(repo, "commit-tree", git(repo, "mktree"), "-m", "unrelated")
+        git(repo, "update-ref", "refs/remotes/origin/other", orphan)
+
+        rc, o, _ = delta(repo, DELTA_FROM="origin/main", DELTA_MERGE_BASE="true", DELTA_OUTPUT=".sgd")
+        check("three-dot: from the merge-base", (rc, o.get("from_ref"), o.get("has_changes")), (0, base, "true"))
+        check("to_sha is the commit diffed to (what gets deployed)", o.get("to_sha"), head)
+        rc, o, log = delta(repo, DELTA_FROM="origin/other", DELTA_MERGE_BASE="true", DELTA_OUTPUT=".sgd")
+        check("no merge-base (shallow / unrelated): the run fails",
+              (rc, "Refusing a two-dot diff" in log, o.get("has_changes")), (1, True, None))
+        rc, o, log = delta(repo, write=False, DELTA_FROM="origin/main", DELTA_MERGE_BASE="true", DELTA_OUTPUT=".sgd")
+        check("sgd writes no package.xml: the run fails, not 'no changes'",
+              (rc, "wrote no" in log, o.get("has_changes")), (1, True, None))
+
+
+def test_audit():
+    print("\n\033[1maudit.py — the record names the deployed commit\033[0m")
+    head = "d75fccf392d6a1b2c3d4e5f60718293a4b5c6d7e"
+    with tempfile.TemporaryDirectory() as tmp:
+        p = run([sys.executable, os.path.join(SCRIPTS, "audit.py")], tmp,
+                {"AUDIT_SHA": head, "AUDIT_REF": head, "AUDIT_ENVIRONMENT": "int",
+                 "AUDIT_STATUS": "success", "GITHUB_STEP_SUMMARY": ""})
+        rec = json.load(open(os.path.join(tmp, ".deploy", "audit-record.json"), encoding="utf-8"))
+        check("sha is the deployed commit, equal to ref", (p.returncode, rec["sha"], rec["ref"]), (0, head, head))
+        check("short_sha abbreviates it", rec["short_sha"], head[:8])
+
+
 def main():
     print("Deploy engine suite")
-    for fn in (test_prune, test_deploy_report, test_coverage_gate, test_manifest_to_md):
+    for fn in (test_prune, test_deploy_report, test_coverage_gate, test_manifest_to_md,
+               test_specified_tests, test_deploy_action, test_delta, test_audit):
         fn()
     print()
     if FAILURES:

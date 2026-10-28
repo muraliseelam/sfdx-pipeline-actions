@@ -45,7 +45,8 @@ CODE_KEYS = ("source_path", "api_version", "node_version")
 SAFE_VALUE = {
     "source_path": re.compile(r"^(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9_.][A-Za-z0-9_./-]*$"),
     "api_version": re.compile(r"^[0-9]+(\.[0-9]+)?$"),
-    "node_version": re.compile(r"^[A-Za-z0-9.*/_-]+$"),
+    # 22, 22.x, 20.11.1, lts/*, lts/iron, latest — never a path out of the tree.
+    "node_version": re.compile(r"^(?!/)(?!.*\.\.)[A-Za-z0-9.*/_-]+$"),
 }
 
 

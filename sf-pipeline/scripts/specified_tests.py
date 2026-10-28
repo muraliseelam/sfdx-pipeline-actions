@@ -19,10 +19,16 @@ If no specific tests can be resolved, emits test_level=RunLocalTests and lists t
 changed Apex classes that have no matching test in `untested=` so the caller can
 fail fast (a delta containing Apex requires a matching *Test class).
 
+The names come from file names in the branch. A changed class or trigger whose
+name is not an Apex identifier (letters, digits, underscores) is refused, exit 1,
+before it reaches a deploy command line; --result then gets a failure for the
+report, as the deploy step writes for an unresolved test.
+
 Usage:
-  python3 scripts/ci/specified_tests.py --dir .sgd [--source-root force-app]
+  python3 scripts/ci/specified_tests.py --dir .sgd [--source-root force-app] [--result deploy-result.json]
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -30,6 +36,7 @@ import xml.etree.ElementTree as ET
 
 NS = {"sf": "http://soap.sforce.com/2006/04/metadata"}
 TEST_RE = re.compile(r"(^Test)|(_?Tests?$)", re.IGNORECASE)
+APEX_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
 def changed_members(path, type_name):
@@ -81,6 +88,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=".sgd")
     ap.add_argument("--source-root", default="force-app")
+    ap.add_argument("--result", default="", help="write a failure result here for a refused name")
     args = ap.parse_args()
 
     pkg = os.path.join(args.dir, "package", "package.xml")
@@ -90,6 +98,16 @@ def main():
 
     tests = set()
     changed = classes + triggers
+    bad = [n for n in changed if not APEX_NAME_RE.match(n)]
+    if bad:
+        msg = ("Not a valid Apex class or trigger name: " + ", ".join(repr(n) for n in bad)
+               + ". Apex names are letters, digits and underscores, starting with a letter. "
+               "Rename the file(s) and push again; nothing was validated or deployed.")
+        print(f"::error::{msg}", file=sys.stderr)
+        if args.result:
+            with open(args.result, "w", encoding="utf-8") as fh:
+                json.dump({"status": 1, "result": {}, "message": msg}, fh)
+        return 1
     untested = []
     for name in changed:
         # A changed class is itself a runnable test only if it is named like a
@@ -125,7 +143,8 @@ def main():
             fh.write(f"tests={joined}\n")
             fh.write(f"test_level={level}\n")
             fh.write(f"untested={','.join(untested)}\n")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

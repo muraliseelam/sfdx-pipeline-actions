@@ -15,9 +15,10 @@
 #   package/package.xml                 - components to deploy
 #   destructiveChanges/destructiveChanges.xml - components to delete
 #
-# Outputs (to $GITHUB_OUTPUT): has_changes, output_dir, and from_ref — the ref
+# Outputs (to $GITHUB_OUTPUT): has_changes, output_dir, from_ref — the ref
 # the delta was really computed from (the merge-base in three-dot mode), which
-# anything that diffs against "the baseline" must use too.
+# anything that diffs against "the baseline" must use too — and to_sha, the
+# commit it was computed to (what the audit trail records as deployed).
 #
 # Fails, rather than reporting "no changes", when sfdx-git-delta fails or writes
 # no package.xml: a deploy treats "no changes" as success and merges.
@@ -98,10 +99,13 @@ if [ -f "$DESTRUCT" ] && grep -q "<types>" "$DESTRUCT"; then
   HAS_CHANGES="true"
 fi
 echo "Delta has deployable changes: $HAS_CHANGES"
+# The commit the delta was computed TO: what a deploy of it puts in the org.
+TO_SHA="$(git rev-parse --verify -q "${TO}^{commit}" || true)"
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {
     echo "has_changes=$HAS_CHANGES"
     echo "output_dir=$OUTPUT"
     echo "from_ref=$FROM"
+    echo "to_sha=$TO_SHA"
   } >> "$GITHUB_OUTPUT"
 fi
