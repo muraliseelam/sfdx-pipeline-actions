@@ -125,6 +125,9 @@ jobs:
           BR: ${{ steps.ver.outputs.branch }}
           STORIES: ${{ steps.gather.outputs.stories }}
           SHAS: ${{ steps.gather.outputs.shas }}
+          HELD: ${{ steps.gather.outputs.held }}
+          ENV_BRANCHES: ${{ needs.plan.outputs.env_branches }}
+          RELEASE_PREFIX: ${{ needs.plan.outputs.release_prefix }}
         run: |
           set -euo pipefail
           read -ra S <<< "${STORIES:-}"; read -ra H <<< "${SHAS:-}"
@@ -151,6 +154,28 @@ jobs:
           else
             git checkout -B "$BR" "origin/$PROD_BRANCH"
           fi
+          # A proven commit can hold other stories' work as its own ancestors, out
+          # of reach of the commit checks here: merging an env branch into a story
+          # branch (`git merge origin/int` to settle a conflict) brings in every
+          # story squashed there, held or never selected. Refuse it.
+          read -ra ENVS <<< "$(python3 -c 'import json,os; print(" ".join(json.loads(os.environ.get("ENV_BRANCHES") or "[]")))')"
+          RIDE=""
+          for i in "${!S[@]}"; do
+            git cat-file -e "${H[$i]}^{commit}" 2>/dev/null || git fetch --quiet origin "${H[$i]}"
+            for e in "${ENVS[@]}"; do
+              if [ "$e" = "$PROD_BRANCH" ] || ! git rev-parse -q --verify "origin/$e" >/dev/null; then continue; fi
+              C="$(comm -12 <(git rev-list --no-merges "${H[$i]}" "^origin/$PROD_BRANCH" | sort) \
+                            <(git rev-list --no-merges "origin/$e" "^origin/$PROD_BRANCH" | sort))"
+              if [ -n "$C" ]; then
+                RIDE="$RIDE"$'\n'"  ${S[$i]} @ ${H[$i]:0:8} has $(wc -l <<< "$C" | tr -d ' ') commit(s) of $e that $PROD_BRANCH doesn't:"$'\n'"$(git log --no-walk --format='    %h %s' --stdin <<< "$C")"
+              fi
+            done
+          done
+          if [ -n "$RIDE" ]; then
+            echo "::error::A story's deployed commit carries other stories' work from an env branch; it would reach production without being gathered, or while on hold:$RIDE"
+            echo "Rebase the story on $PROD_BRANCH instead of merging an env branch into it, take it through the stages again, then re-run."
+            exit 1
+          fi
           # Merge the commit each story deployed, not its branch: a commit pushed
           # after the promotions never ran in any environment.
           for i in "${!S[@]}"; do
@@ -163,6 +188,29 @@ jobs:
           EXTRA="$(git rev-list --no-merges --abbrev-commit HEAD "${EXCL[@]}")"
           if [ -n "$EXTRA" ]; then
             echo "::error::$BR contains commits that no story proven deployed to every stage accounts for: $(echo "$EXTRA" | xargs). Assemble a new version, or delete $BR and re-run."
+            exit 1
+          fi
+          # Nor the content of a story on hold, whichever way it came in (a merge
+          # of its branch, a cherry-pick): no file it changed may carry its version
+          # here unless the prod branch already has that version.
+          LEAK=""
+          for b in ${HELD:-}; do
+            # A release PR on hold is not a story.
+            case "$b" in "${RELEASE_PREFIX:-release/}"*) continue ;; esac
+            git rev-parse -q --verify "origin/$b" >/dev/null || continue
+            MB="$(git merge-base "origin/$PROD_BRANCH" "origin/$b" || true)"
+            [ -n "$MB" ] || continue
+            while IFS= read -r f; do
+              v="$(git rev-parse -q --verify "origin/$b:$f" || echo none)"
+              if [ "$v" != "$(git rev-parse -q --verify "origin/$PROD_BRANCH:$f" || echo none)" ] && \
+                 [ "$v" = "$(git rev-parse -q --verify "HEAD:$f" || echo none)" ]; then
+                LEAK="$LEAK"$'\n'"  $b: $f"
+              fi
+            done < <(git diff --name-only "$MB" "origin/$b" --)
+          done
+          if [ -n "$LEAK" ]; then
+            echo "::error::$BR would ship changes of stories on hold:$LEAK"
+            echo "Take the held change out of the story that carries it (or lift the hold), then re-run."
             exit 1
           fi
           if [ "$(git rev-list --count "origin/$PROD_BRANCH..HEAD")" = "0" ]; then
@@ -252,6 +300,10 @@ jobs:
           channel_id:  ${{ secrets.CHAT_CHANNEL_ID }}
       - uses: actions/checkout@v4
         with: { ref: "${{ needs.preflight.outputs.head_sha }}", fetch-depth: 0 }
+      # Three-dot, like every other stage: the release is cut from the prod
+      # branch, so their merge-base is what assemble started from. A two-dot diff
+      # against a prod branch that moved since (a hotfix, a rollback) turns every
+      # component only it has into a DELETION, and production would delete it.
       - id: deploy
         uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
         with:
@@ -262,6 +314,7 @@ jobs:
           destructive_test_names: ${{ needs.plan.outputs.prod_destructive_tests }}
           manifest_title: "Prod validation"
           baseline_branch: ${{ needs.plan.outputs.baseline_branch }}
+          delta_merge_base: "true"
           source_path: ${{ needs.plan.outputs.source_path }}
           api_version: ${{ needs.plan.outputs.api_version }}
           node_version: ${{ needs.plan.outputs.node_version }}
@@ -325,6 +378,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ needs.preflight.outputs.head_sha }}", fetch-depth: 0 }
+      # The approval can come hours after preflight. If the prod branch moved
+      # meanwhile (a hotfix or a rollback merged into it), this release doesn't
+      # contain that change, and deploying it would overwrite it in production.
+      - name: Prod branch unchanged since preflight
+        env:
+          PROD_BRANCH: ${{ needs.plan.outputs.prod_branch }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          git fetch --quiet origin "$PROD_BRANCH"
+          if ! git merge-base --is-ancestor "origin/$PROD_BRANCH" HEAD; then
+            echo "::error::$PROD_BRANCH has $(git rev-list --count "HEAD..origin/$PROD_BRANCH") commit(s) that v$VERSION doesn't (a hotfix or rollback merged after preflight). Deploying it would undo them in production. Nothing was deployed: run Prod Release with action assemble for v$VERSION, authorize the release PR again, then run release."
+            exit 1
+          fi
       # Same test settings as the validation, for the full deploy that runs when
       # there is no validated job (a delta without Apex).
       - uses: muraliseelam/sfdx-pipeline-actions/sf-pipeline/deploy@main
@@ -337,6 +403,7 @@ jobs:
           destructive_test_names: ${{ needs.plan.outputs.prod_destructive_tests }}
           manifest_title: "Prod deploy"
           baseline_branch: ${{ needs.plan.outputs.baseline_branch }}
+          delta_merge_base: "true"
           source_path: ${{ needs.plan.outputs.source_path }}
           api_version: ${{ needs.plan.outputs.api_version }}
           node_version: ${{ needs.plan.outputs.node_version }}

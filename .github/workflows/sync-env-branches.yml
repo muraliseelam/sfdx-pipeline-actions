@@ -58,8 +58,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_PAT || github.token }}
           PROD_BRANCH: ${{ needs.plan.outputs.prod_branch }}
+          BR: ${{ matrix.branch }}
         run: |
-          BR="${{ matrix.branch }}"
           git fetch origin --prune
           if ! git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
             echo "Branch $BR does not exist yet — creating it from $PROD_BRANCH."
@@ -75,7 +75,7 @@ jobs:
               # sync PR; if the org also blocks Actions from creating PRs, warn but
               # do NOT fail the release — the delta-vs-prod auto-sheds shipped stories.
               echo "::warning::Direct push to protected '$BR' was rejected — attempting a sync PR."
-              SYNC_BR="sync/${PROD_BRANCH}-into-${BR}-${{ github.run_id }}"
+              SYNC_BR="sync/${PROD_BRANCH}-into-${BR}-${GITHUB_RUN_ID}"
               git push origin "HEAD:$SYNC_BR" || true
               gh pr create --base "$BR" --head "$SYNC_BR" \
                 --title "Sync $PROD_BRANCH into $BR" \
@@ -85,7 +85,7 @@ jobs:
           else
             echo "::warning::Merge conflict syncing $PROD_BRANCH into $BR — opening a PR."
             git merge --abort
-            SYNC_BR="sync/${PROD_BRANCH}-into-${BR}-${{ github.run_id }}"
+            SYNC_BR="sync/${PROD_BRANCH}-into-${BR}-${GITHUB_RUN_ID}"
             # The PR carries $PROD_BRANCH's commits, so GitHub shows the conflicts
             # to resolve. (Cut from $BR it would have no commits and never open.)
             git checkout -B "$SYNC_BR" "origin/$PROD_BRANCH"

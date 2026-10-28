@@ -3,8 +3,9 @@ description: >-
   Verify the release is safe to ship to production. There must be an OPEN release
   PR (release/<version> → prod) that is authorized (a formal Approve review of its
   current commit OR the `prod-approved` label — a solo maintainer can't approve
-  their own PR), whose latest checks are all green, and that the pipeline has not
-  already deployed to production (`deployed_label`). Outputs the PR number for the
+  their own PR), whose latest checks are all green, that contains everything
+  already on the prod branch (nothing merged there since assemble), and that the
+  pipeline has not already deployed to production (`deployed_label`). Outputs the PR number for the
   post-deploy merge and the head commit, which is what gets validated, deployed and
   merged.
 
@@ -92,6 +93,15 @@ runs:
           echo "::error::Release PR #$NUM has $BAD non-passing/pending check(s) on ${SHA:0:8}."
           exit 1
         fi
+        # The release must contain everything already on $BASE_BRANCH. A hotfix
+        # or rollback merged there after assemble isn't in the release branch, so
+        # deploying the release would undo it in production. GitHub reports
+        # BEHIND only when protection requires up-to-date branches: ask git.
+        BEHIND_BY="$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_BRANCH...$SHA" --jq '.behind_by')"
+        if [ "${BEHIND_BY:-0}" != "0" ]; then
+          echo "::error::Release PR #$NUM is $BEHIND_BY commit(s) behind $BASE_BRANCH: something (a hotfix, a rollback) merged into $BASE_BRANCH after v$VERSION was assembled, and deploying the release as is would undo it in production. Nothing was deployed. Run the Assemble action for v$VERSION again (it merges $BASE_BRANCH in), authorize the release PR again, then re-run."
+          exit 1
+        fi
         # The release merges into $BASE_BRANCH AFTER the prod deploy. Refuse now if
         # branch protection would refuse that merge (e.g. a required review is
         # missing and only the label authorized it), so production is never
@@ -104,8 +114,8 @@ runs:
         done
         case "$MSS" in
           BLOCKED) echo "::error::Release PR #$NUM can't merge into $BASE_BRANCH yet — branch protection blocks it (usually a required review or an unresolved conversation). Nothing was deployed. Get the required approval(s), then re-run."; exit 1 ;;
-          DIRTY)   echo "::error::Release PR #$NUM conflicts with $BASE_BRANCH. Nothing was deployed. Assemble the release again."; exit 1 ;;
-          CLEAN|HAS_HOOKS|UNSTABLE|BEHIND) ;;
+          DIRTY|BEHIND) echo "::error::Release PR #$NUM conflicts with or is behind $BASE_BRANCH (mergeStateStatus=$MSS). Nothing was deployed. Assemble the release again."; exit 1 ;;
+          CLEAN|HAS_HOOKS|UNSTABLE) ;;
           *) echo "::warning::Could not tell whether #$NUM can merge into $BASE_BRANCH (mergeStateStatus='${MSS:-unknown}')." ;;
         esac
         echo "pr_number=$NUM" >> "$GITHUB_OUTPUT"

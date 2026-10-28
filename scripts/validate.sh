@@ -15,6 +15,7 @@
 #         an example caller for every reusable workflow
 #  11. every composite-action output a workflow or action reads is declared
 #  12. branch protection leaves no pipeline branch open
+#  12b. the release train ships only proven content, never behind production
 #  13. the example CODEOWNERS covers the caller workflows and the config
 #
 # Usage: ./scripts/validate.sh
@@ -340,6 +341,25 @@ if [[ -f tests/test_branch_protection.py ]]; then
   fi
 else
   fail "tests/test_branch_protection.py is missing"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "12b. Release train"
+# What reaches production: assemble ships only the gathered stories' own work,
+# the prod delta is three-dot and a release behind the prod branch never
+# deploys, finalize never tags what it could not merge, and the realign
+# restores protection per branch. Runs the real steps on local git repos with a
+# fake gh — offline.
+# ---------------------------------------------------------------------------
+if [[ -f tests/test_release_train.py ]]; then
+  if OUT=$(python3 tests/test_release_train.py 2>&1); then
+    pass "$(grep -oE 'All [0-9]+ checks passed|skipped.*' <<< "$OUT" | head -1 || echo 'release train suite passed')"
+  else
+    fail "release train suite failed:"
+    grep -E '✗|expected|actual|Error' <<< "$OUT" | sed 's/^/    /'
+  fi
+else
+  fail "tests/test_release_train.py is missing"
 fi
 
 # ---------------------------------------------------------------------------

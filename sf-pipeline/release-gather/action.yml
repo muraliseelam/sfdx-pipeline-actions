@@ -78,6 +78,11 @@ outputs:
       Space-separated deployed commit of each story, aligned with `stories`. Merge
       these, not the branches: a branch can move after its promotions.
     value: ${{ steps.gather.outputs.shas }}
+  held:
+    description: >-
+      Space-separated head branches of every PR carrying `exclude_label`, so the
+      caller can check that none of their content reached the release anyway.
+    value: ${{ steps.gather.outputs.held }}
 
 runs:
   using: composite
@@ -267,5 +272,5 @@ runs:
           exit 1
         fi
 
-        { echo "stories=$STORIES"; echo "keys=$KEYS"; echo "shas=$SHAS"; } >> "$GITHUB_OUTPUT"
+        { echo "stories=$STORIES"; echo "keys=$KEYS"; echo "shas=$SHAS"; echo "held=$HELD"; } >> "$GITHUB_OUTPUT"
         echo "Resolved release stories: $STORIES"
