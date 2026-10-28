@@ -607,6 +607,20 @@ def test_profiles_incremental():
             root = ET.parse(path).getroot()
             return p.returncode, sorted(fp.find(f"{NS}field").text for fp in root.findall(f"{NS}fieldPermissions"))
 
+        pr = load("profiles")
+        flat = os.path.join(repo, "src", "profiles")
+        os.makedirs(os.path.join(repo, "src", "permissionsets", "Ops"))
+        os.makedirs(flat)
+        open(os.path.join(flat, "Sales.profile-meta.xml"), "w").write(profile("true", "true"))
+        check("a profile outside main/default is found (source_path: src)",
+              pr.resolve_target(os.path.join(repo, "src"), "Profile", "Sales"),
+              ("file", os.path.join(repo, "src", "profiles", "Sales.profile-meta.xml")))
+        check("and a decomposed permission set",
+              pr.resolve_target(os.path.join(repo, "src"), "PermissionSet", "Ops"),
+              ("dir", os.path.join(repo, "src", "permissionsets", "Ops")))
+        check("a missing one is still reported missing",
+              pr.resolve_target(os.path.join(repo, "src"), "Profile", "Nope"), (None, None))
+
         merge_base = git(repo, "merge-base", "origin/int", "HEAD")
         check("against the merge-base (from_ref): only this branch's entry is deployed",
               kept(merge_base), (0, ["Account.A__c"]))

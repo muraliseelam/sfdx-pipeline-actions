@@ -266,6 +266,16 @@ jobs:
           description: Deployed ${{ needs.ctx.outputs.head_sha }} to ${{ needs.plan.outputs.env_name }} — merge unlocked
           environment: ${{ needs.plan.outputs.env_name }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+      # A failed deploy (validation, coverage gate, or a quick deploy Salesforce
+      # refused) drops `approved`, so adding it again starts a new deploy.
+      - name: Drop approved after a failed deploy
+        if: ${{ failure() && steps.deploy.outcome == 'failure' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.ctx.outputs.pr_number }}
+        run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/approved" >/dev/null 2>&1 || true
 
   # ---- Squash-merge the PR into the env branch after a successful deploy -------
   merge:

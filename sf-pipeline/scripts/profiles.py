@@ -142,6 +142,15 @@ def resolve_target(source_root, meta_type, member):
         return ("dir", decomposed_dir)
     if os.path.isfile(flat):
         return ("file", flat)
+    # Not the main/default layout (e.g. source_path: src with src/profiles/):
+    # look for it anywhere under the source root.
+    for dirpath, dirs, files in os.walk(source_root):
+        if os.path.basename(dirpath) != sub:
+            continue
+        if member in dirs:
+            return ("dir", os.path.join(dirpath, member))
+        if f"{member}.{ext}-meta.xml" in files:
+            return ("file", os.path.join(dirpath, f"{member}.{ext}-meta.xml"))
     return (None, None)
 
 
