@@ -150,7 +150,7 @@ Point your first Salesforce project at it using
 ## Checklist
 
 - [ ] `personalize.sh` run, no placeholders left
-- [ ] `validate.sh` — all thirteen checks pass
+- [ ] `validate.sh` — every check passes ("All checks passed.")
 - [ ] `main` pushed
 - [ ] `v1.0.0` **and** `v1` tags pushed
 - [ ] `verify-tag.sh v1` passes
